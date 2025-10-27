@@ -299,6 +299,405 @@ def handle_whatsapp_onboarding(user, session, message_text):
         logger.error(f"Error in WhatsApp onboarding: {str(e)}")
         return "I'm sorry, there was an error. Please try again."
 
+def handle_whatsapp_order_flow(user, session, message_text, order_session, db_service, enhanced_order_service):
+    """Handle WhatsApp-specific order flow without selection boxes"""
+    try:
+        warehouse_location = user.warehouse_location
+        warehouse = db_service.get_warehouse_by_location(warehouse_location)
+        
+        if not warehouse:
+            return "I couldn't find your warehouse information. Please contact support."
+        
+        products = db_service.get_products_by_warehouse(warehouse.id)
+        
+        # Check if user wants to place order (finalize)
+        if any(keyword in message_text.lower() for keyword in ['confirm order', 'place order', 'checkout', 'finalize']):
+            if not order_session['items']:
+                return "Your cart is empty! Please add some products first.\n\nType 'add [product name] [quantity]' to add items."
+            
+            # Create the order
+            try:
+                order_result = enhanced_order_service.create_order_from_cart(
+                    user_email=user.email,
+                    cart_items=order_session['items'],
+                    warehouse_id=warehouse.id
+                )
+                
+                if order_result.get('success'):
+                    order_id = order_result.get('order_id')
+                    order_session['status'] = 'completed'
+                    order_session['order_id'] = order_id
+                    order_session['items'] = []  # Clear cart
+                    order_session['total_cost'] = 0
+                    order_session['final_total'] = 0
+                    
+                    return f"""✅ **Order Placed Successfully!**
+
+📋 **Order ID:** {order_id}
+📅 **Date:** {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}
+🏢 **Warehouse:** {warehouse_location}
+
+**Order Summary:**
+{order_result.get('order_summary', 'Order details will be sent via email.')}
+
+**Next Steps:**
+• You'll receive an email confirmation shortly
+• Track your order anytime by typing 'track my order'
+• Contact support if you have any questions
+
+Thank you for choosing Quantum Blue! 🚀"""
+                else:
+                    return f"❌ **Order Failed:** {order_result.get('error', 'Unknown error occurred')}\n\nPlease try again or contact support."
+                    
+            except Exception as e:
+                logger.error(f"WhatsApp Order creation error: {str(e)}")
+                return "❌ **Order Failed:** I encountered an error processing your order. Please try again or contact support."
+        
+        # Check if user wants to remove items
+        elif any(keyword in message_text.lower() for keyword in ['remove', 'delete']):
+            import re
+            remove_patterns = [
+                r'remove\s+(.+?)$',
+                r'delete\s+(.+?)$'
+            ]
+            
+            removed_items = []
+            for pattern in remove_patterns:
+                match = re.search(pattern, message_text.lower())
+                if match:
+                    product_name = match.group(1).strip()
+                    product_name_lower = product_name.lower()
+                    
+                    # Find and remove the item
+                    for i, item in enumerate(order_session['items']):
+                        if (product_name_lower == item['product_name'].lower() or 
+                            product_name_lower in item['product_name'].lower()):
+                            removed_item = order_session['items'].pop(i)
+                            order_session['total_cost'] -= removed_item['item_total']
+                            order_session['final_total'] -= removed_item['item_total']
+                            removed_items.append(removed_item)
+                            logger.info(f"WhatsApp Removed item: {removed_item['product_name']}")
+                            break
+                    break
+            
+            if removed_items:
+                cart_summary = "**Updated Cart:**\n\n"
+                for item in order_session['items']:
+                    cart_summary += f"📦 {item['product_name']} - {item['quantity']} units - ₹{item['item_total']:,.2f}\n"
+                
+                response = f"""✅ **Products Removed from Cart!**
+
+{cart_summary}
+
+💰 **New Total: ₹{order_session['final_total']:,.2f}**
+
+**Next Steps:**\n"""
+                response += "• Type 'add [product name] [quantity]' to add more items\n"
+                response += "• Type 'confirm order' to proceed with checkout\n"
+                
+                return response
+            else:
+                return "I couldn't find the product you mentioned to remove. Please check the product name and try again."
+        
+        # Check if user wants to add items
+        elif 'add' in message_text.lower():
+            import re
+            add_patterns = [
+                r'add\s+(\d+)\s+(.+?)(?:\s+to\s+cart)?$',
+                r'add\s+(.+?)\s+(\d+)(?:\s+to\s+cart)?$',
+                r'add\s+(.+?)$'
+            ]
+            
+            added_items = []
+            for pattern in add_patterns:
+                match = re.search(pattern, message_text.lower())
+                if match:
+                    if len(match.groups()) == 2:
+                        if match.group(1).isdigit():
+                            quantity = int(match.group(1))
+                            product_name = match.group(2).strip()
+                        else:
+                            quantity = int(match.group(2))
+                            product_name = match.group(1).strip()
+                    else:
+                        quantity = 1
+                        product_name = match.group(1).strip()
+                    
+                    # Enhanced product matching
+                    product = None
+                    product_name_lower = product_name.lower()
+                    
+                    # Try exact matches first
+                    for p in products:
+                        if (product_name_lower == p.product_name.lower() or 
+                            product_name_lower == p.product_code.lower()):
+                            product = p
+                            break
+                    
+                    # Try partial matches if exact match fails
+                    if not product:
+                        for p in products:
+                            if (product_name_lower in p.product_name.lower() or 
+                                p.product_code.lower() in product_name_lower or
+                                any(word in p.product_name.lower() for word in product_name_lower.split() if len(word) > 2)):
+                                product = p
+                                break
+                    
+                    if product:
+                        logger.info(f"WhatsApp Product found: {product.product_name} ({product.product_code})")
+                        # Calculate pricing
+                        pricing_info = db_service.get_product_pricing(product.id, quantity)
+                        
+                        # Add to existing cart or create new item
+                        existing_item = None
+                        for item in order_session['items']:
+                            if item['product_code'] == product.product_code:
+                                existing_item = item
+                                break
+                        
+                        if existing_item:
+                            # Update existing item
+                            existing_item['quantity'] += quantity
+                            existing_item['item_total'] += pricing_info['total_amount']
+                            logger.info(f"WhatsApp Updated existing item: {product.product_name}")
+                        else:
+                            # Add new item
+                            new_item = {
+                                'product_name': product.product_name,
+                                'product_code': product.product_code,
+                                'quantity': quantity,
+                                'unit_price': pricing_info['base_price'],
+                                'final_price': pricing_info['final_price'],
+                                'discount_percentage': pricing_info['discount_percentage'],
+                                'scheme_name': pricing_info['scheme_name'],
+                                'item_total': pricing_info['total_amount']
+                            }
+                            order_session['items'].append(new_item)
+                            logger.info(f"WhatsApp Added new item: {product.product_name}")
+                        
+                        # Update totals
+                        order_session['total_cost'] += pricing_info['total_amount']
+                        order_session['final_total'] += pricing_info['total_amount']
+                        
+                        added_items.append({
+                            'name': product.product_name,
+                            'quantity': quantity,
+                            'total': pricing_info['total_amount']
+                        })
+                    else:
+                        logger.warning(f"WhatsApp Product not found for: {product_name}")
+                    break
+            
+            if added_items:
+                # Create updated cart summary
+                cart_summary = "**Updated Cart:**\n\n"
+                for item in order_session['items']:
+                    cart_summary += f"📦 {item['product_name']} - {item['quantity']} units - ₹{item['item_total']:,.2f}\n"
+                
+                response = f"""✅ **Products Added to Cart!**
+
+{cart_summary}
+
+💰 **New Total: ₹{order_session['final_total']:,.2f}**
+
+**Updated Order Calculations:**
+
+"""
+                
+                for item in order_session['items']:
+                    response += f"""**{item['product_name']} (QB{item['product_code'][2:]})**
+   • Quantity: {item['quantity']} units
+   • Base Price: ₹{item['unit_price']:,.2f} each
+   • Discount: {item['discount_percentage']:.1f}% off
+   • Final Price: ₹{item['final_price']:,.2f} each
+   • Scheme: {item['scheme_name']}
+   • Item Total: ₹{item['item_total']:,.2f}
+
+"""
+                
+                # Add recommended products
+                if len(order_session['items']) < 3:  # Suggest more if cart is small
+                    response += "\n**💡 Recommended Add-ons:**\n"
+                    available_products = [p for p in products if not any(item['product_code'] == p.product_code for item in order_session['items'])]
+                    for i, product in enumerate(available_products[:3]):
+                        response += f"• {product.product_name} - ₹{product.base_price:,.2f}\n"
+                
+                response += "\n**Next Steps:**\n"
+                response += "• Type 'add [product name] [quantity]' to add more items\n"
+                response += "• Type 'remove [product name]' to remove items\n"
+                response += "• Type 'confirm order' to proceed with checkout\n"
+                
+                return response
+            else:
+                return "I couldn't find the product you mentioned. Please check the product name and try again."
+        
+        # Initial order request - show product catalog
+        else:
+            if not order_session['items']:
+                response = f"""🛒 **Welcome to Quantum Blue Ordering!**
+
+**Your Warehouse:** {warehouse_location}
+
+**Available Products:**
+
+"""
+                for product in products[:10]:  # Show first 10 products
+                    response += f"📦 **{product.product_name}** (QB{product.product_code[2:]})\n"
+                    response += f"   • Price: ₹{product.base_price:,.2f}\n"
+                    response += f"   • Description: {product.description[:100]}...\n\n"
+                
+                if len(products) > 10:
+                    response += f"... and {len(products) - 10} more products available!\n\n"
+                
+                response += """**How to Order:**
+• Type 'add [product name] [quantity]' to add items
+• Example: 'add Quantum Blue Cable 5'
+• Type 'confirm order' when ready to checkout
+
+**Need Help?**
+• Type 'catalog' to see all products
+• Type 'help' for ordering instructions"""
+                
+                return response
+            else:
+                # Show current cart
+                cart_summary = "**Current Cart:**\n\n"
+                for item in order_session['items']:
+                    cart_summary += f"📦 {item['product_name']} - {item['quantity']} units - ₹{item['item_total']:,.2f}\n"
+                
+                response = f"""🛒 **Your Current Cart:**
+
+{cart_summary}
+
+💰 **Total: ₹{order_session['final_total']:,.2f}**
+
+**Next Steps:**\n"""
+                response += "• Type 'add [product name] [quantity]' to add more items\n"
+                response += "• Type 'remove [product name]' to remove items\n"
+                response += "• Type 'confirm order' to proceed with checkout\n"
+                
+                return response
+                
+    except Exception as e:
+        logger.error(f"WhatsApp Order flow error: {str(e)}")
+        return "I'm sorry, I encountered an error processing your order. Please try again later."
+
+def handle_whatsapp_tracking_flow(user, session, message_text, tracking_session, db_service):
+    """Handle WhatsApp-specific order tracking flow"""
+    try:
+        orders = db_service.get_orders_by_email(user.email)
+        
+        if not orders:
+            return """📋 **No Orders Found**
+
+You haven't placed any orders yet. 
+
+**To place your first order:**
+• Type 'place order' to start ordering
+• Type 'add [product name] [quantity]' to add items to cart
+• Type 'confirm order' when ready to checkout
+
+Need help? Type 'help' for more information."""
+        
+        # Check if user is asking for specific order details
+        import re
+        order_id_patterns = [r'QB\d+', r'order\s+(\d+)', r'track\s+(\d+)']
+        specific_order_id = None
+        
+        for pattern in order_id_patterns:
+            match = re.search(pattern, message_text.upper())
+            if match:
+                if pattern == r'QB\d+':
+                    specific_order_id = match.group(0)
+                else:
+                    specific_order_id = f"QB{match.group(1)}"
+                break
+        
+        if specific_order_id:
+            # Find specific order
+            target_order = None
+            for order in orders:
+                if order.order_id == specific_order_id:
+                    target_order = order
+                    break
+            
+            if target_order:
+                # Show detailed order information
+                response = f"""📋 **Order Details**
+
+**Order ID:** {target_order.order_id}
+**Status:** {target_order.status}
+**Date:** {target_order.order_date.strftime('%Y-%m-%d %H:%M')}
+**Warehouse:** {target_order.warehouse_location}
+**Total Amount:** ₹{target_order.total_amount:,.2f}
+
+**Order Items:**
+"""
+                
+                # Get order items
+                try:
+                    order_items = db_service.get_order_items(target_order.id)
+                    for item in order_items:
+                        response += f"• {item.product_name} - {item.quantity} units - ₹{item.total_price:,.2f}\n"
+                except Exception as e:
+                    logger.error(f"Error getting order items: {str(e)}")
+                    response += "• Order items details not available\n"
+                
+                response += f"""
+**Next Steps:**
+• Type 'track my order' to see all your orders
+• Type 'place order' to place a new order
+• Contact support if you have questions about this order"""
+                
+                return response
+            else:
+                return f"""❌ **Order Not Found**
+
+I couldn't find order {specific_order_id} in your account.
+
+**Your Recent Orders:**
+"""
+        
+        # Show all orders in a WhatsApp-friendly format
+        response = f"""📋 **Your Orders ({len(orders)} total)**
+
+"""
+        
+        for i, order in enumerate(orders[:5]):  # Show last 5 orders
+            status_emoji = {
+                'pending': '⏳',
+                'confirmed': '✅',
+                'processing': '🔄',
+                'shipped': '🚚',
+                'delivered': '📦',
+                'cancelled': '❌'
+            }.get(order.status.lower(), '📋')
+            
+            response += f"""{status_emoji} **{order.order_id}**
+   • Status: {order.status}
+   • Date: {order.order_date.strftime('%Y-%m-%d')}
+   • Amount: ₹{order.total_amount:,.2f}
+   • Warehouse: {order.warehouse_location}
+
+"""
+        
+        if len(orders) > 5:
+            response += f"... and {len(orders) - 5} more orders\n\n"
+        
+        response += """**To get details of a specific order:**
+• Type 'track QB[order_number]'
+• Example: 'track QB12345'
+
+**Other options:**
+• Type 'place order' to place a new order
+• Type 'help' for more information"""
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"WhatsApp Tracking flow error: {str(e)}")
+        return "I'm sorry, I encountered an error retrieving your orders. Please try again later."
+
 def handle_whatsapp_chat(user, session, message_text):
     """Handle WhatsApp chat after onboarding is complete - implementing same flow as web interface"""
     try:
@@ -368,13 +767,9 @@ def handle_whatsapp_chat(user, session, message_text):
         logger.info(f"WhatsApp Order session status: {order_session['status']}")
         logger.info(f"WhatsApp Order session items: {len(order_session['items'])}")
         
-        # Process based on classification (same logic as web interface)
-        if intent == 'CALCULATE_COST' or 'add' in message_text.lower():
-            # Handle adding products to cart - same logic as web interface
-            if 'add' in message_text.lower():
-                # If order session is not in the right state, initialize it
-                if order_session['status'] not in ['confirming', 'calculating']:
-                    order_session['status'] = 'confirming'
+        # Process based on classification - WhatsApp-specific flow
+        if intent == 'CALCULATE_COST' or 'add' in message_text.lower() or 'place order' in message_text.lower():
+            return handle_whatsapp_order_flow(user, session, message_text, order_session, db_service, enhanced_order_service)
                     order_session['pending_confirmation'] = True
                 
                 # Load products from warehouse for product matching
@@ -788,8 +1183,7 @@ We're excited to deliver cutting-edge technology to you. If you have any questio
                 return response
         
         elif intent == 'TRACK_ORDER':
-            # Handle order tracking - same logic as web interface
-            orders = db_service.get_orders_by_email(user.email)
+            return handle_whatsapp_tracking_flow(user, session, message_text, tracking_session, db_service)
             
             # Check if user is asking for specific order details
             order_id_patterns = ['QB', 'order', 'track']
