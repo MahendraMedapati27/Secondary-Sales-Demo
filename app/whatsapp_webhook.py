@@ -972,7 +972,7 @@ Would you like to track another order or need more information?"""
             search_result = web_search_service.search_with_synthesis(message_text, message_text)
             if search_result.get('synthesized_response'):
                 response = search_result.get('synthesized_response')
-        else:
+            else:
                 # Fallback to database company info
                 company_info = db_service.get_company_info()
                 response = f"""Welcome to {company_info['company_name']}!
