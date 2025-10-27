@@ -199,32 +199,33 @@ def handle_whatsapp_onboarding(user, session, message_text):
     """Handle WhatsApp onboarding flow"""
     try:
         # Check onboarding state from user's phone number as session key
-        onboarding_state = user.onboarding_state or 'ask_name'
+        onboarding_state = getattr(user, 'onboarding_state', None) or 'ask_name'
         
         if onboarding_state == 'ask_name':
             # Update user's onboarding state
-            user.onboarding_state = 'get_name'
+            if hasattr(user, 'onboarding_state'):
+                user.onboarding_state = 'get_name'
             db.session.commit()
             return "Hi! Welcome to Quantum Blue. What's your name?"
         
         elif onboarding_state == 'get_name':
             # Store name and move to email
             user.name = message_text[:100]
-            user.onboarding_state = 'ask_email'
+            if hasattr(user, 'onboarding_state'):
+                user.onboarding_state = 'ask_email'
             db.session.commit()
             return "Thanks! Please share your email address."
         
         elif onboarding_state == 'ask_email':
-            # Store email and move to phone verification
+            # Store email and move directly to OTP generation (skip phone since we already have it)
             email = message_text[:120]
+            # Basic email validation
+            if '@' not in email or '.' not in email:
+                return "Please enter a valid email address."
+            
             user.email = email
-            user.onboarding_state = 'ask_phone'
-            db.session.commit()
-            return "Got it! What's your phone number?"
-        
-        elif onboarding_state == 'ask_phone':
-            # Phone is already set, generate OTP
-            user.onboarding_state = 'await_otp'
+            if hasattr(user, 'onboarding_state'):
+                user.onboarding_state = 'await_otp'
             otp = user.generate_otp()
             db.session.commit()
             
@@ -232,13 +233,18 @@ def handle_whatsapp_onboarding(user, session, message_text):
             from app.email_utils import send_otp_email
             send_otp_email(user.email, user.name, otp)
             
-            return "We have sent an OTP to your email. Please enter the 6-digit OTP to verify."
+            return "Got it! We have sent an OTP to your email. Please enter the 6-digit OTP to verify."
         
         elif onboarding_state == 'await_otp':
             # Verify OTP
-            if user.verify_otp(message_text, expiration=600):  # 10 minutes
+            otp_input = message_text.strip()
+            if not otp_input.isdigit() or len(otp_input) != 6:
+                return "Please enter a valid 6-digit OTP."
+                
+            if user.verify_otp(otp_input, expiration=600):  # 10 minutes
                 user.verify_email()
-                user.onboarding_state = 'ask_warehouse'
+                if hasattr(user, 'onboarding_state'):
+                    user.onboarding_state = 'ask_warehouse'
                 db.session.commit()
                 
                 # Get warehouse options
@@ -251,9 +257,21 @@ def handle_whatsapp_onboarding(user, session, message_text):
                 return "Invalid or expired OTP. Please try again."
         
         elif onboarding_state == 'ask_warehouse':
+            # Validate warehouse selection
+            db_service = get_db_service()
+            warehouses = db_service.get_warehouses()
+            warehouse_names = [w.location_name.lower() for w in warehouses]
+            
+            selected_warehouse = message_text.strip()
+            if selected_warehouse.lower() not in warehouse_names:
+                # Show available options again
+                warehouse_options = [w.location_name for w in warehouses]
+                return f"Please select a valid warehouse location:\n\n" + "\n".join([f"• {w}" for w in warehouse_options]) + "\n\nType the exact name of your preferred location."
+            
             # Set warehouse location
-            user.warehouse_location = message_text
-            user.onboarding_state = 'completed'
+            user.warehouse_location = selected_warehouse
+            if hasattr(user, 'onboarding_state'):
+                user.onboarding_state = 'completed'
             user.last_verification = datetime.utcnow()
             db.session.commit()
             
@@ -261,7 +279,8 @@ def handle_whatsapp_onboarding(user, session, message_text):
         
         else:
             # Fallback to ask name
-            user.onboarding_state = 'ask_name'
+            if hasattr(user, 'onboarding_state'):
+                user.onboarding_state = 'ask_name'
             db.session.commit()
             return "Hi! Welcome to Quantum Blue. What's your name?"
             
@@ -315,10 +334,17 @@ def handle_whatsapp_chat(user, session, message_text):
         }
         
         # Store session data in user model (since WhatsApp doesn't have Flask sessions)
-        if not hasattr(user, 'whatsapp_session_data') or user.whatsapp_session_data is None:
-            user.whatsapp_session_data = whatsapp_session_data
+        if hasattr(user, 'whatsapp_session_data'):
+            if user.whatsapp_session_data is None:
+                user.whatsapp_session_data = whatsapp_session_data
+            else:
+                whatsapp_session_data = user.whatsapp_session_data
         else:
-            whatsapp_session_data = user.whatsapp_session_data
+            # If column doesn't exist, use a simple fallback approach
+            whatsapp_session_data = {
+                'order_session': {'status': 'idle', 'items': [], 'total_cost': 0, 'discount_applied': 0, 'final_total': 0, 'order_id': None, 'cart_id': None, 'last_updated': datetime.utcnow().isoformat(), 'user_selections': [], 'pending_confirmation': False},
+                'tracking_session': {'status': 'idle', 'selected_order_id': None, 'order_details': None, 'available_orders': []}
+            }
         
         order_session = whatsapp_session_data['order_session']
         tracking_session = whatsapp_session_data['tracking_session']
@@ -507,8 +533,9 @@ To help you better, please use one of these formats:
 Please try again with the exact product name, and I'll be happy to add it to your order!"""
                 
                 # Save session data back to user
-                user.whatsapp_session_data = whatsapp_session_data
-                db.session.commit()
+                if hasattr(user, 'whatsapp_session_data'):
+                    user.whatsapp_session_data = whatsapp_session_data
+                    db.session.commit()
                 return response
             
             # Handle removing products from cart
@@ -565,8 +592,9 @@ Please try again with the exact product name, and I'll be happy to add it to you
                     response = "I couldn't find that product in your cart. Please check the product name and try again."
                 
                 # Save session data back to user
-                user.whatsapp_session_data = whatsapp_session_data
-                db.session.commit()
+                if hasattr(user, 'whatsapp_session_data'):
+                    user.whatsapp_session_data = whatsapp_session_data
+                    db.session.commit()
                 return response
         
         elif intent == 'PLACE_ORDER':
@@ -684,7 +712,7 @@ Would you like to add more products or proceed with your order?"""
                         
                         # Create the order
                         order, message = enhanced_order_service.create_order_from_cart(
-                            user_id=user.id,
+                user_id=user.id,
                             cart_items=cart_items,
                             warehouse_id=warehouse.id,
                             warehouse_location=warehouse_location,
@@ -856,17 +884,18 @@ Would you like to track another order or need more information?"""
                             'updated_at': order.updated_at.isoformat()
                         })
                 
-                if orders:
+            if orders:
                     response = "Here are your recent orders. Please select one to track:\n\n"
                     for i, order in enumerate(orders[:5], 1):
                         response += f"{i}. Order {order.order_id} - {order.status} (₹{order.total_amount:,.2f}) - {order.order_date.strftime('%Y-%m-%d')}\n"
                     response += "\nPlease specify the order ID or number to track."
-                else:
+            else:
                     response = "You don't have any orders yet. Would you like to place a new order?"
             
             # Save session data back to user
-            user.whatsapp_session_data = whatsapp_session_data
-            db.session.commit()
+            if hasattr(user, 'whatsapp_session_data'):
+                user.whatsapp_session_data = whatsapp_session_data
+                db.session.commit()
             return response
         
         elif intent == 'COMPANY_INFO':
@@ -874,7 +903,7 @@ Would you like to track another order or need more information?"""
             search_result = web_search_service.search_with_synthesis(message_text, message_text)
             if search_result.get('synthesized_response'):
                 response = search_result.get('synthesized_response')
-            else:
+        else:
                 # Fallback to database company info
                 company_info = db_service.get_company_info()
                 response = f"""Welcome to {company_info['company_name']}!
@@ -913,7 +942,7 @@ How can I help you today?"""
 • **General Questions** - Ask me anything!
 
 How can I assist you today?""")
-            return response
+        return response
         
     except Exception as e:
         logger.error(f"WhatsApp Error in chat: {str(e)}")
