@@ -15,11 +15,7 @@ python-dateutil==2.8.2
 pyjwt==2.8.0
 gunicorn==21.2.0
 pyotp==2.9.0
-<<<<<<< HEAD
-
-
 groq==0.32.0
->>>>>>> 324d444fba9827ff96b2202f21329cd46303f952
 tavily-python==0.3.0
 fastapi==0.104.1
 uvicorn==0.24.0
