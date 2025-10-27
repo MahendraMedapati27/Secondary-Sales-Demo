@@ -506,12 +506,12 @@ Thank you for choosing Quantum Blue! 🚀"""
                 
                 for item in order_session['items']:
                     response += f"""**{item['product_name']} (QB{item['product_code'][2:]})**
-   • Quantity: {item['quantity']} units
-   • Base Price: ₹{item['unit_price']:,.2f} each
-   • Discount: {item['discount_percentage']:.1f}% off
-   • Final Price: ₹{item['final_price']:,.2f} each
-   • Scheme: {item['scheme_name']}
-   • Item Total: ₹{item['item_total']:,.2f}
+    • Quantity: {item['quantity']} units
+    • Base Price: ₹{item['unit_price']:,.2f} each
+    • Discount: {item['discount_percentage']:.1f}% off
+    • Final Price: ₹{item['final_price']:,.2f} each
+    • Scheme: {item['scheme_name']}
+    • Item Total: ₹{item['item_total']:,.2f}
 
 """
                 
@@ -674,10 +674,10 @@ I couldn't find order {specific_order_id} in your account.
             }.get(order.status.lower(), '📋')
             
             response += f"""{status_emoji} **{order.order_id}**
-   • Status: {order.status}
-   • Date: {order.order_date.strftime('%Y-%m-%d')}
-   • Amount: ₹{order.total_amount:,.2f}
-   • Warehouse: {order.warehouse_location}
+    • Status: {order.status}
+    • Date: {order.order_date.strftime('%Y-%m-%d')}
+    • Amount: ₹{order.total_amount:,.2f}
+    • Warehouse: {order.warehouse_location}
 
 """
         
@@ -772,94 +772,93 @@ def handle_whatsapp_chat(user, session, message_text):
             return handle_whatsapp_order_flow(user, session, message_text, order_session, db_service, enhanced_order_service)
         
         elif intent == 'PLACE_ORDER':
-                
-                # Parse add product request with enhanced pattern matching
-                import re
-                add_patterns = [
-                    r'add\s+(\d+)\s+(.+?)(?:\s+to\s+cart)?$',
-                    r'add\s+(.+?)\s+(\d+)(?:\s+to\s+cart)?$',
-                    r'add\s+(.+?)$'
-                ]
-                
-                added_items = []
-                for pattern in add_patterns:
-                    match = re.search(pattern, message_text.lower())
-                    if match:
-                        if len(match.groups()) == 2:
-                            if match.group(1).isdigit():
-                                quantity = int(match.group(1))
-                                product_name = match.group(2).strip()
-                            else:
-                                quantity = int(match.group(2))
-                                product_name = match.group(1).strip()
+            # Parse add product request with enhanced pattern matching
+            import re
+            add_patterns = [
+                r'add\s+(\d+)\s+(.+?)(?:\s+to\s+cart)?$',
+                r'add\s+(.+?)\s+(\d+)(?:\s+to\s+cart)?$',
+                r'add\s+(.+?)$'
+            ]
+            
+            added_items = []
+            for pattern in add_patterns:
+                match = re.search(pattern, message_text.lower())
+                if match:
+                    if len(match.groups()) == 2:
+                        if match.group(1).isdigit():
+                            quantity = int(match.group(1))
+                            product_name = match.group(2).strip()
                         else:
-                            quantity = 1
+                            quantity = int(match.group(2))
                             product_name = match.group(1).strip()
-                        
-                        # Enhanced product matching with better logic
-                        product = None
-                        product_name_lower = product_name.lower()
-                        
-                        # Try exact matches first
+                    else:
+                        quantity = 1
+                        product_name = match.group(1).strip()
+                    
+                    # Enhanced product matching with better logic
+                    product = None
+                    product_name_lower = product_name.lower()
+                    
+                    # Try exact matches first
+                    for p in products:
+                        if (product_name_lower == p.product_name.lower() or 
+                            product_name_lower == p.product_code.lower()):
+                            product = p
+                            break
+                    
+                    # Try partial matches if exact match fails
+                    if not product:
                         for p in products:
-                            if (product_name_lower == p.product_name.lower() or 
-                                product_name_lower == p.product_code.lower()):
+                            if (product_name_lower in p.product_name.lower() or 
+                                p.product_code.lower() in product_name_lower or
+                                any(word in p.product_name.lower() for word in product_name_lower.split() if len(word) > 2)):
                                 product = p
                                 break
+                    
+                    if product:
+                        logger.info(f"WhatsApp Product found: {product.product_name} ({product.product_code})")
+                        # Calculate pricing
+                        pricing_info = db_service.get_product_pricing(product.id, quantity)
                         
-                        # Try partial matches if exact match fails
-                        if not product:
-                            for p in products:
-                                if (product_name_lower in p.product_name.lower() or 
-                                    p.product_code.lower() in product_name_lower or
-                                    any(word in p.product_name.lower() for word in product_name_lower.split() if len(word) > 2)):
-                                    product = p
-                                    break
+                        # Add to existing cart or create new item
+                        existing_item = None
+                        for item in order_session['items']:
+                            if item['product_code'] == product.product_code:
+                                existing_item = item
+                                break
                         
-                        if product:
-                            logger.info(f"WhatsApp Product found: {product.product_name} ({product.product_code})")
-                            # Calculate pricing
-                            pricing_info = db_service.get_product_pricing(product.id, quantity)
-                            
-                            # Add to existing cart or create new item
-                            existing_item = None
-                            for item in order_session['items']:
-                                if item['product_code'] == product.product_code:
-                                    existing_item = item
-                                    break
-                            
-                            if existing_item:
-                                # Update existing item
-                                existing_item['quantity'] += quantity
-                                existing_item['item_total'] += pricing_info['total_amount']
-                                logger.info(f"WhatsApp Updated existing item: {product.product_name}")
-                            else:
-                                # Add new item
-                                new_item = {
-                                    'product_name': product.product_name,
-                                    'product_code': product.product_code,
-                                    'quantity': quantity,
-                                    'unit_price': pricing_info['base_price'],
-                                    'final_price': pricing_info['final_price'],
-                                    'discount_percentage': pricing_info['discount_percentage'],
-                                    'scheme_name': pricing_info['scheme_name'],
-                                    'item_total': pricing_info['total_amount']
-                                }
-                                order_session['items'].append(new_item)
-                                logger.info(f"WhatsApp Added new item: {product.product_name}")
-                            
-                            # Update totals
-                            order_session['total_cost'] += pricing_info['total_amount']
-                            order_session['final_total'] += pricing_info['total_amount']
-                            
-                            added_items.append({
-                                'name': product.product_name,
-                                'quantity': quantity,
-                                'total': pricing_info['total_amount']
-                            })
+                        if existing_item:
+                            # Update existing item
+                            existing_item['quantity'] += quantity
+                            existing_item['item_total'] += pricing_info['total_amount']
+                            logger.info(f"WhatsApp Updated existing item: {product.product_name}")
                         else:
-                            logger.warning(f"WhatsApp Product not found for: {product_name}")
-                        break
+                            # Add new item
+                            new_item = {
+                                'product_name': product.product_name,
+                                'product_code': product.product_code,
+                                'quantity': quantity,
+                                'unit_price': pricing_info['base_price'],
+                                'final_price': pricing_info['final_price'],
+                                'discount_percentage': pricing_info['discount_percentage'],
+                                'scheme_name': pricing_info['scheme_name'],
+                                'item_total': pricing_info['total_amount']
+                            }
+                            order_session['items'].append(new_item)
+                            logger.info(f"WhatsApp Added new item: {product.product_name}")
+                        
+                        # Update totals
+                        order_session['total_cost'] += pricing_info['total_amount']
+                        order_session['final_total'] += pricing_info['total_amount']
+                        
+                        added_items.append({
+                            'name': product.product_name,
+                            'quantity': quantity,
+                            'total': pricing_info['total_amount']
+                        })
+                    else:
+                        logger.warning(f"WhatsApp Product not found for: {product_name}")
+                    break
                 
                 if added_items:
                     # Create updated cart summary
@@ -879,12 +878,12 @@ def handle_whatsapp_chat(user, session, message_text):
                     
                     for item in order_session['items']:
                         response += f"""**{item['product_name']} (QB{item['product_code'][2:]})**
-   • Quantity: {item['quantity']} units
-   • Base Price: ₹{item['unit_price']:,.2f} each
-   • Discount: {item['discount_percentage']:.1f}% off
-   • Final Price: ₹{item['final_price']:,.2f} each
-   • Scheme: {item['scheme_name']}
-   • Item Total: ₹{item['item_total']:,.2f}
+    • Quantity: {item['quantity']} units
+    • Base Price: ₹{item['unit_price']:,.2f} each
+    • Discount: {item['discount_percentage']:.1f}% off
+    • Final Price: ₹{item['final_price']:,.2f} each
+    • Scheme: {item['scheme_name']}
+    • Item Total: ₹{item['item_total']:,.2f}
 
 """
                     
@@ -893,16 +892,16 @@ def handle_whatsapp_chat(user, session, message_text):
 **🎯 Recommended Add-ons:**
 
 1. **Quantum Sensors (QB004)** - ₹1,800.00
-   - Perfect companion for Quantum Processors
-   - Scheme: Buy 1 Get 15% Off
+    - Perfect companion for Quantum Processors
+    - Scheme: Buy 1 Get 15% Off
 
 2. **Neural Network Module (QB002)** - ₹1,200.00  
-   - Enhances AI Controller performance
-   - Scheme: Buy 1 Get 20% Off
+    - Enhances AI Controller performance
+    - Scheme: Buy 1 Get 20% Off
 
 3. **AI Memory Card (QB003)** - ₹800.00
-   - Additional storage for your AI systems
-   - Scheme: Buy 3 Get 2 Free
+    - Additional storage for your AI systems
+    - Scheme: Buy 3 Get 2 Free
 
 **📝 Next Steps:**
 • Type 'add [product name]' to include additional items
@@ -940,45 +939,45 @@ Please try again with the exact product name, and I'll be happy to add it to you
                     db.session.commit()
                 return response
             
-            # Handle removing products from cart
-            elif 'remove' in message_text.lower() and order_session['status'] in ['confirming', 'calculating']:
-                import re
-                remove_patterns = [
-                    r'remove\s+(.+?)$',
-                    r'delete\s+(.+?)$'
-                ]
-                
-                removed_items = []
-                for pattern in remove_patterns:
-                    match = re.search(pattern, message_text.lower())
-                    if match:
-                        product_name = match.group(1).strip()
+        # Handle removing products from cart
+        elif 'remove' in message_text.lower() and order_session['status'] in ['confirming', 'calculating']:
+            import re
+            remove_patterns = [
+                r'remove\s+(.+?)$',
+                r'delete\s+(.+?)$'
+            ]
+            
+            removed_items = []
+            for pattern in remove_patterns:
+                match = re.search(pattern, message_text.lower())
+                if match:
+                    product_name = match.group(1).strip()
+                    
+                    # Find matching item in cart
+                    item_to_remove = None
+                    for item in order_session['items']:
+                        if (product_name.lower() in item['product_name'].lower() or 
+                            product_name.upper() in item['product_code']):
+                            item_to_remove = item
+                            break
+                    
+                    if item_to_remove:
+                        # Remove from cart
+                        order_session['items'].remove(item_to_remove)
+                        order_session['total_cost'] -= item_to_remove['item_total']
+                        order_session['final_total'] -= item_to_remove['item_total']
                         
-                        # Find matching item in cart
-                        item_to_remove = None
-                        for item in order_session['items']:
-                            if (product_name.lower() in item['product_name'].lower() or 
-                                product_name.upper() in item['product_code']):
-                                item_to_remove = item
-                                break
-                        
-                        if item_to_remove:
-                            # Remove from cart
-                            order_session['items'].remove(item_to_remove)
-                            order_session['total_cost'] -= item_to_remove['item_total']
-                            order_session['final_total'] -= item_to_remove['item_total']
-                            
-                            removed_items.append(item_to_remove['product_name'])
-                        break
-                
-                if removed_items:
-                    if order_session['items']:
-                        # Create updated cart summary
-                        cart_summary = "**Updated Cart:**\n\n"
-                        for item in order_session['items']:
-                            cart_summary += f"📦 {item['product_name']} - {item['quantity']} units - ₹{item['item_total']:,.2f}\n"
-                        
-                        response = f"""✅ **Products Removed from Cart!**
+                        removed_items.append(item_to_remove['product_name'])
+                    break
+            
+            if removed_items:
+                if order_session['items']:
+                    # Create updated cart summary
+                    cart_summary = "**Updated Cart:**\n\n"
+                    for item in order_session['items']:
+                        cart_summary += f"📦 {item['product_name']} - {item['quantity']} units - ₹{item['item_total']:,.2f}\n"
+                    
+                    response = f"""✅ **Products Removed from Cart!**
 
 {cart_summary}
 
@@ -987,17 +986,17 @@ Please try again with the exact product name, and I'll be happy to add it to you
 **Next Steps:**
 • Type 'add [product name]' to include more items
 • Type 'place order' to finalize your selection"""
-                    else:
-                        response = "✅ **Cart Cleared!**\n\nYour cart is now empty. Would you like to browse our products?"
-                        order_session['status'] = 'idle'
                 else:
-                    response = "I couldn't find that product in your cart. Please check the product name and try again."
-                
-                # Save session data back to user
-                if hasattr(user, 'whatsapp_session_data'):
-                    user.whatsapp_session_data = whatsapp_session_data
-                    db.session.commit()
-                return response
+                    response = "✅ **Cart Cleared!**\n\nYour cart is now empty. Would you like to browse our products?"
+                    order_session['status'] = 'idle'
+            else:
+                response = "I couldn't find that product in your cart. Please check the product name and try again."
+            
+            # Save session data back to user
+            if hasattr(user, 'whatsapp_session_data'):
+                user.whatsapp_session_data = whatsapp_session_data
+                db.session.commit()
+            return response
         
         elif intent == 'PLACE_ORDER':
             # Handle order placement - same logic as web interface
@@ -1061,11 +1060,11 @@ Let's get started! Please select the products you'd like to order."""
                     cart_summary = "**📋 Your Complete Order Summary:**\n\n"
                     for item in order_items:
                         cart_summary += f"""**{item['product_name']} (QB{item['product_code'][2:]})**
-   • Quantity: {item['quantity']} units
-   • Base Price: ₹{item['unit_price']:,.2f} each
-   • Discount: {item['discount_percentage']:.1f}% off ({item['scheme_name']})
-   • Final Price: ₹{item['final_price']:,.2f} each
-   • Item Total: ₹{item['item_total']:,.2f}
+    • Quantity: {item['quantity']} units
+    • Base Price: ₹{item['unit_price']:,.2f} each
+    • Discount: {item['discount_percentage']:.1f}% off ({item['scheme_name']})
+    • Final Price: ₹{item['final_price']:,.2f} each
+    • Item Total: ₹{item['item_total']:,.2f}
 
 """
                     
@@ -1073,16 +1072,16 @@ Let's get started! Please select the products you'd like to order."""
 
 **🎯 Recommended Add-ons:**
 1. **Quantum Sensors (QB004)** - ₹1,800.00
-   - Perfect companion for Quantum Processors
-   - Scheme: Buy 1 Get 15% Off
+    - Perfect companion for Quantum Processors
+    - Scheme: Buy 1 Get 15% Off
 
 2. **Neural Network Module (QB002)** - ₹1,200.00  
-   - Enhances AI Controller performance
-   - Scheme: Buy 1 Get 20% Off
+    - Enhances AI Controller performance
+    - Scheme: Buy 1 Get 20% Off
 
 3. **AI Memory Card (QB003)** - ₹800.00
-   - Additional storage for your AI systems
-   - Scheme: Buy 3 Get 2 Free
+    - Additional storage for your AI systems
+    - Scheme: Buy 3 Get 2 Free
 
 **📝 Next Steps:**
 • Type 'add [product name]' to include additional items
@@ -1144,9 +1143,9 @@ Would you like to add more products or proceed with your order?"""
                             
                             for item in order_items:
                                 response += f"""**{item['product_name']} (QB{item['product_code'][2:]})**
-   • Quantity: {item['quantity']} units
-   • Final Price: ₹{item['final_price']:,.2f} each
-   • Item Total: ₹{item['item_total']:,.2f}
+    • Quantity: {item['quantity']} units
+    • Final Price: ₹{item['final_price']:,.2f} each
+    • Item Total: ₹{item['item_total']:,.2f}
 
 """
                             
