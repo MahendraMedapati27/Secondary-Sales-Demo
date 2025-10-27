@@ -770,12 +770,8 @@ def handle_whatsapp_chat(user, session, message_text):
         # Process based on classification - WhatsApp-specific flow
         if intent == 'CALCULATE_COST' or 'add' in message_text.lower() or 'place order' in message_text.lower():
             return handle_whatsapp_order_flow(user, session, message_text, order_session, db_service, enhanced_order_service)
-                    order_session['pending_confirmation'] = True
-                
-                # Load products from warehouse for product matching
-                products = []
-                if warehouse:
-                    products = db_service.get_products_by_warehouse(warehouse.id)
+        
+        elif intent == 'PLACE_ORDER':
                 
                 # Parse add product request with enhanced pattern matching
                 import re
