@@ -329,14 +329,16 @@ def handle_whatsapp_order_flow(user, session, message_text, order_session, db_se
             
             # Create the order
             try:
-                order_result = enhanced_order_service.create_order_from_cart(
-                    user_email=user.email,
+                order, message = enhanced_order_service.create_order_from_cart(
+                    user_id=user.id,
                     cart_items=order_session['items'],
-                    warehouse_id=warehouse.id
+                    warehouse_id=warehouse.id,
+                    warehouse_location=warehouse_location,
+                    user_email=user.email
                 )
                 
-                if order_result.get('success'):
-                    order_id = order_result.get('order_id')
+                if order:
+                    order_id = order.order_id
                     order_session['status'] = 'completed'
                     order_session['order_id'] = order_id
                     order_session['items'] = []  # Clear cart
@@ -350,7 +352,7 @@ def handle_whatsapp_order_flow(user, session, message_text, order_session, db_se
 🏢 **Warehouse:** {warehouse_location}
 
 **Order Summary:**
-{order_result.get('order_summary', 'Order details will be sent via email.')}
+{message}
 
 **Next Steps:**
 • You'll receive an email confirmation shortly
@@ -359,7 +361,7 @@ def handle_whatsapp_order_flow(user, session, message_text, order_session, db_se
 
 Thank you for choosing Quantum Blue! 🚀"""
                 else:
-                    return f"❌ **Order Failed:** {order_result.get('error', 'Unknown error occurred')}\n\nPlease try again or contact support."
+                    return f"❌ **Order Failed:** {message}\n\nPlease try again or contact support."
                     
             except Exception as e:
                 logger.error(f"WhatsApp Order creation error: {str(e)}")
