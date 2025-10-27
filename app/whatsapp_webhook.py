@@ -536,7 +536,7 @@ Thank you for choosing Quantum Blue! 🚀"""
                     response += "\n**💡 Recommended Add-ons:**\n"
                     available_products = [p for p in products if not any(item['product_code'] == p.product_code for item in order_session['items'])]
                     for i, product in enumerate(available_products[:3]):
-                        response += f"• {product.product_name} - ₹{product.base_price:,.2f}\n"
+                        response += f"• {product.product_name} - ₹{product.price_of_product:,.2f}\n"
                 
                 response += "\n**Next Steps:**\n"
                 response += "• Type 'add [product name] [quantity]' to add more items\n"
@@ -559,8 +559,8 @@ Thank you for choosing Quantum Blue! 🚀"""
 """
                 for product in products[:10]:  # Show first 10 products
                     response += f"📦 **{product.product_name}** (QB{product.product_code[2:]})\n"
-                    response += f"   • Price: ₹{product.base_price:,.2f}\n"
-                    response += f"   • Description: {product.description[:100]}...\n\n"
+                    response += f"   • Price: ₹{product.price_of_product:,.2f}\n"
+                    response += f"   • Description: {product.product_description[:100]}...\n\n"
                 
                 if len(products) > 10:
                     response += f"... and {len(products) - 10} more products available!\n\n"
@@ -666,7 +666,7 @@ Need help? Type 'help' for more information."""
 • Contact support if you have questions about this order"""
                 
                 return response
-            else:
+        else:
                 return f"""❌ **Order Not Found**
 
 I couldn't find order {specific_order_id} in your account.
