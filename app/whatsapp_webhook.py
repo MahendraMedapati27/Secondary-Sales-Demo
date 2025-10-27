@@ -173,19 +173,16 @@ def process_whatsapp_message(user, session, message_text):
         
         # Classify the message
         classification_result = classification_service.classify_message(message_text)
-        intent = classification_result.get('intent', 'general')
+        intent = classification_result.get('classification', 'OTHER')
         confidence = classification_result.get('confidence', 0.0)
         
         logger.info(f"Classified WhatsApp message: {intent} (confidence: {confidence})")
         
         # Process based on intent
-        if intent == 'order_management':
-            response = enhanced_order_service.process_order_request(
-                user_id=user.id,
-                message=message_text,
-                session_id=session.session_id
-            )
-        elif intent == 'product_inquiry':
+        if intent == 'PLACE_ORDER':
+            # For WhatsApp, provide a simple order response
+            response = "I'd be happy to help you place an order! Please visit our website or contact our sales team for detailed order processing. For now, I can help you with product information or answer any questions you have."
+        elif intent == 'COMPANY_INFO':
             # Get product information
             products = db_service.get_products_by_warehouse(user.warehouse_location)
             if products:
@@ -196,9 +193,9 @@ def process_whatsapp_message(user, session, message_text):
                 response = f"Here are our available products:\n\n{product_list}\n\nType 'order [product name]' to place an order!"
             else:
                 response = "I don't have product information available right now. Please try again later."
-        elif intent == 'order_tracking':
+        elif intent == 'TRACK_ORDER':
             # Get user's orders
-            orders = db_service.get_user_orders(user.id)
+            orders = db_service.get_orders_by_user(user.id)
             if orders:
                 order_list = "\n".join([
                     f"• Order {order.order_id} - Status: {order.status} - Amount: ₹{order.total_amount}"
@@ -220,11 +217,11 @@ def process_whatsapp_message(user, session, message_text):
             User's warehouse location: {user.warehouse_location}
             Current session: {session.session_id}"""
             
-            response = llm_service.generate_response(
-                message=message_text,
-                system_prompt=system_prompt,
+            llm_response = llm_service.generate_response(
+                user_message=message_text,
                 conversation_history=[]
             )
+            response = llm_response.get('response', 'I apologize, but I encountered an error generating a response.')
         
         return response
         
