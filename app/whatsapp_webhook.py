@@ -129,8 +129,7 @@ def webhook():
                     email=f"{from_number}@whatsapp.local",  # Placeholder email
                     phone=from_number,
                     email_verified=False,  # Start with unverified email
-                    warehouse_location=None,  # No warehouse set initially
-                    onboarding_state='ask_name'  # Start onboarding flow
+                    warehouse_location=None  # No warehouse set initially
                 )
                 user.set_password("whatsapp_user")  # Set a default password
                 db.session.add(user)
