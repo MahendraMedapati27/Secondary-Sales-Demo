@@ -27,6 +27,40 @@ db_service = None
 web_search_service = None
 order_service = None
 
+# In-memory session store for WhatsApp users (since whatsapp_session_data column is commented out)
+whatsapp_sessions = {}
+
+def get_whatsapp_session(user_phone):
+    """Get or create WhatsApp session for user"""
+    global whatsapp_sessions
+    if user_phone not in whatsapp_sessions:
+        whatsapp_sessions[user_phone] = {
+            'order_session': {
+                'status': 'idle',
+                'items': [],
+                'total_cost': 0,
+                'discount_applied': 0,
+                'final_total': 0,
+                'order_id': None,
+                'cart_id': None,
+                'last_updated': datetime.utcnow().isoformat(),
+                'user_selections': [],
+                'pending_confirmation': False
+            },
+            'tracking_session': {
+                'status': 'idle',
+                'selected_order_id': None,
+                'order_details': None,
+                'available_orders': []
+            }
+        }
+    return whatsapp_sessions[user_phone]
+
+def save_whatsapp_session(user_phone, session_data):
+    """Save WhatsApp session for user"""
+    global whatsapp_sessions
+    whatsapp_sessions[user_phone] = session_data
+
 def get_whatsapp_service():
     """Get WhatsApp service instance"""
     global whatsapp_service
@@ -739,40 +773,8 @@ def handle_whatsapp_chat(user, session, message_text):
         recent_orders = db_service.get_orders_by_email(user.email)
         context_data['recent_orders'] = recent_orders[:3]  # Last 3 orders
         
-        # Initialize WhatsApp session data (similar to web session)
-        whatsapp_session_data = {
-            'order_session': {
-                'status': 'idle',  # idle, browsing, calculating, confirming, completed
-                'items': [],
-                'total_cost': 0,
-                'discount_applied': 0,
-                'final_total': 0,
-                'order_id': None,
-                'cart_id': None,
-                'last_updated': datetime.utcnow().isoformat(),
-                'user_selections': [],
-                'pending_confirmation': False
-            },
-            'tracking_session': {
-                'status': 'idle',  # idle, selecting, viewing, completed
-                'selected_order_id': None,
-                'order_details': None,
-                'available_orders': []
-            }
-        }
-        
-        # Store session data in user model (since WhatsApp doesn't have Flask sessions)
-        if hasattr(user, 'whatsapp_session_data'):
-            if user.whatsapp_session_data is None:
-                user.whatsapp_session_data = whatsapp_session_data
-            else:
-                whatsapp_session_data = user.whatsapp_session_data
-        else:
-            # If column doesn't exist, use a simple fallback approach
-            whatsapp_session_data = {
-                'order_session': {'status': 'idle', 'items': [], 'total_cost': 0, 'discount_applied': 0, 'final_total': 0, 'order_id': None, 'cart_id': None, 'last_updated': datetime.utcnow().isoformat(), 'user_selections': [], 'pending_confirmation': False},
-                'tracking_session': {'status': 'idle', 'selected_order_id': None, 'order_details': None, 'available_orders': []}
-            }
+        # Get or create WhatsApp session data using in-memory store
+        whatsapp_session_data = get_whatsapp_session(user.phone)
         
         order_session = whatsapp_session_data['order_session']
         tracking_session = whatsapp_session_data['tracking_session']
@@ -787,15 +789,21 @@ def handle_whatsapp_chat(user, session, message_text):
         
         # Process based on classification - WhatsApp-specific flow
         if intent == 'CALCULATE_COST' or 'add' in message_text.lower() or 'place order' in message_text.lower():
-            return handle_whatsapp_order_flow(user, session, message_text, order_session, db_service, enhanced_order_service)
+            response = handle_whatsapp_order_flow(user, session, message_text, order_session, db_service, enhanced_order_service)
+            # Save session data back to in-memory store
+            save_whatsapp_session(user.phone, whatsapp_session_data)
+            return response
         
         elif intent == 'PLACE_ORDER':
             # This should be handled by the CALCULATE_COST condition above
             # But if it reaches here, redirect to order flow
-            return handle_whatsapp_order_flow(user, session, message_text, order_session, db_service, enhanced_order_service)
+            response = handle_whatsapp_order_flow(user, session, message_text, order_session, db_service, enhanced_order_service)
+            # Save session data back to in-memory store
+            save_whatsapp_session(user.phone, whatsapp_session_data)
+            return response
             
         # Handle removing products from cart
-        elif 'remove' in message_text.lower() and order_session['status'] in ['confirming', 'calculating']:
+        elif 'remove' in message_text.lower():
             import re
             remove_patterns = [
                 r'remove\s+(.+?)$',
@@ -847,14 +855,15 @@ def handle_whatsapp_chat(user, session, message_text):
             else:
                 response = "I couldn't find that product in your cart. Please check the product name and try again."
             
-            # Save session data back to user
-            if hasattr(user, 'whatsapp_session_data'):
-                user.whatsapp_session_data = whatsapp_session_data
-                db.session.commit()
+            # Save session data back to in-memory store
+            save_whatsapp_session(user.phone, whatsapp_session_data)
             return response
         
         elif intent == 'TRACK_ORDER':
-            return handle_whatsapp_tracking_flow(user, session, message_text, tracking_session, db_service)
+            response = handle_whatsapp_tracking_flow(user, session, message_text, tracking_session, db_service)
+            # Save session data back to in-memory store
+            save_whatsapp_session(user.phone, whatsapp_session_data)
+            return response
         
         elif intent == 'COMPANY_INFO':
             # Use web search for real-time company information - same as web interface
@@ -877,12 +886,16 @@ Contact us:
 • Address: {company_info['contact_info']['address']}
 
 How can I help you today?"""
+            # Save session data back to in-memory store
+            save_whatsapp_session(user.phone, whatsapp_session_data)
             return response
             
         elif intent == 'WEB_SEARCH':
             # Perform web search - same as web interface
             search_result = web_search_service.search_with_synthesis(message_text, message_text)
             response = search_result.get('synthesized_response', 'I couldn\'t find sufficient information to answer your query.')
+            # Save session data back to in-memory store
+            save_whatsapp_session(user.phone, whatsapp_session_data)
             return response
             
         else:
@@ -900,6 +913,8 @@ How can I help you today?"""
 • **General Questions** - Ask me anything!
 
 How can I assist you today?""")
+        # Save session data back to in-memory store before returning
+        save_whatsapp_session(user.phone, whatsapp_session_data)
         return response
         
     except Exception as e:
