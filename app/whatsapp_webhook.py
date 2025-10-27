@@ -125,7 +125,7 @@ def webhook():
             if not user:
                 # Create new user for WhatsApp - start onboarding process
                 user = User(
-                    name=contact_name,
+                    name=from_number,  # Use phone number as initial name to trigger onboarding
                     email=f"{from_number}@whatsapp.local",  # Placeholder email
                     phone=from_number,
                     email_verified=False,  # Start with unverified email
@@ -184,11 +184,16 @@ def webhook():
 def process_whatsapp_message(user, session, message_text):
     """Process WhatsApp message through the chatbot logic with onboarding flow"""
     try:
+        # Debug logging
+        logger.info(f"WhatsApp User onboarding status - Email verified: {user.email_verified}, Warehouse: {user.warehouse_location}, Name: {user.name}")
+        
         # Check if user has completed onboarding
         if not user.email_verified or not user.warehouse_location:
+            logger.info("WhatsApp User needs onboarding - redirecting to onboarding flow")
             return handle_whatsapp_onboarding(user, session, message_text)
         
         # User has completed onboarding, proceed with normal chat flow
+        logger.info("WhatsApp User onboarding complete - redirecting to chat flow")
         return handle_whatsapp_chat(user, session, message_text)
         
     except Exception as e:
@@ -198,19 +203,20 @@ def process_whatsapp_message(user, session, message_text):
 def handle_whatsapp_onboarding(user, session, message_text):
     """Handle WhatsApp onboarding flow with database compatibility"""
     try:
-        # Check onboarding state from user's phone number as session key
-        # Use getattr with fallback for backward compatibility
-        onboarding_state = getattr(user, 'onboarding_state', None) or 'ask_name'
+        logger.info(f"WhatsApp Onboarding - User name: {user.name}, Email verified: {user.email_verified}, Warehouse: {user.warehouse_location}")
         
         # For users without the onboarding_state column, use a simple approach
         if not hasattr(user, 'onboarding_state'):
+            logger.info("WhatsApp Onboarding - Using simple flow (no onboarding_state column)")
             # Simple onboarding without database persistence
             if not user.email_verified:
                 if not user.name or user.name == user.phone:
+                    logger.info("WhatsApp Onboarding - Step 1: Asking for name")
                     user.name = message_text[:100]
                     db.session.commit()
                     return "Thanks! Please share your email address."
                 elif not user.email:
+                    logger.info("WhatsApp Onboarding - Step 2: Asking for email")
                     email = message_text[:120]
                     if '@' not in email or '.' not in email:
                         return "Please enter a valid email address."
@@ -221,6 +227,7 @@ def handle_whatsapp_onboarding(user, session, message_text):
                     # Send OTP via email
                     from app.email_utils import send_otp_email
                     send_otp_email(user.email, user.name, otp)
+                    logger.info("WhatsApp Onboarding - Step 3: OTP sent, waiting for verification")
                     return "Got it! We have sent an OTP to your email. Please enter the 6-digit OTP to verify."
                 else:
                     # Verify OTP
@@ -261,6 +268,8 @@ def handle_whatsapp_onboarding(user, session, message_text):
                 return handle_whatsapp_chat(user, session, message_text)
         
         # Original onboarding flow with database persistence
+        onboarding_state = getattr(user, 'onboarding_state', None) or 'ask_name'
+        
         if onboarding_state == 'ask_name':
             # Update user's onboarding state
             if hasattr(user, 'onboarding_state'):
@@ -963,7 +972,7 @@ Would you like to track another order or need more information?"""
             search_result = web_search_service.search_with_synthesis(message_text, message_text)
             if search_result.get('synthesized_response'):
                 response = search_result.get('synthesized_response')
-            else:
+        else:
                 # Fallback to database company info
                 company_info = db_service.get_company_info()
                 response = f"""Welcome to {company_info['company_name']}!
