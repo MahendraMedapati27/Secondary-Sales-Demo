@@ -33,6 +33,17 @@ jobs:
         source venv/bin/activate
         pip install -r requirements.txt
     
+    - name: Verify deployment files
+      run: |
+        echo "Checking deployment files..."
+        ls -la
+        echo "Checking startup.py exists:"
+        ls -la startup.py
+        echo "Checking run.py exists:"
+        ls -la run.py
+        echo "Checking app directory:"
+        ls -la app/
+    
     - name: Login to Azure
       uses: azure/login@v1
       with:
