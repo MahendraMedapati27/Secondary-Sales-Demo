@@ -41,8 +41,8 @@ class LLMClassificationService:
     
     def classify_user_intent(self, user_message, context_data=None):
         """
-        Classify user intent using LLM
-        Returns classification with percentages
+        Classify user intent using LLM and extract entities (product names, quantities)
+        Returns classification with percentages and extracted entities
         """
         if not self.groq_service.client:
             self.logger.warning("Groq client not available for classification")
@@ -56,12 +56,15 @@ class LLMClassificationService:
                     context_info += f"User's warehouse: {context_data['user_warehouse']}\n"
                 if 'recent_orders' in context_data:
                     context_info += f"Recent orders: {len(context_data['recent_orders'])} found\n"
+                if 'current_cart_items' in context_data:
+                    context_info += f"Current cart items: {context_data['current_cart_items']}\n"
             
-            classification_prompt = f"""You are an AI intent classifier for "Quantum Blue" chatbot. 
-Analyze the user's message and classify it into one of these categories with confidence percentages:
+            classification_prompt = f"""You are an AI intent classifier and entity extractor for "Quantum Blue" chatbot. 
+Analyze the user's message and classify it into one of these categories with confidence percentages.
+Also extract relevant entities like product names and quantities when applicable.
 
 Categories:
-1. PLACE_ORDER - User wants to place an order, buy products, add to cart
+1. PLACE_ORDER - User wants to place an order, buy products, add to cart, confirm order
 2. CALCULATE_COST - User wants to know the cost/price of products or calculate order total
 3. TRACK_ORDER - User wants to check order status, track delivery, order history
 4. COMPANY_INFO - User asks about company, services, contact info, FAQ
@@ -72,11 +75,23 @@ User Message: "{user_message}"
 
 Context: {context_info}
 
+For PLACE_ORDER intents, extract:
+- product_name: The name of the product (normalize plurals, handle variations like "AI Controllers" -> "AI Controller")
+- quantity: The number/amount requested (extract from text, default to 1 if not specified)
+
+For TRACK_ORDER intents, extract:
+- order_id: The order ID if mentioned
+
 Respond with ONLY a JSON object in this exact format:
 {{
     "classification": "CATEGORY_NAME",
     "confidence": 0.85,
     "reasoning": "Brief explanation of why this classification was chosen",
+    "entities": {{
+        "product_name": "extracted product name or null",
+        "quantity": "extracted quantity or null",
+        "order_id": "extracted order ID or null"
+    }},
     "percentages": {{
         "PLACE_ORDER": 0.15,
         "CALCULATE_COST": 0.20,
@@ -86,6 +101,12 @@ Respond with ONLY a JSON object in this exact format:
         "OTHER": 0.35
     }}
 }}
+
+Examples:
+- "Add AI Controllers 10" -> PLACE_ORDER with product_name="AI Controller", quantity=10
+- "Add 5 AI Memory Cards" -> PLACE_ORDER with product_name="AI Memory Card", quantity=5
+- "Confirm order" -> PLACE_ORDER with entities={{}} (no specific product)
+- "Track order QB12345" -> TRACK_ORDER with order_id="QB12345"
 
 Be precise and consider the context provided."""
 
@@ -122,6 +143,11 @@ Be precise and consider the context provided."""
                 "classification": "PLACE_ORDER",
                 "confidence": 0.7,
                 "reasoning": "Keyword-based classification",
+                "entities": {
+                    "product_name": None,
+                    "quantity": None,
+                    "order_id": None
+                },
                 "percentages": {
                     "PLACE_ORDER": 0.7,
                     "CALCULATE_COST": 0.1,
@@ -136,6 +162,11 @@ Be precise and consider the context provided."""
                 "classification": "CALCULATE_COST",
                 "confidence": 0.8,
                 "reasoning": "Keyword-based classification for cost calculation",
+                "entities": {
+                    "product_name": None,
+                    "quantity": None,
+                    "order_id": None
+                },
                 "percentages": {
                     "PLACE_ORDER": 0.1,
                     "CALCULATE_COST": 0.8,
@@ -150,6 +181,11 @@ Be precise and consider the context provided."""
                 "classification": "TRACK_ORDER",
                 "confidence": 0.7,
                 "reasoning": "Keyword-based classification",
+                "entities": {
+                    "product_name": None,
+                    "quantity": None,
+                    "order_id": None
+                },
                 "percentages": {
                     "PLACE_ORDER": 0.1,
                     "CALCULATE_COST": 0.1,
@@ -164,6 +200,11 @@ Be precise and consider the context provided."""
                 "classification": "COMPANY_INFO",
                 "confidence": 0.6,
                 "reasoning": "Keyword-based classification",
+                "entities": {
+                    "product_name": None,
+                    "quantity": None,
+                    "order_id": None
+                },
                 "percentages": {
                     "PLACE_ORDER": 0.1,
                     "CALCULATE_COST": 0.1,
@@ -178,6 +219,11 @@ Be precise and consider the context provided."""
                 "classification": "OTHER",
                 "confidence": 0.5,
                 "reasoning": "Default classification",
+                "entities": {
+                    "product_name": None,
+                    "quantity": None,
+                    "order_id": None
+                },
                 "percentages": {
                     "PLACE_ORDER": 0.1,
                     "CALCULATE_COST": 0.1,

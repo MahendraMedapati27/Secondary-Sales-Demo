@@ -345,7 +345,7 @@ def handle_whatsapp_onboarding(user, session, message_text):
         logger.error(f"Error in WhatsApp onboarding: {str(e)}")
         return "I'm sorry, there was an error. Please try again."
 
-def handle_whatsapp_order_flow(user, session, message_text, order_session, db_service, enhanced_order_service):
+def handle_whatsapp_order_flow(user, session, message_text, order_session, db_service, enhanced_order_service, classification_result=None):
     """Handle WhatsApp-specific order flow without selection boxes"""
     try:
         warehouse_location = user.warehouse_location
@@ -357,7 +357,7 @@ def handle_whatsapp_order_flow(user, session, message_text, order_session, db_se
         products = db_service.get_products_by_warehouse(warehouse.id)
         
         # Check if user wants to place order (finalize)
-        if any(keyword in message_text.lower() for keyword in ['confirm order', 'place order', 'checkout', 'finalize']):
+        if any(keyword in message_text.lower() for keyword in ['confirm order', 'place order', 'checkout', 'finalize', 'place my order', 'place it']):
             if not order_session['items']:
                 return "Your cart is empty! Please add some products first.\n\nType 'add [product name] [quantity]' to add items."
             
@@ -447,141 +447,139 @@ Thank you for choosing Quantum Blue! 🚀"""
             else:
                 return "I couldn't find the product you mentioned to remove. Please check the product name and try again."
         
-        # Check if user wants to add items
-        elif 'add' in message_text.lower():
-            import re
-            add_patterns = [
-                r'add\s+(\d+)\s+(.+?)(?:\s+to\s+cart)?$',
-                r'add\s+(.+?)\s+(\d+)(?:\s+to\s+cart)?$',
-                r'add\s+(.+?)(?:\s+to\s+cart)?$'
-            ]
+        # Check if user wants to add items using LLM-extracted entities
+        elif 'add' in message_text.lower() or (classification_result and classification_result.get('entities', {}).get('product_name')):
+            # Use LLM-extracted entities if available, otherwise fallback to regex
+            entities = classification_result.get('entities', {}) if classification_result else {}
+            product_name_llm = entities.get('product_name')
+            quantity_llm = entities.get('quantity')
             
-            added_items = []
-            for pattern in add_patterns:
-                match = re.search(pattern, message_text.lower())
-                if match:
-                    if len(match.groups()) == 2:
-                        if match.group(1).isdigit():
-                            quantity = int(match.group(1))
-                            product_name = match.group(2).strip()
+            if product_name_llm and quantity_llm:
+                # Use LLM-extracted entities
+                try:
+                    quantity = int(quantity_llm)
+                    product_name = product_name_llm.strip()
+                    logger.info(f"WhatsApp Using LLM-extracted entities: product='{product_name}', quantity={quantity}")
+                except (ValueError, TypeError):
+                    logger.warning(f"WhatsApp Invalid LLM-extracted quantity: {quantity_llm}, falling back to regex")
+                    product_name, quantity = None, None
+            else:
+                # Fallback to regex parsing
+                import re
+                add_patterns = [
+                    r'add\s+(\d+)\s+(.+?)(?:\s+to\s+cart)?$',
+                    r'add\s+(.+?)\s+(\d+)(?:\s+to\s+cart)?$',
+                    r'add\s+(.+?)(?:\s+to\s+cart)?$'
+                ]
+                
+                product_name, quantity = None, None
+                for pattern in add_patterns:
+                    match = re.search(pattern, message_text.lower())
+                    if match:
+                        if len(match.groups()) == 2:
+                            if match.group(1).isdigit():
+                                quantity = int(match.group(1))
+                                product_name = match.group(2).strip()
+                            else:
+                                quantity = int(match.group(2))
+                                product_name = match.group(1).strip()
                         else:
-                            quantity = int(match.group(2))
+                            quantity = 1
                             product_name = match.group(1).strip()
-                    else:
-                        quantity = 1
-                        product_name = match.group(1).strip()
-                    
-                    # Skip if product name is just "to" or "cart" or similar common words
-                    if product_name.lower() in ['to', 'cart', 'to the cart', 'the cart']:
-                        continue
-                    
-                    # Enhanced product matching
-                    product = None
-                    product_name_lower = product_name.lower()
-                    
-                    # Try exact matches first
+                        
+                        # Skip if product name is just "to" or "cart" or similar common words
+                        if product_name.lower() in ['to', 'cart', 'to the cart', 'the cart']:
+                            continue
+                        break
+                
+                logger.info(f"WhatsApp Using regex parsing: product='{product_name}', quantity={quantity}")
+            
+            if product_name and quantity:
+                # Enhanced product matching with better handling of plurals
+                product = None
+                product_name_lower = product_name.lower()
+                
+                # Normalize product name (remove common plural endings)
+                normalized_name = product_name_lower
+                if normalized_name.endswith('s') and not normalized_name.endswith('ss'):
+                    normalized_name = normalized_name[:-1]
+                
+                # Try exact matches first
+                for p in products:
+                    if (product_name_lower == p.product_name.lower() or 
+                        normalized_name == p.product_name.lower() or
+                        product_name_lower == p.product_code.lower()):
+                        product = p
+                        break
+                
+                # Try partial matches if exact match fails
+                if not product:
                     for p in products:
-                        if (product_name_lower == p.product_name.lower() or 
-                            product_name_lower == p.product_code.lower()):
+                        if (product_name_lower in p.product_name.lower() or 
+                            normalized_name in p.product_name.lower() or
+                            p.product_code.lower() in product_name_lower or
+                            any(word in p.product_name.lower() for word in product_name_lower.split() if len(word) > 2)):
                             product = p
                             break
-                    
-                    # Try partial matches if exact match fails
-                    if not product:
-                        for p in products:
-                            if (product_name_lower in p.product_name.lower() or 
-                                p.product_code.lower() in product_name_lower or
-                                any(word in p.product_name.lower() for word in product_name_lower.split() if len(word) > 2)):
-                                product = p
-                                break
-                    
-                    if product:
-                        logger.info(f"WhatsApp Product found: {product.product_name} ({product.product_code})")
-                        # Calculate pricing
-                        pricing_info = db_service.get_product_pricing(product.id, quantity)
-                        
-                        # Add to existing cart or create new item
-                        existing_item = None
-                        for item in order_session['items']:
-                            if item['product_code'] == product.product_code:
-                                existing_item = item
-                                break
-                        
-                        if existing_item:
-                            # Update existing item
-                            existing_item['quantity'] += quantity
-                            existing_item['item_total'] += pricing_info['total_amount']
-                            logger.info(f"WhatsApp Updated existing item: {product.product_name}")
-                        else:
-                            # Add new item
-                            new_item = {
-                                'product_name': product.product_name,
-                                'product_code': product.product_code,
-                                'quantity': quantity,
-                                'unit_price': pricing_info['base_price'],
-                                'final_price': pricing_info['final_price'],
-                                'discount_percentage': pricing_info['discount_percentage'],
-                                'scheme_name': pricing_info['scheme_name'],
-                                'item_total': pricing_info['total_amount']
-                            }
-                            order_session['items'].append(new_item)
-                            logger.info(f"WhatsApp Added new item: {product.product_name}")
-                        
-                        # Update totals
-                        order_session['total_cost'] += pricing_info['total_amount']
-                        order_session['final_total'] += pricing_info['total_amount']
-                        
-                        added_items.append({
-                            'name': product.product_name,
-                            'quantity': quantity,
-                            'total': pricing_info['total_amount']
-                        })
-                    else:
-                        logger.warning(f"WhatsApp Product not found for: {product_name}")
-                    break
-            
-            if added_items:
-                # Create updated cart summary
-                cart_summary = "**Updated Cart:**\n\n"
-                for item in order_session['items']:
-                    cart_summary += f"📦 {item['product_name']} - {item['quantity']} units - ₹{item['item_total']:,.2f}\n"
                 
-                response = f"""✅ **Products Added to Cart!**
+                if product:
+                    logger.info(f"WhatsApp Product found: {product.product_name} ({product.product_code})")
+                    # Calculate pricing
+                    pricing_info = db_service.get_product_pricing(product.id, quantity)
+                    
+                    # Add to existing cart or create new item
+                    existing_item = None
+                    for item in order_session['items']:
+                        if item['product_code'] == product.product_code:
+                            existing_item = item
+                            break
+                    
+                    if existing_item:
+                        # Update existing item
+                        existing_item['quantity'] += quantity
+                        existing_item['item_total'] += pricing_info['total_amount']
+                        logger.info(f"WhatsApp Updated existing item: {product.product_name}")
+                    else:
+                        # Add new item
+                        new_item = {
+                            'product_name': product.product_name,
+                            'product_code': product.product_code,
+                            'quantity': quantity,
+                            'unit_price': pricing_info['base_price'],
+                            'final_price': pricing_info['final_price'],
+                            'discount_percentage': pricing_info['discount_percentage'],
+                            'scheme_name': pricing_info['scheme_name'],
+                            'item_total': pricing_info['total_amount']
+                        }
+                        order_session['items'].append(new_item)
+                        logger.info(f"WhatsApp Added new item: {product.product_name}")
+                    
+                    # Update totals
+                    order_session['total_cost'] += pricing_info['total_amount']
+                    order_session['final_total'] += pricing_info['total_amount']
+                    
+                    # Create updated cart summary
+                    cart_summary = "**Updated Cart:**\n\n"
+                    for item in order_session['items']:
+                        cart_summary += f"📦 {item['product_name']} - {item['quantity']} units - ₹{item['item_total']:,.2f}\n"
+                    
+                    response = f"""✅ **Products Added to Cart!**
 
 {cart_summary}
 
-💰 **New Total: ₹{order_session['final_total']:,.2f}**
+💰 **Total: ₹{order_session['final_total']:,.2f}**
 
-**Updated Order Calculations:**
-
-"""
-                
-                for item in order_session['items']:
-                    response += f"""**{item['product_name']} (QB{item['product_code'][2:]})**
-    • Quantity: {item['quantity']} units
-    • Base Price: ₹{item['unit_price']:,.2f} each
-    • Discount: {item['discount_percentage']:.1f}% off
-    • Final Price: ₹{item['final_price']:,.2f} each
-    • Scheme: {item['scheme_name']}
-    • Item Total: ₹{item['item_total']:,.2f}
-
-"""
-                
-                # Add recommended products
-                if len(order_session['items']) < 3:  # Suggest more if cart is small
-                    response += "\n**💡 Recommended Add-ons:**\n"
-                    available_products = [p for p in products if not any(item['product_code'] == p.product_code for item in order_session['items'])]
-                    for i, product in enumerate(available_products[:3]):
-                        response += f"• {product.product_name} - ₹{product.price_of_product:,.2f}\n"
-                
-                response += "\n**Next Steps:**\n"
-                response += "• Type 'add [product name] [quantity]' to add more items\n"
-                response += "• Type 'remove [product name]' to remove items\n"
-                response += "• Type 'confirm order' to proceed with checkout\n"
-                
-                return response
+**Next Steps:**
+• Type 'add [product name] [quantity]' to add more items
+• Type 'remove [product name]' to remove items
+• Type 'confirm order' to proceed with checkout"""
+                    
+                    return response
+                else:
+                    logger.warning(f"WhatsApp Product not found for: {product_name}")
+                    return f"❌ **Product Not Found:** I couldn't find '{product_name}' in your warehouse. Please check the product name and try again."
             else:
-                return "I couldn't find the product you mentioned. Please check the product name and try again."
+                return "I couldn't understand which product and quantity you'd like to add. Please try: 'add [product name] [quantity]'"
         
         # Initial order request - show product catalog
         else:
@@ -779,6 +777,23 @@ def handle_whatsapp_chat(user, session, message_text):
         order_session = whatsapp_session_data['order_session']
         tracking_session = whatsapp_session_data['tracking_session']
         
+        # --- PRIORITY CHECK: Explicitly check for order confirmation/placement phrases BEFORE LLM classification ---
+        if any(phrase in message_text.lower() for phrase in ['confirm order', 'checkout', 'place order', 'finalize order', 'place my order', 'place it']):
+            logger.info("WhatsApp Explicitly detected order confirmation/placement phrase. Routing to order flow.")
+            # Create a mock classification result for order confirmation
+            mock_classification = {
+                "classification": "PLACE_ORDER",
+                "confidence": 0.95,
+                "entities": {
+                    "product_name": None,
+                    "quantity": None,
+                    "order_id": None
+                }
+            }
+            response = handle_whatsapp_order_flow(user, session, message_text, order_session, db_service, enhanced_order_service, mock_classification)
+            save_whatsapp_session(user.phone, whatsapp_session_data)
+            return response
+
         # Classify user intent using LLM (same as web interface)
         classification_result = classification_service.classify_user_intent(message_text, context_data)
         intent = classification_result.get('classification', 'OTHER')
@@ -788,8 +803,9 @@ def handle_whatsapp_chat(user, session, message_text):
         logger.info(f"WhatsApp Order session items: {len(order_session['items'])}")
         
         # Process based on classification - WhatsApp-specific flow
-        if intent == 'CALCULATE_COST' or 'add' in message_text.lower() or 'place order' in message_text.lower():
-            response = handle_whatsapp_order_flow(user, session, message_text, order_session, db_service, enhanced_order_service)
+        if intent == 'CALCULATE_COST' or 'add' in message_text.lower():
+            # Pass the classification result to the order flow for entity extraction
+            response = handle_whatsapp_order_flow(user, session, message_text, order_session, db_service, enhanced_order_service, classification_result)
             # Save session data back to in-memory store
             save_whatsapp_session(user.phone, whatsapp_session_data)
             return response
@@ -797,7 +813,7 @@ def handle_whatsapp_chat(user, session, message_text):
         elif intent == 'PLACE_ORDER':
             # This should be handled by the CALCULATE_COST condition above
             # But if it reaches here, redirect to order flow
-            response = handle_whatsapp_order_flow(user, session, message_text, order_session, db_service, enhanced_order_service)
+            response = handle_whatsapp_order_flow(user, session, message_text, order_session, db_service, enhanced_order_service, classification_result)
             # Save session data back to in-memory store
             save_whatsapp_session(user.phone, whatsapp_session_data)
             return response
