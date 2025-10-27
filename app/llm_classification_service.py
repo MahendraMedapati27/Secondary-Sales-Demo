@@ -33,6 +33,12 @@ class LLMClassificationService:
         
         return result_text
     
+    def classify_message(self, user_message, context_data=None):
+        """
+        Alias for classify_user_intent for backward compatibility
+        """
+        return self.classify_user_intent(user_message, context_data)
+    
     def classify_user_intent(self, user_message, context_data=None):
         """
         Classify user intent using LLM
