@@ -31,6 +31,9 @@ class User(UserMixin, db.Model):
     # WhatsApp onboarding state
     onboarding_state = db.Column(db.String(50), default='ask_name')
     
+    # WhatsApp session data (JSON field to store session state)
+    whatsapp_session_data = db.Column(db.JSON, nullable=True)
+    
     # Timestamps
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
