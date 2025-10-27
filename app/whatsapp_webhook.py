@@ -105,13 +105,14 @@ def webhook():
             # Find or create user based on WhatsApp number
             user = User.query.filter_by(phone=from_number).first()
             if not user:
-                # Create new user for WhatsApp
+                # Create new user for WhatsApp - start onboarding process
                 user = User(
                     name=contact_name,
                     email=f"{from_number}@whatsapp.local",  # Placeholder email
                     phone=from_number,
-                    email_verified=True,  # Skip email verification for WhatsApp users
-                    warehouse_location="Default"  # Set default warehouse
+                    email_verified=False,  # Start with unverified email
+                    warehouse_location=None,  # No warehouse set initially
+                    onboarding_state='ask_name'  # Start onboarding flow
                 )
                 user.set_password("whatsapp_user")  # Set a default password
                 db.session.add(user)
@@ -163,12 +164,99 @@ def webhook():
             return jsonify({'error': 'Internal server error'}), 500
 
 def process_whatsapp_message(user, session, message_text):
-    """Process WhatsApp message through the chatbot logic"""
+    """Process WhatsApp message through the chatbot logic with onboarding flow"""
+    try:
+        # Check if user has completed onboarding
+        if not user.email_verified or not user.warehouse_location:
+            return handle_whatsapp_onboarding(user, session, message_text)
+        
+        # User has completed onboarding, proceed with normal chat flow
+        return handle_whatsapp_chat(user, session, message_text)
+        
+    except Exception as e:
+        logger.error(f"Error processing WhatsApp message: {str(e)}")
+        return "I'm sorry, I encountered an error processing your message. Please try again later."
+
+def handle_whatsapp_onboarding(user, session, message_text):
+    """Handle WhatsApp onboarding flow"""
+    try:
+        # Check onboarding state from user's phone number as session key
+        onboarding_state = user.onboarding_state or 'ask_name'
+        
+        if onboarding_state == 'ask_name':
+            # Update user's onboarding state
+            user.onboarding_state = 'get_name'
+            db.session.commit()
+            return "Hi! Welcome to Quantum Blue. What's your name?"
+        
+        elif onboarding_state == 'get_name':
+            # Store name and move to email
+            user.name = message_text[:100]
+            user.onboarding_state = 'ask_email'
+            db.session.commit()
+            return "Thanks! Please share your email address."
+        
+        elif onboarding_state == 'ask_email':
+            # Store email and move to phone verification
+            email = message_text[:120]
+            user.email = email
+            user.onboarding_state = 'ask_phone'
+            db.session.commit()
+            return "Got it! What's your phone number?"
+        
+        elif onboarding_state == 'ask_phone':
+            # Phone is already set, generate OTP
+            user.onboarding_state = 'await_otp'
+            otp = user.generate_otp()
+            db.session.commit()
+            
+            # Send OTP via email
+            from app.email_utils import send_otp_email
+            send_otp_email(user.email, user.name, otp)
+            
+            return "We have sent an OTP to your email. Please enter the 6-digit OTP to verify."
+        
+        elif onboarding_state == 'await_otp':
+            # Verify OTP
+            if user.verify_otp(message_text, expiration=600):  # 10 minutes
+                user.verify_email()
+                user.onboarding_state = 'ask_warehouse'
+                db.session.commit()
+                
+                # Get warehouse options
+                db_service = get_db_service()
+                warehouses = db_service.get_warehouses()
+                warehouse_options = [w.location_name for w in warehouses]
+                
+                return f"Email verified successfully! What's your warehouse location?\n\nAvailable locations:\n" + "\n".join([f"• {w}" for w in warehouse_options])
+            else:
+                return "Invalid or expired OTP. Please try again."
+        
+        elif onboarding_state == 'ask_warehouse':
+            # Set warehouse location
+            user.warehouse_location = message_text
+            user.onboarding_state = 'completed'
+            user.last_verification = datetime.utcnow()
+            db.session.commit()
+            
+            return "Perfect! Your warehouse location has been set. You can now:\n• Place orders\n• Track orders\n• Ask questions about our products\n\nHow can I help you today?"
+        
+        else:
+            # Fallback to ask name
+            user.onboarding_state = 'ask_name'
+            db.session.commit()
+            return "Hi! Welcome to Quantum Blue. What's your name?"
+            
+    except Exception as e:
+        logger.error(f"Error in WhatsApp onboarding: {str(e)}")
+        return "I'm sorry, there was an error. Please try again."
+
+def handle_whatsapp_chat(user, session, message_text):
+    """Handle WhatsApp chat after onboarding is complete"""
     try:
         # Get services
         classification_service = get_classification_service()
         llm_service = get_llm_service()
-        enhanced_order_service = get_enhanced_order_service()
         db_service = get_db_service()
         
         # Classify the message
@@ -206,17 +294,6 @@ def process_whatsapp_message(user, session, message_text):
                 response = "You don't have any orders yet. Start by browsing our products!"
         else:
             # General conversation using LLM
-            system_prompt = f"""You are Quantum Blue, an AI assistant for a pharmaceutical distribution company. 
-            The user is chatting via WhatsApp. Be helpful, professional, and concise.
-            You can help with:
-            - Product inquiries
-            - Order placement
-            - Order tracking
-            - General questions about our services
-            
-            User's warehouse location: {user.warehouse_location}
-            Current session: {session.session_id}"""
-            
             llm_response = llm_service.generate_response(
                 user_message=message_text,
                 conversation_history=[]
@@ -226,7 +303,7 @@ def process_whatsapp_message(user, session, message_text):
         return response
         
     except Exception as e:
-        logger.error(f"Error processing WhatsApp message: {str(e)}")
+        logger.error(f"Error in WhatsApp chat: {str(e)}")
         return "I'm sorry, I encountered an error processing your message. Please try again later."
 
 @whatsapp_bp.route('/send-message', methods=['POST'])

@@ -28,6 +28,9 @@ class User(UserMixin, db.Model):
     warehouse_location = db.Column(db.String(100), nullable=True)
     last_verification = db.Column(db.DateTime, default=datetime.utcnow)
     
+    # WhatsApp onboarding state
+    onboarding_state = db.Column(db.String(50), default='ask_name')
+    
     # Timestamps
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
