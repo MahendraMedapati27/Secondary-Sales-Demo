@@ -196,11 +196,71 @@ def process_whatsapp_message(user, session, message_text):
         return "I'm sorry, I encountered an error processing your message. Please try again later."
 
 def handle_whatsapp_onboarding(user, session, message_text):
-    """Handle WhatsApp onboarding flow"""
+    """Handle WhatsApp onboarding flow with database compatibility"""
     try:
         # Check onboarding state from user's phone number as session key
+        # Use getattr with fallback for backward compatibility
         onboarding_state = getattr(user, 'onboarding_state', None) or 'ask_name'
         
+        # For users without the onboarding_state column, use a simple approach
+        if not hasattr(user, 'onboarding_state'):
+            # Simple onboarding without database persistence
+            if not user.email_verified:
+                if not user.name or user.name == user.phone:
+                    user.name = message_text[:100]
+                    db.session.commit()
+                    return "Thanks! Please share your email address."
+                elif not user.email:
+                    email = message_text[:120]
+                    if '@' not in email or '.' not in email:
+                        return "Please enter a valid email address."
+                    user.email = email
+                    otp = user.generate_otp()
+                    db.session.commit()
+                    
+                    # Send OTP via email
+                    from app.email_utils import send_otp_email
+                    send_otp_email(user.email, user.name, otp)
+                    return "Got it! We have sent an OTP to your email. Please enter the 6-digit OTP to verify."
+                else:
+                    # Verify OTP
+                    otp_input = message_text.strip()
+                    if not otp_input.isdigit() or len(otp_input) != 6:
+                        return "Please enter a valid 6-digit OTP."
+                        
+                    if user.verify_otp(otp_input, expiration=600):
+                        user.verify_email()
+                        db.session.commit()
+                        
+                        # Get warehouse options
+                        db_service = get_db_service()
+                        warehouses = db_service.get_warehouses()
+                        warehouse_options = [w.location_name for w in warehouses]
+                        
+                        return f"Email verified successfully! What's your warehouse location?\n\nAvailable locations:\n" + "\n".join([f"• {w}" for w in warehouse_options])
+                    else:
+                        return "Invalid or expired OTP. Please try again."
+            elif not user.warehouse_location:
+                # Validate warehouse selection
+                db_service = get_db_service()
+                warehouses = db_service.get_warehouses()
+                warehouse_names = [w.location_name.lower() for w in warehouses]
+                
+                selected_warehouse = message_text.strip()
+                if selected_warehouse.lower() not in warehouse_names:
+                    warehouse_options = [w.location_name for w in warehouses]
+                    return f"Please select a valid warehouse location:\n\n" + "\n".join([f"• {w}" for w in warehouse_options]) + "\n\nType the exact name of your preferred location."
+                
+                user.warehouse_location = selected_warehouse
+                user.last_verification = datetime.utcnow()
+                db.session.commit()
+                
+                return "Perfect! Your warehouse location has been set. You can now:\n• Place orders\n• Track orders\n• Ask questions about our products\n\nHow can I help you today?"
+            else:
+                # User is fully onboarded, proceed to chat
+                return handle_whatsapp_chat(user, session, message_text)
+        
+        # Original onboarding flow with database persistence
         if onboarding_state == 'ask_name':
             # Update user's onboarding state
             if hasattr(user, 'onboarding_state'):
