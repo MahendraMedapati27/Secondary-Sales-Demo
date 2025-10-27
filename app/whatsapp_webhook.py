@@ -123,9 +123,9 @@ def webhook():
             # Find or create user based on WhatsApp number
             user = User.query.filter_by(phone=from_number).first()
             if not user:
-                # Create new user for WhatsApp - start onboarding process
+                # Create new user for WhatsApp - extract name from WhatsApp JSON
                 user = User(
-                    name=from_number,  # Use phone number as initial name to trigger onboarding
+                    name=contact_name or from_number,  # Use WhatsApp contact name or phone as fallback
                     email=f"{from_number}@whatsapp.local",  # Placeholder email
                     phone=from_number,
                     email_verified=False,  # Start with unverified email
@@ -134,7 +134,9 @@ def webhook():
                 user.set_password("whatsapp_user")  # Set a default password
                 db.session.add(user)
                 db.session.commit()
-                logger.info(f"Created new WhatsApp user: {from_number}")
+                logger.info(f"Created new WhatsApp user: {from_number} with name: {contact_name}")
+            else:
+                logger.info(f"Found existing WhatsApp user: {from_number} with name: {user.name}")
             
             # Create or get active chat session
             session = ChatSession.query.filter_by(
@@ -187,7 +189,15 @@ def process_whatsapp_message(user, session, message_text):
         logger.info(f"WhatsApp User onboarding status - Email verified: {user.email_verified}, Warehouse: {user.warehouse_location}, Name: {user.name}")
         
         # Check if user has completed onboarding
-        if not user.email_verified or not user.warehouse_location:
+        # User needs onboarding if they don't have a real email OR email not verified OR no warehouse
+        needs_onboarding = (
+            not user.email or 
+            user.email.endswith('@whatsapp.local') or 
+            not user.email_verified or 
+            not user.warehouse_location
+        )
+        
+        if needs_onboarding:
             logger.info("WhatsApp User needs onboarding - redirecting to onboarding flow")
             return handle_whatsapp_onboarding(user, session, message_text)
         
@@ -200,131 +210,68 @@ def process_whatsapp_message(user, session, message_text):
         return "I'm sorry, I encountered an error processing your message. Please try again later."
 
 def handle_whatsapp_onboarding(user, session, message_text):
-    """Handle WhatsApp onboarding flow with database compatibility"""
+    """Handle WhatsApp onboarding flow - simplified logic based on user state"""
     try:
-        logger.info(f"WhatsApp Onboarding - User name: {user.name}, Email verified: {user.email_verified}, Warehouse: {user.warehouse_location}")
+        logger.info(f"WhatsApp Onboarding - User: {user.name}, Email: {user.email}, Email verified: {user.email_verified}, Warehouse: {user.warehouse_location}")
         
-        # For users without the onboarding_state column, use a simple approach
-        if not hasattr(user, 'onboarding_state'):
-            logger.info("WhatsApp Onboarding - Using simple flow (no onboarding_state column)")
-            # Simple onboarding without database persistence
-            if not user.email_verified:
-                if not user.name or user.name == user.phone:
-                    logger.info("WhatsApp Onboarding - Step 1: Asking for name")
-                    user.name = message_text[:100]
-                    db.session.commit()
-                    return "Thanks! Please share your email address."
-                elif not user.email:
-                    logger.info("WhatsApp Onboarding - Step 2: Asking for email")
-                    email = message_text[:120]
-                    if '@' not in email or '.' not in email:
-                        return "Please enter a valid email address."
-                    user.email = email
-                    otp = user.generate_otp()
-                    db.session.commit()
-                    
-                    # Send OTP via email
-                    from app.email_utils import send_otp_email
-                    send_otp_email(user.email, user.name, otp)
-                    logger.info("WhatsApp Onboarding - Step 3: OTP sent, waiting for verification")
-                    return "Got it! We have sent an OTP to your email. Please enter the 6-digit OTP to verify."
-                else:
-                    # Verify OTP
-                    otp_input = message_text.strip()
-                    if not otp_input.isdigit() or len(otp_input) != 6:
-                        return "Please enter a valid 6-digit OTP."
-                        
-                    if user.verify_otp(otp_input, expiration=600):
-                        user.verify_email()
-                        db.session.commit()
-                        
-                        # Get warehouse options
-                        db_service = get_db_service()
-                        warehouses = db_service.get_warehouses()
-                        warehouse_options = [w.location_name for w in warehouses]
-                        
-                        return f"Email verified successfully! What's your warehouse location?\n\nAvailable locations:\n" + "\n".join([f"• {w}" for w in warehouse_options])
-                    else:
-                        return "Invalid or expired OTP. Please try again."
-            elif not user.warehouse_location:
-                # Validate warehouse selection
-                db_service = get_db_service()
-                warehouses = db_service.get_warehouses()
-                warehouse_names = [w.location_name.lower() for w in warehouses]
-                
-                selected_warehouse = message_text.strip()
-                if selected_warehouse.lower() not in warehouse_names:
-                    warehouse_options = [w.location_name for w in warehouses]
-                    return f"Please select a valid warehouse location:\n\n" + "\n".join([f"• {w}" for w in warehouse_options]) + "\n\nType the exact name of your preferred location."
-                
-                user.warehouse_location = selected_warehouse
-                user.last_verification = datetime.utcnow()
-                db.session.commit()
-                
-                return "Perfect! Your warehouse location has been set. You can now:\n• Place orders\n• Track orders\n• Ask questions about our products\n\nHow can I help you today?"
-            else:
-                # User is fully onboarded, proceed to chat
-                return handle_whatsapp_chat(user, session, message_text)
+        # Check if user has a real email (not placeholder)
+        has_real_email = user.email and not user.email.endswith('@whatsapp.local')
         
-        # Original onboarding flow with database persistence
-        onboarding_state = getattr(user, 'onboarding_state', None) or 'ask_name'
-        
-        if onboarding_state == 'ask_name':
-            # Update user's onboarding state
-            if hasattr(user, 'onboarding_state'):
-                user.onboarding_state = 'get_name'
-            db.session.commit()
-            return "Hi! Welcome to Quantum Blue. What's your name?"
-        
-        elif onboarding_state == 'get_name':
-            # Store name and move to email
-            user.name = message_text[:100]
-            if hasattr(user, 'onboarding_state'):
-                user.onboarding_state = 'ask_email'
-            db.session.commit()
-            return "Thanks! Please share your email address."
-        
-        elif onboarding_state == 'ask_email':
-            # Store email and move directly to OTP generation (skip phone since we already have it)
-            email = message_text[:120]
+        # Step 1: If user doesn't have a real email, ask for it
+        if not has_real_email:
+            logger.info("WhatsApp Onboarding - Step 1: Asking for email")
+            email = message_text.strip()
+            
             # Basic email validation
             if '@' not in email or '.' not in email:
                 return "Please enter a valid email address."
             
+            # Check if email already exists for another user
+            existing_user = User.query.filter_by(email=email).first()
+            if existing_user and existing_user.id != user.id:
+                return "This email is already registered. Please use a different email address."
+            
+            # Set the email and generate OTP
             user.email = email
-            if hasattr(user, 'onboarding_state'):
-                user.onboarding_state = 'await_otp'
             otp = user.generate_otp()
             db.session.commit()
             
             # Send OTP via email
-            from app.email_utils import send_otp_email
-            send_otp_email(user.email, user.name, otp)
-            
-            return "Got it! We have sent an OTP to your email. Please enter the 6-digit OTP to verify."
+            try:
+                from app.email_utils import send_otp_email
+                send_otp_email(user.email, user.name, otp)
+                logger.info(f"WhatsApp Onboarding - Step 2: OTP sent to {user.email}")
+                return f"Got it! We have sent an OTP to {user.email}. Please enter the 6-digit OTP to verify."
+            except Exception as e:
+                logger.error(f"Failed to send OTP email: {str(e)}")
+                return f"OTP generated: {otp}. Please enter this 6-digit code to verify your email."
         
-        elif onboarding_state == 'await_otp':
-            # Verify OTP
+        # Step 2: If user has email but not verified, verify OTP
+        elif not user.email_verified:
+            logger.info("WhatsApp Onboarding - Step 2: Verifying OTP")
             otp_input = message_text.strip()
+            
             if not otp_input.isdigit() or len(otp_input) != 6:
                 return "Please enter a valid 6-digit OTP."
-                
+            
             if user.verify_otp(otp_input, expiration=600):  # 10 minutes
                 user.verify_email()
-                if hasattr(user, 'onboarding_state'):
-                    user.onboarding_state = 'ask_warehouse'
                 db.session.commit()
+                logger.info("WhatsApp Onboarding - Step 3: Email verified, asking for warehouse")
                 
                 # Get warehouse options
                 db_service = get_db_service()
                 warehouses = db_service.get_warehouses()
                 warehouse_options = [w.location_name for w in warehouses]
                 
-                return f"Email verified successfully! What's your warehouse location?\n\nAvailable locations:\n" + "\n".join([f"• {w}" for w in warehouse_options])
+                return f"Email verified successfully! What's your warehouse location?\n\nAvailable locations:\n" + "\n".join([f"• {w}" for w in warehouse_options]) + "\n\nType the exact name of your preferred location."
             else:
                 return "Invalid or expired OTP. Please try again."
         
-        elif onboarding_state == 'ask_warehouse':
+        # Step 3: If user has verified email but no warehouse, ask for warehouse
+        elif not user.warehouse_location:
+            logger.info("WhatsApp Onboarding - Step 3: Asking for warehouse")
+            
             # Validate warehouse selection
             db_service = get_db_service()
             warehouses = db_service.get_warehouses()
@@ -332,25 +279,21 @@ def handle_whatsapp_onboarding(user, session, message_text):
             
             selected_warehouse = message_text.strip()
             if selected_warehouse.lower() not in warehouse_names:
-                # Show available options again
                 warehouse_options = [w.location_name for w in warehouses]
                 return f"Please select a valid warehouse location:\n\n" + "\n".join([f"• {w}" for w in warehouse_options]) + "\n\nType the exact name of your preferred location."
             
             # Set warehouse location
             user.warehouse_location = selected_warehouse
-            if hasattr(user, 'onboarding_state'):
-                user.onboarding_state = 'completed'
             user.last_verification = datetime.utcnow()
             db.session.commit()
+            logger.info(f"WhatsApp Onboarding - Step 4: Warehouse set to {selected_warehouse}")
             
             return "Perfect! Your warehouse location has been set. You can now:\n• Place orders\n• Track orders\n• Ask questions about our products\n\nHow can I help you today?"
         
+        # Step 4: User is fully onboarded, proceed to chat
         else:
-            # Fallback to ask name
-            if hasattr(user, 'onboarding_state'):
-                user.onboarding_state = 'ask_name'
-            db.session.commit()
-            return "Hi! Welcome to Quantum Blue. What's your name?"
+            logger.info("WhatsApp Onboarding - Complete, proceeding to chat")
+            return handle_whatsapp_chat(user, session, message_text)
             
     except Exception as e:
         logger.error(f"Error in WhatsApp onboarding: {str(e)}")
