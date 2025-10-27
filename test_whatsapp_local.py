@@ -24,15 +24,15 @@ def test_whatsapp_flow():
     
     with app.app_context():
         try:
-            # Create a test user
-            test_phone = "919515724643"
+            # Create a test user with a unique phone number
+            test_phone = "919515724999"  # Use a different phone number
             user = User.query.filter_by(phone=test_phone).first()
             
             if not user:
                 print("📝 Creating test user...")
                 user = User(
                     name="Test User",
-                    email="test@example.com",
+                    email="test999@example.com",  # Use a unique email
                     phone=test_phone,
                     email_verified=False,
                     warehouse_location=None
@@ -43,10 +43,17 @@ def test_whatsapp_flow():
                 print(f"✅ Created test user: {user.name}")
             else:
                 print(f"✅ Found existing user: {user.name}")
+                # Reset user for testing
+                user.email_verified = False
+                user.warehouse_location = None
+                db.session.commit()
+                print("🔄 Reset user for testing")
             
-            # Create a test session
+            # Create a test session with unique ID
+            import time
+            session_id = f"TEST_SESSION_{int(time.time())}"
             session = ChatSession(
-                session_id="TEST_SESSION_123",
+                session_id=session_id,
                 user_id=user.id,
                 is_active=True
             )
