@@ -106,6 +106,18 @@ def webhook():
             parsed_message = whatsapp_service.parse_webhook_message(data)
             
             if not parsed_message:
+                # This could be a status update (delivered, read, sent) or other non-message webhook
+                # Check if it's a status update to avoid unnecessary warnings
+                entries = data.get('entry', [])
+                if entries:
+                    changes = entries[0].get('changes', [])
+                    if changes:
+                        value = changes[0].get('value', {})
+                        if 'statuses' in value:
+                            # This is a status update, not an error
+                            logger.debug("Received WhatsApp status update")
+                            return jsonify({'status': 'ok'}), 200
+                
                 logger.warning("Could not parse WhatsApp message")
                 return jsonify({'status': 'ok'}), 200
             
@@ -405,7 +417,7 @@ Thank you for choosing Quantum Blue! 🚀"""
             add_patterns = [
                 r'add\s+(\d+)\s+(.+?)(?:\s+to\s+cart)?$',
                 r'add\s+(.+?)\s+(\d+)(?:\s+to\s+cart)?$',
-                r'add\s+(.+?)$'
+                r'add\s+(.+?)(?:\s+to\s+cart)?$'
             ]
             
             added_items = []
@@ -422,6 +434,10 @@ Thank you for choosing Quantum Blue! 🚀"""
                     else:
                         quantity = 1
                         product_name = match.group(1).strip()
+                    
+                    # Skip if product name is just "to" or "cart" or similar common words
+                    if product_name.lower() in ['to', 'cart', 'to the cart', 'the cart']:
+                        continue
                     
                     # Enhanced product matching
                     product = None
@@ -772,172 +788,9 @@ def handle_whatsapp_chat(user, session, message_text):
             return handle_whatsapp_order_flow(user, session, message_text, order_session, db_service, enhanced_order_service)
         
         elif intent == 'PLACE_ORDER':
-            # Parse add product request with enhanced pattern matching
-            import re
-            add_patterns = [
-                r'add\s+(\d+)\s+(.+?)(?:\s+to\s+cart)?$',
-                r'add\s+(.+?)\s+(\d+)(?:\s+to\s+cart)?$',
-                r'add\s+(.+?)$'
-            ]
-            
-            added_items = []
-            for pattern in add_patterns:
-                match = re.search(pattern, message_text.lower())
-                if match:
-                    if len(match.groups()) == 2:
-                        if match.group(1).isdigit():
-                            quantity = int(match.group(1))
-                            product_name = match.group(2).strip()
-                        else:
-                            quantity = int(match.group(2))
-                            product_name = match.group(1).strip()
-                    else:
-                        quantity = 1
-                        product_name = match.group(1).strip()
-                    
-                    # Enhanced product matching with better logic
-                    product = None
-                    product_name_lower = product_name.lower()
-                    
-                    # Try exact matches first
-                    for p in products:
-                        if (product_name_lower == p.product_name.lower() or 
-                            product_name_lower == p.product_code.lower()):
-                            product = p
-                            break
-                    
-                    # Try partial matches if exact match fails
-                    if not product:
-                        for p in products:
-                            if (product_name_lower in p.product_name.lower() or 
-                                p.product_code.lower() in product_name_lower or
-                                any(word in p.product_name.lower() for word in product_name_lower.split() if len(word) > 2)):
-                                product = p
-                                break
-                    
-                    if product:
-                        logger.info(f"WhatsApp Product found: {product.product_name} ({product.product_code})")
-                        # Calculate pricing
-                        pricing_info = db_service.get_product_pricing(product.id, quantity)
-                        
-                        # Add to existing cart or create new item
-                        existing_item = None
-                        for item in order_session['items']:
-                            if item['product_code'] == product.product_code:
-                                existing_item = item
-                                break
-                        
-                        if existing_item:
-                            # Update existing item
-                            existing_item['quantity'] += quantity
-                            existing_item['item_total'] += pricing_info['total_amount']
-                            logger.info(f"WhatsApp Updated existing item: {product.product_name}")
-                        else:
-                            # Add new item
-                            new_item = {
-                                'product_name': product.product_name,
-                                'product_code': product.product_code,
-                                'quantity': quantity,
-                                'unit_price': pricing_info['base_price'],
-                                'final_price': pricing_info['final_price'],
-                                'discount_percentage': pricing_info['discount_percentage'],
-                                'scheme_name': pricing_info['scheme_name'],
-                                'item_total': pricing_info['total_amount']
-                            }
-                            order_session['items'].append(new_item)
-                            logger.info(f"WhatsApp Added new item: {product.product_name}")
-                        
-                        # Update totals
-                        order_session['total_cost'] += pricing_info['total_amount']
-                        order_session['final_total'] += pricing_info['total_amount']
-                        
-                        added_items.append({
-                            'name': product.product_name,
-                            'quantity': quantity,
-                            'total': pricing_info['total_amount']
-                        })
-                    else:
-                        logger.warning(f"WhatsApp Product not found for: {product_name}")
-                    break
-                
-                if added_items:
-                    # Create updated cart summary
-                    cart_summary = "**Updated Cart:**\n\n"
-                    for item in order_session['items']:
-                        cart_summary += f"📦 {item['product_name']} - {item['quantity']} units - ₹{item['item_total']:,.2f}\n"
-                    
-                    response = f"""✅ **Products Added to Cart!**
-
-{cart_summary}
-
-💰 **New Total: ₹{order_session['final_total']:,.2f}**
-
-**Updated Order Calculations:**
-
-"""
-                    
-                    for item in order_session['items']:
-                        response += f"""**{item['product_name']} (QB{item['product_code'][2:]})**
-    • Quantity: {item['quantity']} units
-    • Base Price: ₹{item['unit_price']:,.2f} each
-    • Discount: {item['discount_percentage']:.1f}% off
-    • Final Price: ₹{item['final_price']:,.2f} each
-    • Scheme: {item['scheme_name']}
-    • Item Total: ₹{item['item_total']:,.2f}
-
-"""
-                    
-                    response += f"""💰 **Total Order Amount: ₹{order_session['final_total']:,.2f}**
-
-**🎯 Recommended Add-ons:**
-
-1. **Quantum Sensors (QB004)** - ₹1,800.00
-    - Perfect companion for Quantum Processors
-    - Scheme: Buy 1 Get 15% Off
-
-2. **Neural Network Module (QB002)** - ₹1,200.00  
-    - Enhances AI Controller performance
-    - Scheme: Buy 1 Get 20% Off
-
-3. **AI Memory Card (QB003)** - ₹800.00
-    - Additional storage for your AI systems
-    - Scheme: Buy 3 Get 2 Free
-
-**📝 Next Steps:**
-• Type 'add [product name]' to include additional items
-• Type 'place order' to finalize your current selection
-• Type 'remove [product name]' to remove items
-
-Would you like to add more products or proceed with your order?"""
-                    
-                else:
-                    # Get available products for better error message
-                    available_products = []
-                    for p in products:
-                        available_products.append(f"• {p.product_name} ({p.product_code})")
-                    
-                    response = f"""I apologize, but I couldn't identify the specific product you want to add. 
-
-To help you better, please use one of these formats:
-• 'add 2 Quantum Sensors'
-• 'add Neural Network Module' 
-• 'add 1 AI Memory Card'
-
-**Available Products:**
-{chr(10).join(available_products)}
-
-**Debug Info:**
-• You said: "{message_text}"
-• Order session status: {order_session['status']}
-• Current cart items: {len(order_session['items'])}
-
-Please try again with the exact product name, and I'll be happy to add it to your order!"""
-                
-                # Save session data back to user
-                if hasattr(user, 'whatsapp_session_data'):
-                    user.whatsapp_session_data = whatsapp_session_data
-                    db.session.commit()
-                return response
+            # This should be handled by the CALCULATE_COST condition above
+            # But if it reaches here, redirect to order flow
+            return handle_whatsapp_order_flow(user, session, message_text, order_session, db_service, enhanced_order_service)
             
         # Handle removing products from cart
         elif 'remove' in message_text.lower() and order_session['status'] in ['confirming', 'calculating']:
@@ -998,305 +851,8 @@ Please try again with the exact product name, and I'll be happy to add it to you
                 db.session.commit()
             return response
         
-        elif intent == 'PLACE_ORDER':
-            # Handle order placement - same logic as web interface
-            if warehouse:
-                products = db_service.get_products_by_warehouse(warehouse.id)
-                
-                # Check if this is a simple order confirmation
-                is_simple_confirmation = ('confirm my order' in message_text.lower() or 'process the items in my cart' in message_text.lower()) and not any(product in message_text for product in ['Quantum Processor', 'AI Controller', 'Quantum Sensors', 'AI Memory Card', 'Neural Network Module'])
-                
-                # Check if user is trying to finalize an order
-                finalize_keywords = ['finalize', 'proceed', 'confirm', 'place the order', 'place my order', 'place order', 'yes proceed', 'yes it is correct', 'yes', 'ok']
-                is_finalizing = any(keyword in message_text.lower() for keyword in finalize_keywords)
-                
-                # Check if we have order session data
-                has_order_session = (order_session['status'] in ['calculating', 'confirming'] and order_session['items']) or (order_session.get('items') and len(order_session['items']) > 0)
-                
-                # Handle initial order request - show product selection
-                if not has_order_session and not is_simple_confirmation and not is_finalizing:
-                    # User wants to place order for the first time
-                    order_session['status'] = 'browsing'
-                    
-                    response = f"""🛒 **Welcome to Quantum Blue Ordering System!**
-
-I'm excited to help you place your order! We have an amazing selection of cutting-edge products available.
-
-**Our Premium Product Line:**
-• **Quantum Processor (QB001)** - ₹2,500.00 - Advanced AI processing power
-• **Neural Network Module (QB002)** - ₹1,200.00 - Enhanced machine learning capabilities  
-• **AI Memory Card (QB003)** - ₹800.00 - High-speed data storage
-• **Quantum Sensors (QB004)** - ₹1,800.00 - Precision measurement technology
-• **AI Controller (QB005)** - ₹950.00 - Intelligent system management
-
-**Special Offers Available:**
-🎯 All products come with exclusive discount schemes
-🎯 Bulk order discounts available
-🎯 Free shipping on orders over ₹5,000
-
-**How to Order:**
-1. Type 'add [product name] [quantity]' to add products
-2. Adjust quantities as needed  
-3. Review your order summary with pricing
-4. Add more products or proceed to checkout
-
-Let's get started! Please select the products you'd like to order."""
-                    
-                    # Save session data back to user
-                    user.whatsapp_session_data = whatsapp_session_data
-                    db.session.commit()
-                    return response
-                
-                # Handle cart confirmation with existing items
-                elif is_simple_confirmation and has_order_session:
-                    # User wants to confirm their existing cart
-                    order_items = order_session.get('items', [])
-                    total_amount = order_session.get('final_total', 0)
-                    
-                    logger.info(f"WhatsApp Cart confirmation - Items count: {len(order_items)}")
-                    logger.info(f"WhatsApp Cart confirmation - Total amount: {total_amount}")
-                    
-                    # Create professional cart summary
-                    cart_summary = "**📋 Your Complete Order Summary:**\n\n"
-                    for item in order_items:
-                        cart_summary += f"""**{item['product_name']} (QB{item['product_code'][2:]})**
-    • Quantity: {item['quantity']} units
-    • Base Price: ₹{item['unit_price']:,.2f} each
-    • Discount: {item['discount_percentage']:.1f}% off ({item['scheme_name']})
-    • Final Price: ₹{item['final_price']:,.2f} each
-    • Item Total: ₹{item['item_total']:,.2f}
-
-"""
-                    
-                    cart_summary += f"""**💰 Total Order Amount: ₹{total_amount:,.2f}**
-
-**🎯 Recommended Add-ons:**
-1. **Quantum Sensors (QB004)** - ₹1,800.00
-    - Perfect companion for Quantum Processors
-    - Scheme: Buy 1 Get 15% Off
-
-2. **Neural Network Module (QB002)** - ₹1,200.00  
-    - Enhances AI Controller performance
-    - Scheme: Buy 1 Get 20% Off
-
-3. **AI Memory Card (QB003)** - ₹800.00
-    - Additional storage for your AI systems
-    - Scheme: Buy 3 Get 2 Free
-
-**📝 Next Steps:**
-• Type 'add [product name]' to include additional items
-• Type 'place order' to finalize your current selection
-• Type 'remove [product name]' to remove items
-
-Would you like to add more products or proceed with your order?"""
-                    
-                    return cart_summary
-                
-                # Handle order finalization
-                elif is_finalizing and has_order_session:
-                    # Handle order finalization using existing cart data
-                    try:
-                        # Use existing order session data
-                        order_items = order_session['items']
-                        total_amount = order_session.get('final_total', 0)
-                        
-                        # Create order using the enhanced order service
-                        enhanced_order_service = get_enhanced_order_service()
-                        
-                        # Convert order session items to cart format
-                        cart_items = []
-                        for item in order_items:
-                            cart_items.append({
-                                'product_code': item['product_code'],
-                                'quantity': item['quantity']
-                            })
-                        
-                        # Create the order
-                        order, message = enhanced_order_service.create_order_from_cart(
-                user_id=user.id,
-                            cart_items=cart_items,
-                            warehouse_id=warehouse.id,
-                            warehouse_location=warehouse_location,
-                            user_email=user.email
-                        )
-                        
-                        if order:
-                            # Update order session to completed
-                            order_session['status'] = 'completed'
-                            order_session['order_id'] = order.order_id
-                            
-                            # Clear the cart after successful order
-                            enhanced_order_service.force_clear_cart()
-                            
-                            response = f"""🎉 **Order Placed Successfully!**
-
-**📋 Order Details:**
-• **Order ID:** {order.order_id}
-• **Total Amount:** ₹{order.total_amount:,.2f}
-• **Status:** {order.status.title()}
-• **Warehouse:** {warehouse_location}
-• **Order Date:** {order.order_date.strftime('%B %d, %Y at %I:%M %p')}
-
-**🛍️ Order Summary:**
-
-"""
-                            
-                            for item in order_items:
-                                response += f"""**{item['product_name']} (QB{item['product_code'][2:]})**
-    • Quantity: {item['quantity']} units
-    • Final Price: ₹{item['final_price']:,.2f} each
-    • Item Total: ₹{item['item_total']:,.2f}
-
-"""
-                            
-                            response += f"""**💰 Total Order Amount: ₹{order.total_amount:,.2f}**
-
-**📧 Confirmation Email Sent**
-Your order confirmation has been sent to {user.email}. Please check your inbox for detailed order information and tracking details.
-
-**🚀 What's Next?**
-• You'll receive email updates as your order progresses
-• Use Order ID **{order.order_id}** to track your order
-• Our team will process your order within 24 hours
-• Expected delivery: 3-5 business days
-
-**💎 Thank you for choosing Quantum Blue!**
-We're excited to deliver cutting-edge technology to you. If you have any questions, feel free to ask!"""
-                        else:
-                            response = f"❌ Order failed: {message}"
-                            
-                        # Save session data back to user
-                        user.whatsapp_session_data = whatsapp_session_data
-                        db.session.commit()
-                        return response
-                        
-                    except Exception as e:
-                        logger.error(f"WhatsApp Error processing order finalization: {str(e)}")
-                        return "I apologize, but I couldn't process your order. Please try again or contact support."
-            else:
-                response = "I couldn't find your warehouse. Please contact support."
-                return response
-        
         elif intent == 'TRACK_ORDER':
             return handle_whatsapp_tracking_flow(user, session, message_text, tracking_session, db_service)
-            
-            # Check if user is asking for specific order details
-            order_id_patterns = ['QB', 'order', 'track']
-            has_order_id = any(pattern in message_text.upper() for pattern in order_id_patterns)
-            
-            if has_order_id and orders:
-                # User mentioned specific order - try to find it
-                tracking_session['status'] = 'selecting'
-                try:
-                    tracking_session['available_orders'] = [order.to_dict() for order in orders]
-                except AttributeError as e:
-                    logger.error(f"WhatsApp Error calling to_dict on Order object: {e}")
-                    # Fallback: create dict manually
-                    tracking_session['available_orders'] = []
-                    for order in orders:
-                        tracking_session['available_orders'].append({
-                            'id': order.id,
-                            'order_id': order.order_id,
-                            'user_email': order.user_email,
-                            'warehouse_location': order.warehouse_location,
-                            'total_amount': order.total_amount,
-                            'status': order.status,
-                            'order_date': order.order_date.isoformat(),
-                            'updated_at': order.updated_at.isoformat()
-                        })
-                
-                # Look for order ID in the message
-                import re
-                order_id_match = re.search(r'QB[A-Z0-9]+', message_text.upper())
-                if order_id_match:
-                    order_id = order_id_match.group()
-                    # Find the specific order
-                    specific_order = next((order for order in orders if order.order_id == order_id), None)
-                    if specific_order:
-                        tracking_session['status'] = 'viewing'
-                        tracking_session['selected_order_id'] = order_id
-                        try:
-                            tracking_session['order_details'] = specific_order.to_dict()
-                        except AttributeError as e:
-                            logger.error(f"WhatsApp Error calling to_dict on specific Order object: {e}")
-                            # Fallback: create dict manually
-                            tracking_session['order_details'] = {
-                                'id': specific_order.id,
-                                'order_id': specific_order.order_id,
-                                'user_email': specific_order.user_email,
-                                'warehouse_location': specific_order.warehouse_location,
-                                'total_amount': specific_order.total_amount,
-                                'status': specific_order.status,
-                                'order_date': specific_order.order_date.isoformat(),
-                                'updated_at': specific_order.updated_at.isoformat()
-                            }
-                        
-                        # Get detailed order information
-                        order_details, message = order_service.get_order_status(order_id)
-                        if order_details:
-                            items_text = ""
-                            for item in order_details['items']:
-                                items_text += f"• {item['product_name']} (QB{item['product_code'][2:]}) - {item['quantity']} units × ₹{item['unit_price']:,.2f} = ₹{item['total_price']:,.2f}\n"
-                            
-                            response = f"""📦 Order Details for {order_id}:
-
-Status: {order_details['status'].title()}
-Order Date: {order_details['order_date'][:10]}
-Warehouse: {order_details['warehouse_location']}
-
-Items:
-{items_text}
-Total Amount: ₹{order_details['total_amount']:,.2f}
-
-Would you like to track another order or need more information?"""
-                        else:
-                            response = f"Order {order_id} not found. Here are your available orders:"
-                            for order in orders[:5]:
-                                response += f"\n• {order.order_id} - {order.status} (₹{order.total_amount:,.2f})"
-                    else:
-                        response = f"Order {order_id} not found. Here are your available orders:"
-                        for order in orders[:5]:
-                            response += f"\n• {order.order_id} - {order.status} (₹{order.total_amount:,.2f})"
-                else:
-                    # Show available orders for selection
-                    response = "Here are your recent orders. Please select one to track:\n\n"
-                    for i, order in enumerate(orders[:5], 1):
-                        response += f"{i}. Order {order.order_id} - {order.status} (₹{order.total_amount:,.2f}) - {order.order_date.strftime('%Y-%m-%d')}\n"
-                    response += "\nPlease specify the order ID or number to track."
-            else:
-                # General tracking request - show available orders
-                tracking_session['status'] = 'selecting'
-                try:
-                    tracking_session['available_orders'] = [order.to_dict() for order in orders]
-                except AttributeError as e:
-                    logger.error(f"WhatsApp Error calling to_dict on Order objects: {e}")
-                    # Fallback: create dict manually
-                    tracking_session['available_orders'] = []
-                    for order in orders:
-                        tracking_session['available_orders'].append({
-                            'id': order.id,
-                            'order_id': order.order_id,
-                            'user_email': order.user_email,
-                            'warehouse_location': order.warehouse_location,
-                            'total_amount': order.total_amount,
-                            'status': order.status,
-                            'order_date': order.order_date.isoformat(),
-                            'updated_at': order.updated_at.isoformat()
-                        })
-                
-            if orders:
-                    response = "Here are your recent orders. Please select one to track:\n\n"
-                    for i, order in enumerate(orders[:5], 1):
-                        response += f"{i}. Order {order.order_id} - {order.status} (₹{order.total_amount:,.2f}) - {order.order_date.strftime('%Y-%m-%d')}\n"
-                    response += "\nPlease specify the order ID or number to track."
-            else:
-                    response = "You don't have any orders yet. Would you like to place a new order?"
-            
-            # Save session data back to user
-            if hasattr(user, 'whatsapp_session_data'):
-                user.whatsapp_session_data = whatsapp_session_data
-                db.session.commit()
-            return response
         
         elif intent == 'COMPANY_INFO':
             # Use web search for real-time company information - same as web interface
