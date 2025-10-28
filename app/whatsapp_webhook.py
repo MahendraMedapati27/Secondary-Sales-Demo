@@ -364,7 +364,7 @@ def handle_whatsapp_order_flow(user, session, message_text, order_session, db_se
             # Create the order
             try:
                 order, message = enhanced_order_service.create_order_from_cart(
-                    user_id=user.id,
+                user_id=user.id,
                     cart_items=order_session['items'],
                     warehouse_id=warehouse.id,
                     warehouse_location=warehouse_location,
@@ -651,13 +651,13 @@ Need help? Type 'help' for more information."""
         
         # Check if user is asking for specific order details
         import re
-        order_id_patterns = [r'QB\d+', r'order\s+(\d+)', r'track\s+(\d+)']
+        order_id_patterns = [r'QB[A-Z0-9]+', r'order\s+(\d+)', r'track\s+(\d+)']
         specific_order_id = None
         
         for pattern in order_id_patterns:
             match = re.search(pattern, message_text.upper())
             if match:
-                if pattern == r'QB\d+':
+                if pattern == r'QB[A-Z0-9]+':
                     specific_order_id = match.group(0)
                 else:
                     specific_order_id = f"QB{match.group(1)}"
@@ -686,9 +686,13 @@ Need help? Type 'help' for more information."""
                 
                 # Get order items
                 try:
-                    order_items = db_service.get_order_items(target_order.id)
+                    order_items = target_order.order_items
                     for item in order_items:
-                        response += f"• {item.product_name} - {item.quantity} units - ₹{item.total_price:,.2f}\n"
+                        # Get product name from the product relationship
+                        from app.models import Product
+                        product = Product.query.get(item.product_id)
+                        product_name = product.product_name if product else item.product_code
+                        response += f"• {product_name} - {item.product_quantity_ordered} units - ₹{item.total_price:,.2f}\n"
                 except Exception as e:
                     logger.error(f"Error getting order items: {str(e)}")
                     response += "• Order items details not available\n"
@@ -700,7 +704,7 @@ Need help? Type 'help' for more information."""
 • Contact support if you have questions about this order"""
                 
                 return response
-        else:
+            else:
                 return f"""❌ **Order Not Found**
 
 I couldn't find order {specific_order_id} in your account.
@@ -708,7 +712,7 @@ I couldn't find order {specific_order_id} in your account.
 **Your Recent Orders:**
 """
         
-        # Show all orders in a WhatsApp-friendly format
+        # Show all orders in a WhatsApp-friendly format (when no specific order ID provided)
         response = f"""📋 **Your Orders ({len(orders)} total)**
 
 """
