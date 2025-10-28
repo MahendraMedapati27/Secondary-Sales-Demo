@@ -319,7 +319,7 @@ def handle_whatsapp_onboarding(user, session, message_text):
             logger.info("WhatsApp Onboarding - Step 3: Asking for warehouse")
             
             # Validate warehouse selection
-        db_service = get_db_service()
+            db_service = get_db_service()
             warehouses = db_service.get_warehouses()
             warehouse_names = [w.location_name.lower() for w in warehouses]
             
@@ -659,7 +659,7 @@ Need help? Type 'help' for more information."""
             if match:
                 if pattern == r'QB[A-Z0-9]+':
                     specific_order_id = match.group(0)
-            else:
+                else:
                     specific_order_id = f"QB{match.group(1)}"
                 break
         
