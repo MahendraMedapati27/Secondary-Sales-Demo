@@ -37,6 +37,8 @@ jobs:
       run: |
         echo "Checking deployment files..."
         ls -la
+        echo "Checking startup.py exists:"
+        ls -la startup.py
         echo "Checking run.py exists:"
         ls -la run.py
         echo "Checking web.config exists:"
