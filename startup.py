@@ -13,8 +13,9 @@ from pathlib import Path
 project_root = Path(__file__).resolve().parent
 sys.path.insert(0, str(project_root))
 
-def main():
-    """Main startup function"""
+if __name__ == '__main__':
+    # Run initialization
+    app = None
     try:
         print("=" * 60)
         print("🚀 RB (Powered by Quantum Blue AI) - Startup")
@@ -88,17 +89,38 @@ def main():
             print("🌐 Access the chatbot at: http://localhost:5000")
             print("📱 Enhanced chatbot at: http://localhost:5000/enhanced-chat")
             print("=" * 60)
-            
     except ImportError as e:
         print(f"❌ Import Error: {e}")
         print("💡 Make sure you're running from the correct directory and all dependencies are installed.")
         print("   Run: pip install -r requirements.txt")
         sys.exit(1)
-        
     except Exception as e:
         print(f"❌ Startup Error: {e}")
         print("💡 Check your configuration and try again.")
         sys.exit(1)
-
-if __name__ == '__main__':
-    main()
+    
+    # Now start the server using run.py logic
+    if app:
+        try:
+            print("\n🚀 Starting Flask server...")
+            # Get configuration from environment
+            debug_mode = os.getenv('FLASK_DEBUG', 'False').lower() == 'true'
+            host = os.getenv('FLASK_HOST', '0.0.0.0')
+            port = int(os.getenv('FLASK_PORT', 8000))
+            
+            # For Azure App Service, use waitress for production
+            if os.getenv('FLASK_ENV') == 'production':
+                from waitress import serve
+                print("🚀 Starting production server with Waitress...")
+                serve(app, host=host, port=port, threads=4)
+            else:
+                app.run(
+                    host=host,
+                    port=port,
+                    debug=debug_mode,
+                    threaded=True
+                )
+        except Exception as e:
+            print(f"❌ Server Error: {e}")
+            print("💡 Check your configuration and try again.")
+            sys.exit(1)
