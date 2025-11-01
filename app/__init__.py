@@ -8,7 +8,6 @@ from pathlib import Path
 import logging
 import threading
 import time
-import atexit
 
 db = SQLAlchemy()
 login_manager = LoginManager()
@@ -186,15 +185,9 @@ END
         stock_checker_thread.start()
         logging.info("🚀 Stock checker background thread started (runs every 30 minutes)")
         
-        # Register cleanup on exit
-        def cleanup_stock_checker():
-            logging.info("🛑 Stopping stock checker background thread...")
-        
-        atexit.register(cleanup_stock_checker)
-        
     except Exception as e:
         logging.warning(f"Failed to start stock checker background thread: {str(e)}")
-        logging.warning("Pending orders will not be auto-fulfilled. Run 'python run_stock_checker.py' manually.")
+        logging.warning("Pending orders will not be auto-fulfilled.")
     
     return app
 

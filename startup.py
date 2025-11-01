@@ -1,7 +1,8 @@
 ﻿#!/usr/bin/env python3
 """
 Startup script for RB (Powered by Quantum Blue AI) Chatbot
-Initializes database and sample data
+Initializes database and sample data, then starts the Flask server
+This is used for Azure App Service deployment
 """
 
 import os
