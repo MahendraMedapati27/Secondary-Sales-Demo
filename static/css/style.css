@@ -1,29 +1,367 @@
 :root {
-    --primary-color: #0d6efd;
+    --primary-color: #2563eb;
+    --primary-dark: #1e40af;
+    --primary-light: #3b82f6;
     --secondary-color: #6c757d;
     --success-color: #198754;
     --danger-color: #dc3545;
+    --blue-50: #eff6ff;
+    --blue-100: #dbeafe;
+    --blue-200: #bfdbfe;
+    --blue-300: #93c5fd;
+    --blue-400: #60a5fa;
+    --blue-500: #3b82f6;
+    --blue-600: #2563eb;
+    --blue-700: #1d4ed8;
+    --blue-800: #1e40af;
+    --blue-900: #1e3a8a;
 }
 
 body {
     min-height: 100vh;
     display: flex;
     flex-direction: column;
+    overflow: hidden;
+    background: #ffffff !important;
+    background-image: 
+        radial-gradient(circle at 20% 50%, rgba(37, 99, 235, 0.03) 0%, transparent 50%),
+        radial-gradient(circle at 80% 80%, rgba(30, 64, 175, 0.03) 0%, transparent 50%),
+        radial-gradient(circle at 40% 20%, rgba(59, 130, 246, 0.02) 0%, transparent 50%);
+    margin: 0;
+    padding: 0;
 }
 
 main {
     flex: 1;
+    overflow: hidden;
+    padding: 0 !important;
+    background: #ffffff;
+}
+
+/* Chat container with split layout */
+.chat-container {
+    display: flex;
+    height: 100vh;
+    width: 100%;
+    overflow: hidden;
+    background: #ffffff;
+    position: relative;
+}
+
+/* Left Side - Avatar Section */
+.avatar-section {
+    flex: 1;
+    position: relative;
+    background: #ffffff;
+    background-image: 
+        radial-gradient(circle at 20% 50%, rgba(37, 99, 235, 0.03) 0%, transparent 50%),
+        radial-gradient(circle at 80% 80%, rgba(30, 64, 175, 0.03) 0%, transparent 50%),
+        radial-gradient(circle at 40% 20%, rgba(59, 130, 246, 0.02) 0%, transparent 50%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    min-height: 500px;
+    height: 100%;
+}
+
+#avatar-canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+
+/* Simple 2D Avatar Styles */
+#avatar-container {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    min-height: 400px; /* Ensure minimum height for iframe */
+}
+
+#vroid-hub-iframe {
+    width: 100% !important;
+    height: 100% !important;
+    min-height: 400px;
+    z-index: 10;
+}
+
+.simple-avatar {
+    width: 100%;
+    height: 100%;
+    position: relative;
+    transition: all 0.3s ease;
+    display: none !important; /* Hidden by default - only show if 3D avatar fails */
+    align-items: center;
+    justify-content: center;
+    min-height: 300px;
+    visibility: hidden;
+    opacity: 0;
+    pointer-events: none;
+}
+
+.simple-avatar > div {
+    width: 300px;
+    height: 300px;
+    position: relative;
+}
+
+/* Robot Head */
+.avatar-head {
+    width: 200px;
+    height: 200px;
+    background: linear-gradient(135deg, #4a90e2 0%, #357abd 100%);
+    border-radius: 50%;
+    position: relative;
+    margin: 0 auto;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+    border: 4px solid #2e5c8a;
+}
+
+/* Antenna */
+.avatar-antenna {
+    position: absolute;
+    top: -20px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 6px;
+    height: 40px;
+    background: linear-gradient(180deg, #2e5c8a 0%, #4a90e2 100%);
+    border-radius: 3px 3px 0 0;
+}
+
+.avatar-antenna::before {
+    content: '';
+    position: absolute;
+    top: -8px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 12px;
+    height: 12px;
+    background: #ffd700;
+    border-radius: 50%;
+    box-shadow: 0 0 10px rgba(255, 215, 0, 0.5);
+    animation: pulse 2s ease-in-out infinite;
+}
+
+/* Eyes */
+.avatar-eyes {
+    display: flex;
+    justify-content: space-around;
+    padding-top: 50px;
+    gap: 40px;
+}
+
+.avatar-eye {
+    width: 40px;
+    height: 40px;
+    background: #ffffff;
+    border-radius: 50%;
+    position: relative;
+    border: 3px solid #2e5c8a;
+    box-shadow: inset 0 0 10px rgba(0, 0, 0, 0.2);
+    transition: all 0.3s ease;
+}
+
+.avatar-eye::before {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 20px;
+    height: 20px;
+    background: #2e5c8a;
+    border-radius: 50%;
+    transition: all 0.3s ease;
+}
+
+/* Mouth */
+.avatar-mouth {
+    position: absolute;
+    bottom: 40px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 60px;
+    height: 30px;
+    border: 3px solid #2e5c8a;
+    border-top: none;
+    border-radius: 0 0 60px 60px;
+    transition: all 0.3s ease;
+}
+
+/* Speaking Animation */
+.speaking .avatar-mouth {
+    animation: mouthSpeak 0.5s ease-in-out infinite;
+}
+
+.mouth-speaking {
+    animation: mouthSpeak 0.5s ease-in-out infinite;
+}
+
+/* Expressions */
+.happy .avatar-eye::before {
+    transform: translate(-50%, -50%) scale(1.2);
+}
+
+.happy .avatar-mouth {
+    border-radius: 0 0 60px 60px;
+    height: 40px;
+}
+
+.sad .avatar-mouth {
+    border-radius: 60px 60px 0 0;
+    border-top: 3px solid #2e5c8a;
+    border-bottom: none;
+    top: auto;
+    bottom: 30px;
+}
+
+.excited .avatar-head {
+    animation: bounce 0.5s ease-in-out infinite;
+}
+
+.thinking .avatar-eye::before {
+    animation: think 1s ease-in-out infinite;
+}
+
+/* Animations */
+@keyframes breathing {
+    0%, 100% {
+        transform: scale(1);
+    }
+    50% {
+        transform: scale(1.05);
+    }
+}
+
+@keyframes blink {
+    0%, 100% {
+        height: 40px;
+    }
+    50% {
+        height: 5px;
+    }
+}
+
+@keyframes mouthSpeak {
+    0%, 100% {
+        height: 30px;
+        width: 60px;
+    }
+    50% {
+        height: 50px;
+        width: 70px;
+    }
+}
+
+@keyframes pulse {
+    0%, 100% {
+        opacity: 1;
+        transform: translateX(-50%) scale(1);
+    }
+    50% {
+        opacity: 0.7;
+        transform: translateX(-50%) scale(1.1);
+    }
+}
+
+@keyframes bounce {
+    0%, 100% {
+        transform: translateY(0);
+    }
+    50% {
+        transform: translateY(-10px);
+    }
+}
+
+@keyframes think {
+    0%, 100% {
+        transform: translate(-50%, -50%) scale(1);
+    }
+    50% {
+        transform: translate(-50%, -50%) scale(0.8);
+    }
+}
+
+.avatar-status {
+    position: absolute;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(37, 99, 235, 0.8);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    color: white;
+    padding: 10px 20px;
+    border-radius: 20px;
+    font-size: 14px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    box-shadow: 0 4px 16px rgba(37, 99, 235, 0.3);
+    z-index: 10;
+}
+
+/* Right Side - Chat Section */
+.chat-section {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    background: #ffffff;
+    background-image: 
+        radial-gradient(circle at 20% 50%, rgba(37, 99, 235, 0.03) 0%, transparent 50%),
+        radial-gradient(circle at 80% 80%, rgba(30, 64, 175, 0.03) 0%, transparent 50%),
+        radial-gradient(circle at 40% 20%, rgba(59, 130, 246, 0.02) 0%, transparent 50%);
+    overflow: hidden;
+    padding: 20px;
+    align-items: center;
+    justify-content: center;
+}
+
+.chat-section .card {
+    height: 90%;
+    width: 90%;
+    max-width: 900px;
+    margin: 0;
+    border-radius: 24px;
+    display: flex;
+    flex-direction: column;
+    background: rgba(255, 255, 255, 0.5);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    box-shadow: 0 8px 32px rgba(37, 99, 235, 0.1), 
+                0 0 0 1px rgba(255, 255, 255, 0.5) inset;
+    overflow: hidden;
+    transition: all 0.3s ease;
+}
+
+.chat-section .card:hover {
+    box-shadow: 0 12px 48px rgba(37, 99, 235, 0.15), 
+                0 0 0 1px rgba(255, 255, 255, 0.6) inset;
+    transform: translateY(-2px);
 }
 
 .chat-messages {
-    background-color: #f8f9fa;
-    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.3);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border-radius: 16px;
     padding: 20px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    min-height: 0; /* Important for flex scrolling */
+    max-height: 100%; /* Constrain height for scrolling */
+    overflow-y: auto; /* Enable scrolling */
+    overflow-x: hidden; /* Prevent horizontal scroll */
+    scroll-behavior: smooth; /* Smooth scrolling */
 }
 
 .message {
-    margin-bottom: 20px;
+    margin-bottom: 15px; /* Reduced margin */
     animation: fadeIn 0.3s ease-in;
+    font-size: 0.875rem; /* Smaller message text */
 }
 
 @keyframes fadeIn {
@@ -47,16 +385,42 @@ main {
 
 .message-bubble {
     display: inline-block;
-    max-width: 70%;
+    max-width: 95%; /* Allow more width for tables */
     padding: 12px 18px;
     border-radius: 18px;
     word-wrap: break-word;
     box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+    font-size: 0.875rem; /* Smaller text size */
+    line-height: 1.5;
+    overflow: visible; /* Allow content to expand if needed */
+}
+
+/* Special handling for bubbles with tables */
+.message-bubble .table-responsive {
+    max-width: 100%; /* Tables should use full available width */
+}
+
+/* Alternative for browsers that don't support :has() */
+.message-bubble.table-bubble {
+    max-width: 98%; /* Even wider when containing tables */
+    padding: 15px; /* Slightly more padding for tables */
+}
+
+/* Modern browsers with :has() support */
+@supports selector(:has(*)) {
+    .message-bubble:has(.table-responsive) {
+        max-width: 98%; /* Even wider when containing tables */
+        padding: 15px; /* Slightly more padding for tables */
+    }
 }
 
 .message.user .message-bubble {
-    background-color: var(--primary-color);
+    background: linear-gradient(135deg, rgba(37, 99, 235, 0.9) 0%, rgba(30, 64, 175, 0.9) 100%);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
     color: white;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
 }
 
 /* Enhanced styling for order confirmation messages */
@@ -83,23 +447,144 @@ main {
 }
 
 .message.bot .message-bubble {
-    background-color: white;
-    color: #333;
-    border: 1px solid #dee2e6;
+    background: rgba(239, 246, 255, 0.8);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    color: #1e40af;
+    border: 1px solid rgba(37, 99, 235, 0.2);
+    box-shadow: 0 2px 8px rgba(37, 99, 235, 0.1);
 }
 
 .message-time {
-    font-size: 0.75rem;
+    font-size: 0.7rem; /* Smaller time text */
     color: #6c757d;
     margin-top: 5px;
 }
 
 .table-responsive {
     margin: 15px 0;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
 }
 
 table {
     font-size: 0.9rem;
+    margin-bottom: 0;
+}
+
+/* Enhanced table styles for order summaries */
+.message-bubble .table-responsive {
+    margin: 15px 0;
+    border-radius: 8px;
+    overflow-x: auto; /* Enable horizontal scroll if needed */
+    overflow-y: visible; /* Allow vertical expansion */
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    width: 100%;
+    max-width: 100%; /* Ensure it doesn't exceed container */
+    display: block; /* Change to block to fix width issues */
+}
+
+.message-bubble .table-responsive table {
+    width: 100%;
+    min-width: 650px; /* Increased for Discount and Scheme columns */
+    border-collapse: collapse;
+    display: table; /* Ensure proper table display */
+    margin: 0 auto; /* Center the table */
+}
+
+.message-bubble .table {
+    margin-bottom: 0;
+    font-size: 0.8rem; /* Smaller table text */
+    width: 100%;
+    table-layout: auto; /* Let table size naturally */
+    white-space: nowrap; /* Prevent text wrapping in cells */
+}
+
+.message-bubble .table thead th {
+    background: linear-gradient(135deg, rgba(37, 99, 235, 0.9), rgba(30, 64, 175, 0.9));
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    color: white;
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 0.75rem; /* Slightly smaller for better fit */
+    letter-spacing: 0.5px;
+    padding: 8px 6px; /* Reduced padding for better fit */
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-bottom: 2px solid rgba(255, 255, 255, 0.3);
+    white-space: nowrap; /* Prevent header text wrapping */
+}
+
+.message-bubble .table tbody td {
+    padding: 8px 6px; /* Reduced padding for better fit */
+    vertical-align: middle;
+    border-color: #e9ecef;
+    font-size: 0.75rem; /* Slightly smaller text */
+}
+
+/* Allow wrapping for first column (product name) but keep others compact */
+.message-bubble .table tbody td:first-child {
+    white-space: normal;
+    max-width: 200px;
+    word-break: break-word;
+}
+
+/* Keep other columns compact */
+.message-bubble .table tbody td:not(:first-child) {
+    white-space: nowrap;
+}
+
+.message-bubble .table tbody tr:hover {
+    background: rgba(239, 246, 255, 0.6);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+}
+
+.message-bubble .table tbody tr:nth-child(even) {
+    background: rgba(239, 246, 255, 0.4);
+}
+
+/* Special styling for numeric columns */
+.message-bubble .table .text-end {
+    font-weight: 600;
+    color: #198754;
+}
+
+.message-bubble .table .text-end:contains('$') {
+    color: var(--primary-color);
+}
+
+/* Product name styling */
+.message-bubble .table tbody td:first-child {
+    font-weight: 500;
+    color: #495057;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+    .message-bubble .table {
+        font-size: 0.7rem;
+    }
+    
+    .message-bubble .table thead th,
+    .message-bubble .table tbody td {
+        padding: 6px 4px;
+    }
+    
+    .message-bubble .table-responsive {
+        min-width: 550px; /* Increased for more columns on mobile */
+    }
+}
+
+/* Ensure tables don't get cut off */
+.message-bubble .table-responsive {
+    -webkit-overflow-scrolling: touch; /* Smooth scrolling on iOS */
+}
+
+.message-bubble table {
+    border-collapse: separate;
+    border-spacing: 0;
 }
 
 .footer {
@@ -110,22 +595,80 @@ table {
 
 .card {
     border: none;
-    border-radius: 10px;
+    border-radius: 24px;
+    background: rgba(255, 255, 255, 0.5);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+}
+
+.card-header {
+    background: linear-gradient(135deg, rgba(37, 99, 235, 0.9) 0%, rgba(30, 64, 175, 0.9) 100%) !important;
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1) !important;
+    border-radius: 24px 24px 0 0 !important;
+    color: white !important;
+    padding: 1.25rem;
+}
+
+.bg-gradient-primary {
+    background: linear-gradient(135deg, rgba(37, 99, 235, 0.9) 0%, rgba(30, 64, 175, 0.9) 100%) !important;
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+}
+
+.card-body {
+    background: transparent;
+    min-height: 0; /* Important for flex scrolling */
+    overflow: hidden; /* Prevent card-body from scrolling */
+}
+
+.bg-light {
+    background: rgba(255, 255, 255, 0.4) !important;
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.border-top {
+    border-top: 1px solid rgba(37, 99, 235, 0.2) !important;
+}
+
+.border-bottom {
+    border-bottom: 1px solid rgba(37, 99, 235, 0.2) !important;
 }
 
 .btn-primary {
-    background-color: var(--primary-color);
+    background: linear-gradient(135deg, var(--primary-color) 0%, var(--primary-dark) 100%);
     border-color: var(--primary-color);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
+    transition: all 0.3s ease;
 }
 
 .btn-primary:hover {
-    background-color: #0b5ed7;
-    border-color: #0a58ca;
+    background: linear-gradient(135deg, var(--primary-light) 0%, var(--primary-color) 100%);
+    border-color: var(--primary-light);
+    box-shadow: 0 6px 20px rgba(37, 99, 235, 0.4);
+    transform: translateY(-2px);
+}
+
+#messageInput {
+    background: rgba(255, 255, 255, 0.8);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid rgba(37, 99, 235, 0.2);
+    border-radius: 12px;
+    transition: all 0.3s ease;
 }
 
 #messageInput:focus {
+    background: rgba(255, 255, 255, 0.95);
     border-color: var(--primary-color);
-    box-shadow: 0 0 0 0.2rem rgba(13, 110, 253, 0.25);
+    box-shadow: 0 0 0 0.2rem rgba(37, 99, 235, 0.25), 0 4px 12px rgba(37, 99, 235, 0.15);
+    outline: none;
 }
 
 /* Error message styling */
@@ -154,6 +697,38 @@ table {
 
 /* Responsive design improvements */
 @media (max-width: 768px) {
+    .chat-container {
+        flex-direction: column;
+        background: #ffffff;
+    }
+    
+    .avatar-section {
+        height: 40vh;
+        flex: 0 0 40vh;
+        background: #ffffff;
+        background-image: 
+            radial-gradient(circle at 20% 50%, rgba(37, 99, 235, 0.03) 0%, transparent 50%),
+            radial-gradient(circle at 80% 80%, rgba(30, 64, 175, 0.03) 0%, transparent 50%),
+            radial-gradient(circle at 40% 20%, rgba(59, 130, 246, 0.02) 0%, transparent 50%);
+    }
+    
+    .chat-section {
+        height: 60vh;
+        flex: 0 0 60vh;
+        padding: 15px;
+        background: #ffffff;
+        background-image: 
+            radial-gradient(circle at 20% 50%, rgba(37, 99, 235, 0.03) 0%, transparent 50%),
+            radial-gradient(circle at 80% 80%, rgba(30, 64, 175, 0.03) 0%, transparent 50%),
+            radial-gradient(circle at 40% 20%, rgba(59, 130, 246, 0.02) 0%, transparent 50%);
+    }
+    
+    .chat-section .card {
+        width: 100%;
+        height: 100%;
+        border-radius: 20px;
+    }
+    
     .chat-messages {
         height: 400px !important;
     }
@@ -184,6 +759,32 @@ table {
     opacity: 0.8;
 }
 
+/* Welcome message styling */
+.chat-messages .text-center {
+    background: rgba(255, 255, 255, 0.4);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border-radius: 16px;
+    padding: 30px;
+    border: 1px solid rgba(37, 99, 235, 0.1);
+}
+
+.chat-messages .text-center i {
+    color: var(--primary-color);
+    filter: drop-shadow(0 2px 4px rgba(37, 99, 235, 0.2));
+}
+
+.chat-messages .text-center h4 {
+    color: var(--primary-dark);
+    font-weight: 600;
+    font-size: 1.1rem; /* Smaller welcome heading */
+}
+
+.chat-messages .text-center p {
+    color: var(--primary-color);
+    font-size: 0.875rem; /* Smaller welcome text */
+}
+
 /* Table styling improvements */
 .table-responsive {
     border-radius: 8px;
@@ -196,52 +797,170 @@ table {
 }
 
 .table th {
-    background-color: #f8f9fa;
+    background: rgba(239, 246, 255, 0.8);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
     font-weight: 600;
-    border-bottom: 2px solid #dee2e6;
+    border-bottom: 2px solid rgba(37, 99, 235, 0.2);
+    color: var(--primary-dark);
+}
+
+.table tbody tr {
+    background: rgba(255, 255, 255, 0.5);
+    transition: all 0.2s ease;
+}
+
+.table tbody tr:hover {
+    background: rgba(239, 246, 255, 0.6);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+}
+
+.table tbody tr:nth-child(even) {
+    background: rgba(255, 255, 255, 0.3);
+}
+
+.table td {
+    border-color: rgba(37, 99, 235, 0.1);
 }
 
 /* Form improvements */
+.form-control {
+    background: rgba(255, 255, 255, 0.8);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid rgba(37, 99, 235, 0.2);
+    transition: all 0.3s ease;
+}
+
 .form-control:focus {
+    background: rgba(255, 255, 255, 0.95);
     border-color: var(--primary-color);
-    box-shadow: 0 0 0 0.2rem rgba(13, 110, 253, 0.25);
+    box-shadow: 0 0 0 0.2rem rgba(37, 99, 235, 0.25);
+    outline: none;
 }
 
 .input-group-text {
-    background-color: #f8f9fa;
-    border-color: #ced4da;
+    background: rgba(255, 255, 255, 0.6);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border-color: rgba(37, 99, 235, 0.2);
+    color: var(--primary-color);
 }
 
 /* Button improvements */
 .btn {
     transition: all 0.3s ease;
-    border-radius: 6px;
+    border-radius: 12px;
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
 }
 
 .btn:hover {
-    transform: translateY(-1px);
-    box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+    transform: translateY(-2px);
+    box-shadow: 0 6px 16px rgba(37, 99, 235, 0.25);
 }
 
-/* Card improvements */
-.card {
-    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-    transition: box-shadow 0.3s ease;
+.btn-light {
+    background: rgba(255, 255, 255, 0.8);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid rgba(37, 99, 235, 0.2);
+    color: var(--primary-color);
 }
 
-.card:hover {
-    box-shadow: 0 8px 15px rgba(0, 0, 0, 0.15);
+.btn-light:hover {
+    background: rgba(255, 255, 255, 0.95);
+    color: var(--primary-dark);
+}
+
+/* Modal glassmorphism */
+.modal-content {
+    background: rgba(255, 255, 255, 0.85) !important;
+    backdrop-filter: blur(30px);
+    -webkit-backdrop-filter: blur(30px);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    border-radius: 24px !important;
+    box-shadow: 0 20px 60px rgba(37, 99, 235, 0.15);
+}
+
+.modal-header {
+    background: linear-gradient(135deg, rgba(37, 99, 235, 0.1) 0%, rgba(30, 64, 175, 0.1) 100%);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border-bottom: 1px solid rgba(37, 99, 235, 0.2);
+    border-radius: 24px 24px 0 0;
+}
+
+.modal-body {
+    background: transparent;
+}
+
+.modal-footer {
+    background: rgba(255, 255, 255, 0.5);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border-top: 1px solid rgba(37, 99, 235, 0.2);
+    border-radius: 0 0 24px 24px;
 }
 
 /* Alert improvements */
 .alert {
-    border-radius: 8px;
-    border: none;
-    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    border-radius: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    box-shadow: 0 4px 12px rgba(37, 99, 235, 0.1);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+}
+
+.alert-primary {
+    background: rgba(239, 246, 255, 0.8);
+    color: var(--primary-dark);
+    border-color: rgba(37, 99, 235, 0.2);
+}
+
+.alert-success {
+    background: rgba(220, 252, 231, 0.8);
+    color: #166534;
+    border-color: rgba(34, 197, 94, 0.2);
 }
 
 /* Loading spinner */
 .spinner-border-sm {
     width: 1rem;
     height: 1rem;
+    border-color: var(--primary-color);
+    border-right-color: transparent;
+}
+
+/* Typing indicator */
+#typingIndicator {
+    background: rgba(239, 246, 255, 0.7);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border-radius: 12px;
+    padding: 10px 15px;
+    border: 1px solid rgba(37, 99, 235, 0.2);
+    color: var(--primary-dark);
+}
+
+#typingIndicator .spinner-border-sm {
+    border-color: var(--primary-color);
+    border-right-color: transparent;
+}
+
+/* Badge improvements */
+.badge {
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    box-shadow: 0 2px 8px rgba(37, 99, 235, 0.2);
+}
+
+.badge.bg-success {
+    background: linear-gradient(135deg, rgba(25, 135, 84, 0.9) 0%, rgba(21, 115, 71, 0.9) 100%) !important;
+}
+
+.badge i {
+    animation: pulse 2s ease-in-out infinite;
 }

@@ -1,0 +1,372 @@
+{% extends "base.html" %}
+
+{% block title %}RB (Powered by Quantum Blue AI) - Chat{% endblock %}
+
+{% block content %}
+<!-- CRITICAL: Block old cached scripts BEFORE anything loads -->
+<script>
+(function() {
+    'use strict';
+    const PAGE_VERSION = 'threejs-avatar-v3.0-SERVER-' + Date.now();
+    const SERVER_VERSION = '{{ cache_buster if cache_buster else "NO_SERVER_VERSION" }}';
+    console.log('═══════════════════════════════════════════════════════');
+    console.log('🚀 NEW CODE LOADING - Version:', PAGE_VERSION);
+    console.log('📦 SERVER VERSION:', SERVER_VERSION);
+    console.log('📅 Timestamp:', new Date().toISOString());
+    console.log('🔧 Using THREE.js for avatar (NOT Model Viewer)');
+    console.log('═══════════════════════════════════════════════════════');
+    
+    // CRITICAL: If we see old logs, something is wrong
+    if (!SERVER_VERSION || SERVER_VERSION === 'NO_SERVER_VERSION') {
+        console.error('❌ CRITICAL: Server version not found! Flask is serving OLD cached template!');
+        console.error('❌ Please restart Flask server and clear ALL caches!');
+    }
+    
+    // Force clear any cached THREE.js globals
+    if (window.THREE) {
+        console.warn('⚠️ Clearing cached THREE.js object');
+        delete window.THREE;
+    }
+    
+    // CRITICAL: Check if we have old cached HTML - if so, force reload
+    // Check for old scripts in DOM
+    const oldScripts = [
+        document.querySelector('script[src*="three@0.149"]'),
+        document.querySelector('script[src*="three-vrm"]'),
+        document.querySelector('script[src*="GLTFLoader.js"]:not([type="module"])'),
+        ...Array.from(document.querySelectorAll('script')).filter(s => 
+            s.innerHTML && s.innerHTML.includes('Library Loading Check')
+        )
+    ].filter(Boolean);
+    
+    // If old scripts are found, just remove them and continue (no reload)
+    if (oldScripts.length > 0) {
+        console.warn('═══════════════════════════════════════════════════════');
+        console.warn('⚠️ OLD CACHED SCRIPTS DETECTED - Removing them...');
+        console.warn(`⚠️ Found ${oldScripts.length} old script(s) in page`);
+        
+        // Remove old scripts immediately and continue
+        oldScripts.forEach(s => {
+            console.warn('🚫 Removing old cached script:', s.src || 'inline script');
+            s.remove();
+        });
+        
+        console.warn('✅ Old scripts removed - continuing with new code');
+        console.warn('═══════════════════════════════════════════════════════');
+    }
+    
+    // Remove any old script tags immediately (but don't log excessively)
+    const oldScriptTags = document.querySelectorAll('script[src*="three@0.149"], script[src*="three-vrm"], script[src*="GLTFLoader.js"]:not([type="module"])');
+    if (oldScriptTags.length > 0) {
+        console.warn(`🚫 Found and removing ${oldScriptTags.length} old cached script(s)`);
+        oldScriptTags.forEach(s => s.remove());
+    }
+    console.log('🔄 Page version:', PAGE_VERSION, '- Clearing cached scripts');
+    
+    // If old THREE.js is already loaded, warn and clear
+    if (typeof THREE !== 'undefined') {
+        console.warn('⚠️ OLD THREE.js detected in cache - this should NOT be here!');
+        console.warn('⚠️ Please clear browser cache (Ctrl+Shift+Delete)');
+        // Try to clean up
+        delete window.THREE;
+        delete window.THREE_VRM;
+    }
+    
+    // Block script tags with Three.js, GLTFLoader, VRM, Babylon
+    const blockedPatterns = ['three.js', 'GLTFLoader', 'three-vrm', 'babylon'];
+    
+    // Remove any existing blocked scripts from DOM immediately
+    function removeBlockedScripts() {
+        const scripts = document.querySelectorAll('script[src]');
+        scripts.forEach(function(script) {
+            blockedPatterns.forEach(function(pattern) {
+                if (script.src && script.src.includes(pattern)) {
+                    console.warn('🚫 Removing cached script from DOM:', script.src);
+                    script.remove();
+                }
+            });
+        });
+    }
+    
+    // Run immediately
+    removeBlockedScripts();
+    
+    // Run again after a short delay to catch late-loading scripts
+    setTimeout(removeBlockedScripts, 100);
+    setTimeout(removeBlockedScripts, 500);
+    
+    // Intercept script tag creation
+    const Observer = window.MutationObserver || window.WebKitMutationObserver;
+    if (Observer) {
+        const observer = new Observer(function(mutations) {
+            mutations.forEach(function(mutation) {
+                mutation.addedNodes.forEach(function(node) {
+                    if (node.tagName === 'SCRIPT' && node.src) {
+                        blockedPatterns.forEach(function(pattern) {
+                            if (node.src.includes(pattern)) {
+                                console.warn('🚫 Blocked cached script:', node.src);
+                                node.remove();
+                                return false;
+                            }
+                        });
+                    }
+                });
+            });
+        });
+        observer.observe(document.head, { childList: true, subtree: true });
+        observer.observe(document.body, { childList: true, subtree: true });
+    }
+    
+    // Also override createElement early
+    const originalCreateElement = document.createElement.bind(document);
+    document.createElement = function(tagName, options) {
+        const element = originalCreateElement(tagName, options);
+        if (tagName.toLowerCase() === 'script') {
+            const originalSetAttribute = element.setAttribute.bind(element);
+            element.setAttribute = function(name, value) {
+                if (name === 'src' && value) {
+                    for (let i = 0; i < blockedPatterns.length; i++) {
+                        if (value.includes(blockedPatterns[i])) {
+                            console.warn('🚫 Prevented script:', value);
+                            return; // Block it
+                        }
+                    }
+                }
+                return originalSetAttribute(name, value);
+            };
+        }
+        return element;
+    };
+    
+    console.log('✅ Early script blocker active');
+})();
+</script>
+<div class="chat-container">
+    <!-- Left Side: 3D VRM Avatar -->
+    <div class="avatar-section">
+        <div id="avatar-container" style="width: 100%; height: 100%; position: relative; min-height: 500px;">
+            <!-- THREE.js Canvas Container -->
+            <div id="three-canvas-container" style="width: 100%; height: 100%; position: absolute; top: 0; left: 0; z-index: 1;">
+                <!-- THREE.js will render here -->
+            </div>
+            <!-- Fallback 2D Avatar (shown if THREE.js fails) -->
+            <div class="simple-avatar" id="simple-avatar-fallback" style="display: none; align-items: center; justify-content: center; position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 0;">
+                <div style="text-align: center; position: relative;">
+                    <div class="avatar-antenna"></div>
+                    <div class="avatar-head">
+                        <div class="avatar-eyes">
+                            <div class="avatar-eye"></div>
+                            <div class="avatar-eye"></div>
+                        </div>
+                        <div class="avatar-mouth"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Right Side: Chatbot Interface -->
+    <div class="chat-section">
+        <div class="card shadow-lg h-100">
+            <div class="card-header bg-gradient-primary text-white d-flex justify-content-between align-items-center">
+                <div class="d-flex align-items-center">
+                    <h5 class="mb-0 me-3">
+                        <i class="fas fa-robot"></i> RB (Powered by Quantum Blue AI)
+                    </h5>
+                    <span class="badge bg-success" id="statusBadge">
+                        <i class="fas fa-circle"></i> Online
+                    </span>
+                </div>
+                <div class="btn-group" role="group">
+                    <button class="btn btn-sm btn-light" onclick="resetAvatarView()" title="Reset Avatar View">
+                        <i class="fas fa-redo"></i>
+                    </button>
+                    <button class="btn btn-sm btn-light" onclick="clearChat()" title="Clear Chat">
+                        <i class="fas fa-trash"></i>
+                    </button>
+                    <button class="btn btn-sm btn-light" onclick="viewCart()" title="View Cart" id="cartButton" style="display: none;">
+                        <i class="fas fa-shopping-cart"></i> Cart
+                    </button>
+                </div>
+            </div>
+            <div class="card-body p-0 d-flex flex-column">
+                <!-- User Info Panel (hidden by default) -->
+                <div id="userInfoPanel" class="bg-light p-3 border-bottom" style="display: none;">
+                    <div class="row">
+                        <div class="col-md-6">
+                            <strong>User:</strong> <span id="userName">-</span><br>
+                            <strong>Type:</strong> <span id="userType">-</span><br>
+                            <strong>Role:</strong> <span id="userRole">-</span>
+                        </div>
+                        <div class="col-md-6">
+                            <strong>Warehouse:</strong> <span id="userWarehouse">-</span><br>
+                            <strong>Status:</strong> <span class="badge bg-success">Active</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Chat Messages -->
+                <div id="chatMessages" class="chat-messages p-3 flex-grow-1" style="overflow-y: auto; min-height: 0;">
+                    <div class="text-center text-muted py-5">
+                        <i class="fas fa-robot fa-3x mb-3"></i>
+                        <h4>Welcome to RB (Powered by Quantum Blue AI)</h4>
+                        <p>Your intelligent assistant for orders, tracking, and more!</p>
+                    </div>
+                </div>
+                
+                <!-- Action Buttons - REMOVED per user request -->
+                
+                <!-- Input Area -->
+                <div class="p-3 border-top">
+                    <div class="input-group">
+                        <input type="text" id="messageInput" class="form-control" 
+                               placeholder="Enter your unique ID to start..." autocomplete="off" />
+                        <button class="btn btn-primary" onclick="sendMessage()" id="sendButton" disabled>
+                            <i class="fas fa-paper-plane"></i> Send
+                        </button>
+                    </div>
+                    <div class="form-text small text-muted mt-1">
+                        Press Enter to send • Shift+Enter for new line
+                    </div>
+                    <div id="typingIndicator" class="text-muted small mt-2" style="display: none;">
+                        <div class="d-flex align-items-center">
+                            <div class="spinner-border spinner-border-sm me-2" role="status">
+                                <span class="visually-hidden">Loading...</span>
+                            </div>
+                            <span>Quantum Blue is thinking...</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Cart Modal -->
+<div class="modal fade" id="cartModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="fas fa-shopping-cart"></i> Your Cart
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div id="cartContent">
+                    <!-- Cart items will be loaded here -->
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                <button type="button" class="btn btn-primary" onclick="placeOrder()">Place Order</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Order Summary Modal -->
+<div class="modal fade" id="orderSummaryModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="fas fa-receipt"></i> Order Summary
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div id="orderSummaryContent">
+                    <!-- Order summary will be loaded here -->
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                <button type="button" class="btn btn-success" onclick="confirmPlaceOrder()">Confirm Order</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Script blocker is already installed above -->
+
+<!-- THREE.js Avatar Loader (Module) -->
+<script type="module">
+// Add aggressive cache-busting with server timestamp
+const THREE_AVATAR_VERSION = '{{ cache_buster if cache_buster else range(1000, 9999) | random }}';
+const THREE_AVATAR_URL = "{{ url_for('static', filename='js/three_avatar.js') }}?v=" + THREE_AVATAR_VERSION + "&t=" + Date.now() + "&cb=" + Math.random();
+
+console.log('[THREE-MODULE-LOADER] Loading THREE.js avatar module...');
+console.log('[THREE-MODULE-LOADER] URL:', THREE_AVATAR_URL);
+
+// Create and load the module
+const script = document.createElement('script');
+script.type = 'module';
+script.src = THREE_AVATAR_URL;
+
+script.onload = () => {
+    console.log('[THREE-MODULE-LOADER] ✅ THREE.js avatar module script tag loaded');
+};
+
+script.onerror = (error) => {
+    console.error('[THREE-MODULE-LOADER] ❌ Failed to load THREE.js avatar module:', error);
+    console.error('[THREE-MODULE-LOADER] Error details:', {
+        type: error.type,
+        target: error.target,
+        message: error.message
+    });
+    
+    // Show fallback immediately
+    const fallback = document.getElementById('simple-avatar-fallback');
+    const status = document.getElementById('status-text');
+    if (fallback) {
+        fallback.style.display = 'flex';
+    }
+    if (status) {
+        status.textContent = 'Using fallback avatar (Module load failed)';
+    }
+};
+
+document.head.appendChild(script);
+</script>
+
+<!-- 
+    OLD MODEL-VIEWER CODE REMOVED - Now using THREE.js for avatar loading
+    See: static/js/three_avatar.js
+    
+    All old code has been completely removed.
+-->
+
+<!-- Avatar Functions (for chat integration) -->
+<script src="{{ url_for('static', filename='js/avatar.js') }}?v={{ range(1000, 9999) | random }}"></script>
+<script src="{{ url_for('static', filename='js/enhanced_chat.js') }}?v={{ range(1000, 9999) | random }}"></script>
+
+<!-- Fallback: If THREE.js module fails to load, show fallback avatar -->
+<script>
+(function() {
+    console.log('[FALLBACK-CHECK] Checking if THREE.js avatar loaded...');
+    
+    // Wait for THREE.js to initialize
+    setTimeout(() => {
+        // Check if avatar loaded event was fired
+        if (!window.avatarLoaded && typeof window.avatarSpeak !== 'function') {
+            console.warn('[FALLBACK-CHECK] THREE.js avatar not loaded, showing fallback');
+            const fallback = document.getElementById('simple-avatar-fallback');
+            const status = document.getElementById('status-text');
+            if (fallback) {
+                fallback.style.display = 'flex';
+            }
+            if (status) {
+                status.textContent = 'Using fallback avatar';
+            }
+        }
+    }, 5000);
+    
+    // Listen for avatar loaded event
+    window.addEventListener('avatarLoaded', () => {
+        console.log('[FALLBACK-CHECK] ✅ Avatar loaded successfully');
+        window.avatarLoaded = true;
+    });
+})();
+</script>
+{% endblock %}

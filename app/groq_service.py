@@ -77,7 +77,7 @@ User Query: "{user_message}"
 Output **ONLY** one of the following two words: **PERFORM_SEARCH** or **NO_SEARCH**."""
         
         try:
-            groq_model = current_app.config.get('GROQ_MODEL', 'mixtral-8x7b-32768')
+            groq_model = current_app.config.get('GROQ_MODEL', 'llama-3.3-70b-versatile')
             response = self.client.chat.completions.create(
                 model=groq_model,
                 messages=[{"role": "user", "content": router_prompt}],
@@ -120,7 +120,7 @@ Output **ONLY** one of the following two words: **PERFORM_SEARCH** or **NO_SEARC
             
             messages.append({"role": "user", "content": user_message})
             
-            groq_model = current_app.config.get('GROQ_MODEL', 'mixtral-8x7b-32768')
+            groq_model = current_app.config.get('GROQ_MODEL', 'llama-3.3-70b-versatile')
 
             response = self.client.chat.completions.create(
                 model=groq_model,
@@ -240,7 +240,7 @@ IMPORTANT: Use ONLY the data provided below. Do not make up or assume any inform
             return ""
         
         try:
-            groq_model = current_app.config.get('GROQ_MODEL', 'mixtral-8x7b-32768')
+            groq_model = current_app.config.get('GROQ_MODEL', 'llama-3.3-70b-versatile')
             response = self.client.chat.completions.create(
                 model=groq_model,
                 messages=messages,

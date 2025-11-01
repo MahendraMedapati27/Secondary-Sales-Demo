@@ -1,4 +1,4 @@
-from flask import Flask, redirect, url_for
+from flask import Flask, redirect, url_for, request
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager
 from flask_cors import CORS
@@ -6,6 +6,9 @@ from flask_mail import Mail
 from config import Config
 from pathlib import Path
 import logging
+import threading
+import time
+import atexit
 
 db = SQLAlchemy()
 login_manager = LoginManager()
@@ -26,6 +29,24 @@ def create_app(config_class=Config):
     )
     app.config.from_object(config_class)
     
+    # Fix MIME type for JavaScript modules
+    @app.after_request
+    def set_js_mime_type(response):
+        """Ensure JavaScript files are served with correct MIME type"""
+        if response.mimetype == 'text/plain' and request.path.endswith('.js'):
+            response.mimetype = 'application/javascript'
+        return response
+    
+    # Disable template caching in development and production - NUCLEAR OPTION
+    app.config['TEMPLATES_AUTO_RELOAD'] = True
+    app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
+    if hasattr(app, 'jinja_env'):
+        app.jinja_env.auto_reload = True
+        app.jinja_env.cache = None
+        # Force clear any internal caches
+        if hasattr(app.jinja_env, '_cache'):
+            app.jinja_env._cache = None
+    
     # Initialize extensions
     db.init_app(app)
     login_manager.init_app(app)
@@ -36,16 +57,18 @@ def create_app(config_class=Config):
     # Register blueprints
     from app.auth import auth_bp
     from app.chatbot import chatbot_bp
+    from app.enhanced_chatbot import chatbot_bp as enhanced_chatbot_bp
     from app.whatsapp_webhook import whatsapp_bp
     
     app.register_blueprint(auth_bp, url_prefix='/auth')
     app.register_blueprint(chatbot_bp, url_prefix='/chat')
+    app.register_blueprint(enhanced_chatbot_bp, url_prefix='/enhanced-chat')
     app.register_blueprint(whatsapp_bp, url_prefix='/webhook')
     
     # Root route
     @app.route('/')
     def index():
-        return redirect(url_for('chatbot.chat'))
+        return redirect(url_for('enhanced_chatbot.chat'))
     
     # Health check endpoint for Azure monitoring
     @app.route('/health')
@@ -111,6 +134,67 @@ END
             except Exception as e2:
                 logging.error(f"SQLite fallback failed ({type(e2).__name__}): {e2}")
                 raise
+        
+        # Initialize sample data
+        try:
+            from app.database_service import DatabaseService
+            db_service = DatabaseService()
+            
+            # Initialize warehouses
+            db_service.initialize_warehouses()
+            
+            # Create sample products
+            db_service.create_sample_products()
+            
+            # Create sample users
+            db_service.create_sample_users()
+            
+            logging.info("Sample data initialized successfully")
+        except Exception as e:
+            logging.warning(f"Failed to initialize sample data: {str(e)}")
+    
+    # Start stock checker background thread
+    try:
+        from app.stock_check_service import StockCheckService
+        
+        def stock_checker_worker():
+            """Background worker thread for checking stock availability"""
+            service = StockCheckService()
+            logger = logging.getLogger(__name__)
+            
+            while True:
+                try:
+                    # Run stock check every 30 minutes
+                    with app.app_context():
+                        result = service.check_and_fulfill_pending_orders()
+                        if result['success']:
+                            fulfilled = result.get('fulfilled_count', 0)
+                            if fulfilled > 0:
+                                logger.info(f"✅ Stock check: {fulfilled} pending order(s) fulfilled automatically")
+                            else:
+                                logger.debug("✅ Stock check: No orders to fulfill")
+                        else:
+                            logger.error(f"❌ Stock check error: {result.get('error', 'Unknown error')}")
+                except Exception as e:
+                    logger.error(f"❌ Stock checker thread error: {str(e)}")
+                
+                # Sleep for 30 minutes (1800 seconds)
+                time.sleep(1800)
+        
+        # Start the background thread as daemon
+        stock_checker_thread = threading.Thread(target=stock_checker_worker, daemon=True, name="StockChecker")
+        stock_checker_thread.start()
+        logging.info("🚀 Stock checker background thread started (runs every 30 minutes)")
+        
+        # Register cleanup on exit
+        def cleanup_stock_checker():
+            logging.info("🛑 Stopping stock checker background thread...")
+        
+        atexit.register(cleanup_stock_checker)
+        
+    except Exception as e:
+        logging.warning(f"Failed to start stock checker background thread: {str(e)}")
+        logging.warning("Pending orders will not be auto-fulfilled. Run 'python run_stock_checker.py' manually.")
     
     return app
 

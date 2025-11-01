@@ -64,12 +64,13 @@ Analyze the user's message and classify it into one of these categories with con
 Also extract relevant entities like product names and quantities when applicable.
 
 Categories:
-1. PLACE_ORDER - User wants to place an order, buy products, add to cart, confirm order
+1. PLACE_ORDER - User wants to place an order, buy products, add to cart. IMPORTANT: Only for adding products or finalizing cart. NOT for confirming existing orders by ID.
 2. CALCULATE_COST - User wants to know the cost/price of products or calculate order total
-3. TRACK_ORDER - User wants to check order status, track delivery, order history
-4. COMPANY_INFO - User asks about company, services, contact info, FAQ
-5. WEB_SEARCH - User needs current/real-time information not in database
-6. OTHER - General conversation, greetings, unclear requests
+3. TRACK_ORDER - User wants to check order status, track delivery, order history. INCLUDES: "confirm order <order_id>" when user mentions an order ID to confirm it (especially for distributors).
+4. PRODUCT_INFO - User wants to see product information, list products, query database for products (e.g., "list all products", "show products available", "what products do you have", "list products in database")
+5. COMPANY_INFO - User asks about company, services, contact info, FAQ
+6. WEB_SEARCH - User needs current/real-time information not in database
+7. OTHER - General conversation, greetings, unclear requests
 
 User Message: "{user_message}"
 
@@ -105,13 +106,15 @@ Respond with ONLY a JSON object in this exact format:
 Examples:
 - "Add AI Controllers 10" -> PLACE_ORDER with product_name="AI Controller", quantity=10
 - "Add 5 AI Memory Cards" -> PLACE_ORDER with product_name="AI Memory Card", quantity=5
-- "Confirm order" -> PLACE_ORDER with entities={{}} (no specific product)
+- "Confirm order" (without order ID) -> PLACE_ORDER with entities={{}} (no specific product)
 - "Track order QB12345" -> TRACK_ORDER with order_id="QB12345"
+- "Confirm order QB12345" -> TRACK_ORDER with order_id="QB12345" (distributor confirming existing order)
+- "Show me recent orders" -> TRACK_ORDER (querying order history)
 
 Be precise and consider the context provided."""
 
             response = self.groq_service.client.chat.completions.create(
-                model=current_app.config.get('GROQ_MODEL', 'mixtral-8x7b-32768'),
+                model=current_app.config.get('GROQ_MODEL', 'llama-3.3-70b-versatile'),
                 messages=[{"role": "user", "content": classification_prompt}],
                 temperature=0.1,
                 max_tokens=500
@@ -283,7 +286,7 @@ Your task:
 Respond in a friendly, sales-oriented manner. If the user's request is unclear, ask clarifying questions."""
 
             response = self.groq_service.client.chat.completions.create(
-                model=current_app.config.get('GROQ_MODEL', 'mixtral-8x7b-32768'),
+                model=current_app.config.get('GROQ_MODEL', 'llama-3.3-70b-versatile'),
                 messages=[{"role": "user", "content": order_prompt}],
                 temperature=0.7,
                 max_tokens=1000
@@ -352,7 +355,7 @@ Respond with ONLY a JSON object in this exact format:
 If the user's message is unclear or doesn't contain specific order details, set "order_ready" to false."""
 
             response = self.groq_service.client.chat.completions.create(
-                model=current_app.config.get('GROQ_MODEL', 'mixtral-8x7b-32768'),
+                model=current_app.config.get('GROQ_MODEL', 'llama-3.3-70b-versatile'),
                 messages=[{"role": "user", "content": parse_prompt}],
                 temperature=0.1,
                 max_tokens=500
@@ -471,7 +474,7 @@ Respond with ONLY a JSON object in this exact format:
 If the user's message is unclear or doesn't contain specific order details, set "order_ready" to false."""
 
             response = self.groq_service.client.chat.completions.create(
-                model=current_app.config.get('GROQ_MODEL', 'mixtral-8x7b-32768'),
+                model=current_app.config.get('GROQ_MODEL', 'llama-3.3-70b-versatile'),
                 messages=[{"role": "user", "content": cost_prompt}],
                 temperature=0.1,
                 max_tokens=800
@@ -589,7 +592,7 @@ Your task:
 Respond in a helpful, professional manner."""
 
             response = self.groq_service.client.chat.completions.create(
-                model=current_app.config.get('GROQ_MODEL', 'mixtral-8x7b-32768'),
+                model=current_app.config.get('GROQ_MODEL', 'llama-3.3-70b-versatile'),
                 messages=[{"role": "user", "content": tracking_prompt}],
                 temperature=0.5,
                 max_tokens=800

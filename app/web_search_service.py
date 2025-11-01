@@ -242,7 +242,7 @@ Be thorough and extract every company name you can find in the content. If you f
 Respond in a helpful, professional manner with a comprehensive list of all clients and business partners found."""
 
             response = groq_service.client.chat.completions.create(
-                model=current_app.config.get('GROQ_MODEL', 'mixtral-8x7b-32768'),
+                model=current_app.config.get('GROQ_MODEL', 'llama-3.3-70b-versatile'),
                 messages=[{"role": "user", "content": synthesis_prompt}],
                 temperature=0.3,
                 max_tokens=2000  # Increased for more comprehensive responses
@@ -385,7 +385,7 @@ Be thorough and extract every company name you can find. If you find specific co
 Respond in a helpful, professional manner with a comprehensive list of all clients and business partners found."""
 
             response = groq_service.client.chat.completions.create(
-                model=current_app.config.get('GROQ_MODEL', 'mixtral-8x7b-32768'),
+                model=current_app.config.get('GROQ_MODEL', 'llama-3.3-70b-versatile'),
                 messages=[{"role": "user", "content": synthesis_prompt}],
                 temperature=0.3,
                 max_tokens=1500  # Increased for more detailed responses

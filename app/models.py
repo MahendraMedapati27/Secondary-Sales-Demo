@@ -8,14 +8,29 @@ import secrets
 import uuid
 
 class User(UserMixin, db.Model):
-    """User model"""
+    """Enhanced User model for RB (Powered by Quantum Blue AI)"""
     __tablename__ = 'users'
     
     id = db.Column(db.Integer, primary_key=True)
+    unique_id = db.Column(db.String(50), unique=True, nullable=False, index=True)  # Unique identifier for users
     name = db.Column(db.String(100), nullable=False)
     email = db.Column(db.String(120), unique=True, nullable=False, index=True)
     phone = db.Column(db.String(50), nullable=False)
     password_hash = db.Column(db.String(200))
+    
+    # User type and role
+    user_type = db.Column(db.String(20), nullable=False, default='customer')  # customer, mr, distributor, pharmacy
+    role = db.Column(db.String(50), nullable=True)  # Medical Representative, Distributor, etc.
+    
+    # Location and delivery information
+    delivery_pin_code = db.Column(db.String(10), nullable=True)
+    delivery_zone = db.Column(db.String(100), nullable=True)
+    nearest_warehouse = db.Column(db.String(100), nullable=True)
+    nearest_distributor = db.Column(db.String(100), nullable=True)
+    
+    # Company information
+    company_name = db.Column(db.String(200), nullable=True)
+    company_address = db.Column(db.Text, nullable=True)
     
     # Email verification with OTP
     email_verified = db.Column(db.Boolean, default=False)
@@ -24,15 +39,13 @@ class User(UserMixin, db.Model):
     otp_secret = db.Column(db.String(255))
     otp_created_at = db.Column(db.DateTime)
     
-    # Warehouse location
+    # Warehouse location (legacy field for backward compatibility)
     warehouse_location = db.Column(db.String(100), nullable=True)
     last_verification = db.Column(db.DateTime, default=datetime.utcnow)
     
-    # WhatsApp onboarding state (optional for backward compatibility)
-    # onboarding_state = db.Column(db.String(50), default='ask_name', nullable=True)
-    
-    # WhatsApp session data (JSON field to store session state) (optional for backward compatibility)
-    # whatsapp_session_data = db.Column(db.JSON, nullable=True)
+    # User status
+    is_active = db.Column(db.Boolean, default=True)
+    is_verified = db.Column(db.Boolean, default=False)
     
     # Timestamps
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -40,7 +53,8 @@ class User(UserMixin, db.Model):
     
     # Relationships
     conversations = db.relationship('Conversation', backref='user', lazy='dynamic', cascade='all, delete-orphan')
-    orders = db.relationship('Order', backref='user', lazy='dynamic', cascade='all, delete-orphan')
+    orders = db.relationship('Order', foreign_keys='Order.user_id', backref='user', lazy='dynamic', cascade='all, delete-orphan')
+    cart_items = db.relationship('CartItem', backref='user', lazy='dynamic', cascade='all, delete-orphan')
     
     def set_password(self, password):
         """Hash and set password"""
@@ -76,8 +90,24 @@ class User(UserMixin, db.Model):
         self.otp_secret = None
         self.otp_created_at = None
     
+    def generate_unique_id(self):
+        """Generate unique ID for user"""
+        if not self.unique_id:
+            # Generate based on user type and timestamp
+            prefix = {
+                'customer': 'CUST',
+                'mr': 'MR',
+                'distributor': 'DIST',
+                'pharmacy': 'PHARM'
+            }.get(self.user_type, 'USER')
+            
+            timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')
+            random_part = uuid.uuid4().hex[:6].upper()
+            self.unique_id = f"{prefix}_{timestamp}_{random_part}"
+        return self.unique_id
+    
     def __repr__(self):
-        return f'<User {self.email}>'
+        return f'<User {self.unique_id} - {self.email}>'
 
 class Conversation(db.Model):
     """Conversation history model"""
@@ -150,7 +180,7 @@ class Warehouse(db.Model):
         return f'<Warehouse {self.location_name}>'
 
 class Product(db.Model):
-    """Product model"""
+    """Enhanced Product model for RB (Powered by Quantum Blue AI)"""
     __tablename__ = 'products'
     
     id = db.Column(db.Integer, primary_key=True)
@@ -159,12 +189,32 @@ class Product(db.Model):
     product_description = db.Column(db.Text)
     batch_number = db.Column(db.String(50))
     expiry_date = db.Column(db.Date)
+    
+    # Inventory management
     product_quantity = db.Column(db.Integer, default=0, nullable=False)
     blocked_quantity = db.Column(db.Integer, default=0, nullable=False)
     available_for_sale = db.Column(db.Integer, default=0, nullable=False)
+    confirmed_quantity = db.Column(db.Integer, default=0, nullable=False)  # Quantity confirmed for orders
+    
+    # Pricing
     price_of_product = db.Column(db.Float, default=0.0)
+    
+    # Discount system (3 predefined discounts)
+    discount_type = db.Column(db.String(50), nullable=True)  # 'percentage', 'fixed', 'bulk'
+    discount_value = db.Column(db.Float, default=0.0)  # Percentage or fixed amount
+    discount_name = db.Column(db.String(100), nullable=True)  # 'Early Bird', 'Bulk Purchase', 'Loyalty'
+    
+    # Scheme system (3 predefined schemes)
+    scheme_type = db.Column(db.String(50), nullable=True)  # 'buy_x_get_y', 'percentage_off', 'free_shipping'
+    scheme_value = db.Column(db.String(200), nullable=True)  # JSON string with scheme details
+    scheme_name = db.Column(db.String(100), nullable=True)  # 'Buy 2 Get 1 Free', 'Buy 1 Get 20% Off', 'Buy 3 Get 2 Free'
+    
+    # Legacy fields for backward compatibility
     discount = db.Column(db.Float, default=0.0)
     scheme = db.Column(db.String(200))
+    
+    # Product status
+    is_active = db.Column(db.Boolean, default=True)
     
     # Foreign keys
     warehouse_id = db.Column(db.Integer, db.ForeignKey('warehouses.id'), nullable=False)
@@ -175,6 +225,7 @@ class Product(db.Model):
     
     # Relationships
     order_items = db.relationship('OrderItem', backref='product', lazy='dynamic', cascade='all, delete-orphan')
+    cart_items = db.relationship('CartItem', backref='product', lazy='dynamic', cascade='all, delete-orphan')
     
     def __repr__(self):
         return f'<Product {self.product_code} - {self.product_name}>'
@@ -193,15 +244,37 @@ class Product(db.Model):
         db.session.commit()
 
 class Order(db.Model):
-    """Order model"""
+    """Enhanced Order model for RB (Powered by Quantum Blue AI)"""
     __tablename__ = 'orders'
     
     id = db.Column(db.Integer, primary_key=True)
     order_id = db.Column(db.String(50), unique=True, nullable=False, index=True)
     user_email = db.Column(db.String(120), nullable=False, index=True)
     warehouse_location = db.Column(db.String(100), nullable=False)
+    
+    # Order amounts
+    subtotal_amount = db.Column(db.Float, default=0.0)
+    discount_amount = db.Column(db.Float, default=0.0)
+    scheme_discount_amount = db.Column(db.Float, default=0.0)
     total_amount = db.Column(db.Float, default=0.0)
-    status = db.Column(db.String(50), default='pending')  # pending, confirmed, shipped, delivered, cancelled
+    
+    # Order status workflow
+    status = db.Column(db.String(50), default='pending')  # pending, in_transit, confirmed, shipped, delivered, cancelled
+    order_stage = db.Column(db.String(50), default='draft')  # draft, placed, distributor_notified, distributor_confirmed, invoice_generated, completed
+    
+    # Order placement details
+    placed_by = db.Column(db.String(20), nullable=False, default='customer')  # customer, mr, distributor
+    placed_by_user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)  # Who placed the order
+    
+    # Distributor confirmation
+    distributor_confirmed = db.Column(db.Boolean, default=False)
+    distributor_confirmed_at = db.Column(db.DateTime, nullable=True)
+    distributor_confirmed_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)  # Which distributor confirmed
+    
+    # Invoice details
+    invoice_generated = db.Column(db.Boolean, default=False)
+    invoice_generated_at = db.Column(db.DateTime, nullable=True)
+    invoice_number = db.Column(db.String(50), nullable=True)
     
     # Foreign keys
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
@@ -213,6 +286,8 @@ class Order(db.Model):
     
     # Relationships
     order_items = db.relationship('OrderItem', backref='order', lazy='dynamic', cascade='all, delete-orphan')
+    placed_by_user = db.relationship('User', foreign_keys=[placed_by_user_id], backref='placed_orders')
+    distributor_user = db.relationship('User', foreign_keys=[distributor_confirmed_by], backref='confirmed_orders')
     
     def __repr__(self):
         return f'<Order {self.order_id}>'
@@ -236,8 +311,40 @@ class Order(db.Model):
             'updated_at': self.updated_at.isoformat()
         }
 
+class CartItem(db.Model):
+    """Cart item model for managing user shopping cart"""
+    __tablename__ = 'cart_items'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    product_code = db.Column(db.String(50), nullable=False)
+    product_quantity = db.Column(db.Integer, nullable=False)
+    unit_price = db.Column(db.Float, default=0.0)
+    total_price = db.Column(db.Float, default=0.0)
+    
+    # Pricing details
+    base_price = db.Column(db.Float, default=0.0)
+    discount_amount = db.Column(db.Float, default=0.0)
+    scheme_discount_amount = db.Column(db.Float, default=0.0)
+    final_price = db.Column(db.Float, default=0.0)
+    
+    # Scheme details
+    scheme_applied = db.Column(db.String(100), nullable=True)
+    free_quantity = db.Column(db.Integer, default=0)
+    paid_quantity = db.Column(db.Integer, default=0)
+    
+    # Foreign keys
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    product_id = db.Column(db.Integer, db.ForeignKey('products.id'), nullable=False)
+    
+    # Timestamps
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    def __repr__(self):
+        return f'<CartItem {self.product_code} - Qty: {self.product_quantity}>'
+
 class OrderItem(db.Model):
-    """Order item model"""
+    """Enhanced Order item model"""
     __tablename__ = 'order_items'
     
     id = db.Column(db.Integer, primary_key=True)
@@ -245,6 +352,17 @@ class OrderItem(db.Model):
     product_quantity_ordered = db.Column(db.Integer, nullable=False)
     unit_price = db.Column(db.Float, default=0.0)
     total_price = db.Column(db.Float, default=0.0)
+    
+    # Enhanced pricing details
+    base_price = db.Column(db.Float, default=0.0)
+    discount_amount = db.Column(db.Float, default=0.0)
+    scheme_discount_amount = db.Column(db.Float, default=0.0)
+    final_price = db.Column(db.Float, default=0.0)
+    
+    # Scheme details
+    scheme_applied = db.Column(db.String(100), nullable=True)
+    free_quantity = db.Column(db.Integer, default=0)
+    paid_quantity = db.Column(db.Integer, default=0)
     
     # Foreign keys
     order_id = db.Column(db.Integer, db.ForeignKey('orders.id'), nullable=False)
@@ -282,3 +400,57 @@ class ChatSession(db.Model):
         if not self.session_id:
             self.session_id = f"QB_SESSION_{uuid.uuid4().hex[:16].upper()}"
         return self.session_id
+
+class PendingOrderProducts(db.Model):
+    """Model to track expired product orders that are waiting for stock"""
+    __tablename__ = 'pending_order_products'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    
+    # Link to original order (nullable - can be None when no order exists yet)
+    original_order_id = db.Column(db.String(50), db.ForeignKey('orders.order_id'), nullable=True, index=True)
+    
+    # Product information
+    product_code = db.Column(db.String(50), nullable=False, index=True)
+    product_name = db.Column(db.String(200), nullable=False)
+    requested_quantity = db.Column(db.Integer, nullable=False)
+    
+    # User who requested
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
+    user_email = db.Column(db.String(120), nullable=False)
+    
+    # Warehouse information
+    warehouse_id = db.Column(db.Integer, db.ForeignKey('warehouses.id'), nullable=False)
+    warehouse_location = db.Column(db.String(100), nullable=False)
+    
+    # Status tracking
+    status = db.Column(db.String(50), default='pending')  # pending, fulfilled, cancelled
+    fulfilled_order_id = db.Column(db.String(50), nullable=True)  # Order ID when stock arrived
+    
+    # Notifications tracking
+    user_notified = db.Column(db.Boolean, default=False)  # User notified when stock arrived
+    distributor_notified = db.Column(db.Boolean, default=False)  # Distributor notified when stock arrived
+    
+    # Timestamps
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+    fulfilled_at = db.Column(db.DateTime, nullable=True)
+    
+    # Relationships
+    user = db.relationship('User', backref='pending_orders')
+    order = db.relationship('Order', foreign_keys=[original_order_id], backref='pending_products')
+    warehouse = db.relationship('Warehouse', backref='pending_products')
+    
+    def __repr__(self):
+        return f'<PendingOrderProducts {self.product_code} - {self.status}>'
+    
+    def to_dict(self):
+        """Convert to dictionary"""
+        return {
+            'id': self.id,
+            'original_order_id': self.original_order_id,
+            'product_code': self.product_code,
+            'product_name': self.product_name,
+            'requested_quantity': self.requested_quantity,
+            'status': self.status,
+            'created_at': self.created_at.isoformat() if self.created_at else None
+        }

@@ -16,7 +16,7 @@ class Config:
     # ------------------------------------------------------------------------
     GROQ_API_KEY = os.getenv('GROQ_API_KEY')
     # Defaulting to a high-speed Groq model
-    GROQ_MODEL = os.getenv('GROQ_MODEL', 'mixtral-8x7b-32768')
+    GROQ_MODEL = os.getenv('GROQ_MODEL', 'llama-3.3-70b-versatile')
     
     # NOTE: Azure OpenAI configuration removed/commented out for Groq usage.
     # AZURE_OPENAI_ENDPOINT = os.getenv('AZURE_OPENAI_ENDPOINT')
