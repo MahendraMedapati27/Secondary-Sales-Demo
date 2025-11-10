@@ -27,27 +27,21 @@ if __name__ == '__main__':
         
         with app.app_context():
             from app.database_service import DatabaseService
-            from app.models import User, Product, Warehouse
+            from app.models import User, Product
             
             print("📊 Checking database status...")
             
             # Check if we have any users
             user_count = User.query.count()
             product_count = Product.query.count()
-            warehouse_count = Warehouse.query.count()
             
             print(f"   Users: {user_count}")
             print(f"   Products: {product_count}")
-            print(f"   Warehouses: {warehouse_count}")
             
             if user_count == 0 or product_count == 0:
                 print("\n🔧 Initializing sample data...")
                 
                 db_service = DatabaseService()
-                
-                # Initialize warehouses
-                print("   Creating warehouses...")
-                db_service.initialize_warehouses()
                 
                 # Create sample products
                 print("   Creating sample products...")
@@ -75,13 +69,6 @@ if __name__ == '__main__':
             sample_products = Product.query.limit(5).all()
             for product in sample_products:
                 print(f"   {product.product_code} - {product.product_name} - ${product.price_of_product}")
-            
-            print("\n🏢 Warehouses Available:")
-            print("-" * 40)
-            
-            warehouses = Warehouse.query.all()
-            for warehouse in warehouses:
-                print(f"   {warehouse.location_name} - {warehouse.city}, {warehouse.state}")
             
             print("\n" + "=" * 60)
             print("🎉 RB (Powered by Quantum Blue AI) is ready!")
