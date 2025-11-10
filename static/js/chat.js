@@ -92,7 +92,8 @@ async function sendMessage() {
                 // Debug: Log when we should show buttons
                 if (data.intent === 'PLACE_ORDER') {
                     console.log('PLACE_ORDER intent detected, checking for products...');
-                    console.log('Response contains products:', data.response.includes('Quantum Processor'));
+                    // Products are now dynamically loaded from database
+                    console.log('Response received, checking for product information...');
                 }
             }
         }
@@ -399,8 +400,8 @@ function parseInteractiveElements(response, intent) {
     console.log('Contains Quick Product Selection:', response.includes('Quick Product Selection'));
     console.log('Contains Available:', response.includes('Available:'));
     console.log('Contains QB:', response.includes('QB'));
-    console.log('Contains Quantum:', response.includes('Quantum'));
-    console.log('Contains Neural:', response.includes('Neural'));
+    // Products are now dynamically loaded from database - no hardcoded checks needed
+    console.log('Checking response for product information...');
     console.log('Contains AI:', response.includes('AI'));
     
         // Show product selection for PLACE_ORDER intent when user wants to place order
@@ -466,13 +467,13 @@ function showProductSelectionButtons(response) {
     const buttonsDiv = document.createElement('div');
     buttonsDiv.className = 'interactive-buttons mt-3';
     
-    // Extract product information from response
+    // Extract product information dynamically from response
+    // Products are now fetched from database - check for product codes or common patterns
     const productLines = response.split('\n').filter(line => 
-        line.includes('Quantum Processor') || 
-        line.includes('Neural Network Module') || 
-        line.includes('AI Memory Card') || 
-        line.includes('Quantum Sensors') || 
-        line.includes('AI Controller')
+        line.includes('(') && line.includes(')') || // Product codes in parentheses
+        line.includes('$') || // Price information
+        line.includes('Available:') || // Stock information
+        /RB\d+|BD-\d+|QB\d+/.test(line) // Product code patterns
     );
     
     buttonsDiv.innerHTML = '<h6 class="mb-3"><i class="fas fa-shopping-cart"></i> Quick Product Selection:</h6>';
@@ -1423,36 +1424,50 @@ function addToCartInline(name, code, price) {
 }
 
 // Show generic product buttons when specific product list is not detected
-function showGenericProductButtons() {
+async function showGenericProductButtons() {
     const messagesDiv = document.getElementById('chatMessages');
     const buttonsDiv = document.createElement('div');
     buttonsDiv.className = 'interactive-buttons mt-3';
     
     buttonsDiv.innerHTML = '<h6 class="mb-3"><i class="fas fa-shopping-cart"></i> Available Products:</h6>';
     
-    // Default product list
-    const products = [
-        { name: 'Quantum Processor', code: 'QB001', price: '2,500.00', available: '100' },
-        { name: 'Neural Network Module', code: 'QB002', price: '1,200.00', available: '50' },
-        { name: 'AI Memory Card', code: 'QB003', price: '800.00', available: '200' },
-        { name: 'Quantum Sensors', code: 'QB004', price: '1,800.00', available: '75' },
-        { name: 'AI Controller', code: 'QB005', price: '950.00', available: '120' }
-    ];
-    
-    products.forEach(product => {
-        const button = document.createElement('button');
-        button.className = `btn btn-outline-primary btn-sm me-2 mb-2 product-btn ${product.available === '0' ? 'disabled' : ''}`;
-        button.innerHTML = `
-            <div class="product-info">
-                <strong>${product.name}</strong><br>
-                <small>${product.code} - $${product.price}</small><br>
-                <span class="badge ${product.available === '0' ? 'bg-danger' : 'bg-success'}">${product.available === '0' ? 'Out of Stock' : `Available: ${product.available}`}</span>
-            </div>
-        `;
-        button.onclick = () => selectProduct(product.name, product.code, product.price, product.available);
-        button.disabled = product.available === '0';
-        buttonsDiv.appendChild(button);
-    });
+    // Load products dynamically from API
+    try {
+        const response = await fetch('/enhanced-chat/api/products');
+        if (response.ok) {
+            const data = await response.json();
+            const products = data.products || [];
+            
+            if (products.length === 0) {
+                buttonsDiv.innerHTML += '<p class="text-muted">No products available at the moment.</p>';
+                messagesDiv.appendChild(buttonsDiv);
+                messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                return;
+            }
+            
+            // Display products dynamically
+            products.slice(0, 5).forEach(product => {
+                const button = document.createElement('button');
+                button.className = `btn btn-outline-primary btn-sm me-2 mb-2 product-btn ${product.available_for_sale === 0 ? 'disabled' : ''}`;
+                button.innerHTML = `
+                    <div class="product-info">
+                        <strong>${product.product_name}</strong><br>
+                        <small>${product.product_code} - $${(product.sales_price || product.price_of_product || 0).toFixed(2)}</small><br>
+                        <span class="badge ${product.available_for_sale === 0 ? 'bg-danger' : 'bg-success'}">${product.available_for_sale === 0 ? 'Out of Stock' : `Available: ${product.available_for_sale}`}</span>
+                    </div>
+                `;
+                button.onclick = () => selectProduct(product.product_name, product.product_code, product.sales_price || product.price_of_product, product.available_for_sale);
+                button.disabled = product.available_for_sale === 0;
+                buttonsDiv.appendChild(button);
+            });
+        } else {
+            // Fallback: show message that products couldn't be loaded
+            buttonsDiv.innerHTML += '<p class="text-muted">Unable to load products. Please try again later.</p>';
+        }
+    } catch (error) {
+        console.error('Error loading products:', error);
+        buttonsDiv.innerHTML += '<p class="text-muted">Unable to load products. Please try again later.</p>';
+    }
     
     messagesDiv.appendChild(buttonsDiv);
     messagesDiv.scrollTop = messagesDiv.scrollHeight;

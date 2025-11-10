@@ -2,7 +2,7 @@ import logging
 import json
 from datetime import datetime
 from app import db
-from app.models import Product
+from app.models import Product, FOC
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -15,8 +15,8 @@ class PricingService:
     
     def calculate_product_pricing(self, product_id, quantity):
         """
-        Calculate pricing for a product with discounts and schemes
-        Returns detailed pricing breakdown
+        Calculate pricing for a product using sales_price directly
+        No discounts or schemes - just sales_price * quantity
         """
         try:
             product = Product.query.get(product_id)
@@ -27,60 +27,79 @@ class PricingService:
                     'total_amount': 0
                 }
             
-            base_price = float(product.price_of_product)
+            # Get sales_price from dealer stock details or use product price
+            # Try to get sales_price from latest dealer stock details
+            from app.models import DealerWiseStockDetails
+            from sqlalchemy import desc
+            
+            # Get latest stock detail for this product by product_id
+            latest_stock = DealerWiseStockDetails.query.filter_by(
+                product_id=product.id,
+                status='confirmed'
+            ).order_by(desc(DealerWiseStockDetails.confirmed_at)).first()
+            
+            if latest_stock and latest_stock.sales_price:
+                sales_price = float(latest_stock.sales_price)
+            elif hasattr(product, 'sales_price') and product.sales_price:
+                sales_price = float(product.sales_price)
+            else:
+                # Fallback to product price from catalog
+                sales_price = float(product.price) if product.price else 0.0
             quantity = int(quantity)
             
-            # Calculate discount
-            discount_result = self._calculate_discount(
-                base_price, 
-                product.discount_type, 
-                product.discount_value, 
-                quantity
-            )
+            # Check for FOC (Free of Cost) schemes
+            foc_info = self._get_foc_for_product(product, quantity)
             
-            # Calculate scheme
-            scheme_result = self._calculate_scheme(
-                discount_result['price_after_discount'],
-                product.scheme_type,
-                product.scheme_value,
-                quantity
-            )
-            
-            # Final calculation
-            final_price = scheme_result['final_price']
-            total_amount = scheme_result['total_amount']
+            # Calculate pricing based on FOC
+            if foc_info['scheme_applied']:
+                # Customer pays for ordered quantity, gets free items
+                paid_quantity = foc_info['paid_quantity']
+                free_quantity = foc_info['free_quantity']
+                total_quantity = foc_info['total_quantity']
+                
+                final_price = sales_price
+                total_amount = sales_price * paid_quantity  # Pay only for ordered quantity
+                
+                self.logger.info(f"FOC applied for product {product.id} ({product.product_name}): Order {quantity}, Get {free_quantity} free, Total: {total_quantity}")
+            else:
+                # No FOC scheme applies
+                paid_quantity = quantity
+                free_quantity = 0
+                total_quantity = quantity
+                final_price = sales_price
+                total_amount = sales_price * quantity
             
             result = {
                 'product_id': product_id,
-                'product_code': product.product_code,
+                'product_code': str(product.id),  # Use product.id as code since product_code field removed
                 'product_name': product.product_name,
-                'base_price': round(base_price, 2),
+                'base_price': round(sales_price, 2),
                 'quantity': quantity,
                 'discount': {
-                    'type': product.discount_type,
-                    'value': product.discount_value,
-                    'name': product.discount_name,
-                    'amount': round(discount_result['discount_amount'], 2),
-                    'percentage': round(discount_result['discount_percentage'], 2)
+                    'type': None,
+                    'value': 0,
+                    'name': None,
+                    'amount': 0,
+                    'percentage': 0
                 },
                 'scheme': {
-                    'type': product.scheme_type,
-                    'value': product.scheme_value,
-                    'name': product.scheme_name,
-                    'applied': scheme_result['scheme_applied'],
-                    'free_quantity': scheme_result['free_quantity'],
-                    'paid_quantity': scheme_result['paid_quantity'],
-                    'total_quantity': scheme_result['total_quantity']
+                    'type': 'foc' if foc_info['scheme_applied'] else None,
+                    'value': foc_info.get('scheme_name'),
+                    'name': foc_info.get('scheme_name'),
+                    'applied': foc_info['scheme_applied'],
+                    'free_quantity': free_quantity,
+                    'paid_quantity': paid_quantity,
+                    'total_quantity': total_quantity
                 },
                 'pricing': {
-                    'price_after_discount': round(discount_result['price_after_discount'], 2),
+                    'price_after_discount': round(sales_price, 2),
                     'final_price': round(final_price, 2),
                     'total_amount': round(total_amount, 2),
-                    'savings': round((base_price * quantity) - total_amount, 2)
+                    'savings': round(free_quantity * sales_price, 2) if free_quantity > 0 else 0
                 }
             }
             
-            self.logger.info(f"Pricing calculated for {product.product_code}: {result['pricing']['total_amount']}")
+            self.logger.info(f"Pricing calculated for product {product.id} ({product.product_name}): ${total_amount:.2f} (sales_price: ${sales_price:.2f} x {paid_quantity} paid, {free_quantity} free)")
             return result
             
         except Exception as e:
@@ -89,6 +108,93 @@ class PricingService:
                 'error': f'Pricing calculation error: {str(e)}',
                 'final_price': 0,
                 'total_amount': 0
+            }
+    
+    def _get_foc_for_product(self, product, quantity):
+        """
+        Get FOC (Free of Cost) information for a product
+        Returns: dict with FOC details
+        """
+        try:
+            # Helper function to normalize product names for matching
+            def normalize_product_name(name):
+                """Normalize product name for matching (remove packaging, dosage, etc.)"""
+                if not name:
+                    return ""
+                normalized = name.upper().strip()
+                # Remove packaging info in parentheses
+                if '(' in normalized:
+                    normalized = normalized.split('(')[0].strip()
+                # Remove dosage info (mg, etc.)
+                normalized = normalized.replace('MG', '').replace('MG', '').strip()
+                # Replace hyphens and underscores with spaces
+                normalized = normalized.replace('-', ' ').replace('_', ' ')
+                # Remove extra spaces
+                normalized = ' '.join(normalized.split())
+                return normalized
+            
+            # First try to find FOC by product_id (most reliable)
+            foc = None
+            if hasattr(product, 'id') and product.id:
+                foc = FOC.query.filter_by(product_id=product.id, is_active=True).first()
+            
+            # Fallback: Try normalized name matching (handles "Arova 20" vs "Arova 20mg (3*10's)")
+            if not foc:
+                product_normalized = normalize_product_name(product.product_name)
+                all_foc = FOC.query.filter_by(is_active=True).all()
+                
+                for f in all_foc:
+                    foc_normalized = normalize_product_name(f.product_name)
+                    
+                    # Exact normalized match
+                    if foc_normalized == product_normalized:
+                        foc = f
+                        break
+                    
+                    # Check if first word matches (e.g., "Arova" in both)
+                    if product_normalized and foc_normalized:
+                        product_first = product_normalized.split()[0] if product_normalized.split() else ""
+                        foc_first = foc_normalized.split()[0] if foc_normalized.split() else ""
+                        
+                        if product_first == foc_first and len(product_first) > 2:
+                            # Check if numbers match (e.g., "20" in both)
+                            import re
+                            product_numbers = re.findall(r'\d+', product_normalized)
+                            foc_numbers = re.findall(r'\d+', foc_normalized)
+                            
+                            # If numbers match, it's likely the same product
+                            if product_numbers and foc_numbers:
+                                if any(pn in foc_numbers for pn in product_numbers) or any(fn in product_numbers for fn in foc_numbers):
+                                    foc = f
+                                    break
+                            
+                            # Also check if one name contains the other
+                            if product_normalized in foc_normalized or foc_normalized in product_normalized:
+                                foc = f
+                                break
+            
+            # Fallback: Try exact product_name match
+            if not foc:
+                foc = FOC.query.filter_by(product_name=product.product_name, is_active=True).first()
+            
+            if foc:
+                foc_result = foc.get_foc_for_quantity(quantity)
+                return foc_result
+            else:
+                # No FOC scheme found
+                return {
+                    'free_quantity': 0,
+                    'paid_quantity': quantity,
+                    'total_quantity': quantity,
+                    'scheme_applied': False
+                }
+        except Exception as e:
+            self.logger.warning(f"Error getting FOC for product {product.id} ({product.product_name}): {str(e)}")
+            return {
+                'free_quantity': 0,
+                'paid_quantity': quantity,
+                'total_quantity': quantity,
+                'scheme_applied': False
             }
     
     def _calculate_discount(self, base_price, discount_type, discount_value, quantity):
@@ -297,7 +403,7 @@ class PricingService:
             items_breakdown = []
             
             for item in cart_items:
-                pricing = self.calculate_product_pricing(item.product_id, item.product_quantity)
+                pricing = self.calculate_product_pricing(item.product_id, item.quantity)
                 
                 if 'error' not in pricing:
                     item_total = pricing['pricing']['total_amount']

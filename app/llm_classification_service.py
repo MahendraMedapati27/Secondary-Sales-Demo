@@ -335,12 +335,8 @@ Extract the following information:
 4. If product names are mentioned, match them to the correct product codes
 5. Look at the conversation history to find order details if the current message is just confirmation
 
-Common product mappings:
-- "quantum processor" or "processor" → QB001
-- "neural network module" or "neural module" → QB002  
-- "ai memory card" or "memory card" → QB003
-- "quantum sensors" or "sensors" → QB004
-- "ai controller" or "controller" → QB005
+Product Mappings (use actual products from the list above):
+{self._format_product_mappings_for_prompt(products) if products else "Use products from the available list above."}
 
 Respond with ONLY a JSON object in this exact format:
 {{
@@ -384,14 +380,24 @@ If the user's message is unclear or doesn't contain specific order details, set 
         message_lower = user_message.lower()
         cart_items = []
         
-        # Simple keyword matching for common products
-        product_mappings = {
-            'quantum processor': 'QB001',
-            'neural network module': 'QB002', 
-            'ai memory card': 'QB003',
-            'quantum sensors': 'QB004',
-            'ai controller': 'QB005'
-        }
+        # Build dynamic product mappings from database products
+        product_mappings = {}
+        if products:
+            for p in products:
+                # Create variations of product name for matching
+                name_lower = p.product_name.lower()
+                words = name_lower.split()
+                # Add full name and key words
+                product_mappings[name_lower] = p.product_code
+                if len(words) > 0:
+                    product_mappings[words[0]] = p.product_code  # First word
+                    if len(words) > 1:
+                        product_mappings[words[-1]] = p.product_code  # Last word
+                        # Key words (skip common words)
+                        skip_words = {'the', 'a', 'an', 'for', 'with', 'and', 'or', 'of', 'in', 'on', 'at', 'to'}
+                        for word in words:
+                            if word not in skip_words and len(word) > 3:
+                                product_mappings[word] = p.product_code
         
         # Extract quantities and products
         import re
@@ -451,12 +457,8 @@ Calculate the following:
 4. Apply any applicable discounts (5% for orders over $5000, bulk discounts, etc.)
 5. Calculate the final total
 
-Common product mappings:
-- "quantum processor" or "processor" → QB001 ($2500)
-- "neural network module" or "neural module" → QB002 ($1200)  
-- "ai memory card" or "memory card" → QB003 ($800)
-- "quantum sensors" or "sensors" → QB004 ($1800)
-- "ai controller" or "controller" → QB005 ($950)
+Product Mappings (use actual products from the list above):
+{self._format_product_mappings_for_prompt(products) if products else "Use products from the available list above."}
 
 Respond with ONLY a JSON object in this exact format:
 {{
@@ -465,9 +467,7 @@ Respond with ONLY a JSON object in this exact format:
         {{"product_name": "AI Controller", "product_code": "QB005", "quantity": 100, "unit_price": 950, "item_total": 95000}}
     ],
     "subtotal": 345000,
-    "discount_amount": 17250,
-    "discount_percentage": 5,
-    "final_total": 327750,
+    "final_total": 345000,
     "order_ready": true
 }}
 
@@ -502,14 +502,26 @@ If the user's message is unclear or doesn't contain specific order details, set 
         """
         message_lower = user_message.lower()
         
-        # Simple keyword matching for common products
-        product_mappings = {
-            'quantum processor': {'code': 'QB001', 'price': 2500, 'name': 'Quantum Processor'},
-            'neural network module': {'code': 'QB002', 'price': 1200, 'name': 'Neural Network Module'}, 
-            'ai memory card': {'code': 'QB003', 'price': 800, 'name': 'AI Memory Card'},
-            'quantum sensors': {'code': 'QB004', 'price': 1800, 'name': 'Quantum Sensors'},
-            'ai controller': {'code': 'QB005', 'price': 950, 'name': 'AI Controller'}
-        }
+        # Build dynamic product mappings from database products
+        product_mappings = {}
+        if products:
+            for p in products:
+                # Use sales_price if available, otherwise price_of_product
+                price = p.sales_price if hasattr(p, 'sales_price') and p.sales_price else p.price_of_product
+                # Create variations of product name for matching
+                name_lower = p.product_name.lower()
+                words = name_lower.split()
+                # Add full name and key words
+                product_mappings[name_lower] = {'code': p.product_code, 'price': float(price), 'name': p.product_name}
+                if len(words) > 0:
+                    product_mappings[words[0]] = {'code': p.product_code, 'price': float(price), 'name': p.product_name}  # First word
+                    if len(words) > 1:
+                        product_mappings[words[-1]] = {'code': p.product_code, 'price': float(price), 'name': p.product_name}  # Last word
+                        # Key words (skip common words)
+                        skip_words = {'the', 'a', 'an', 'for', 'with', 'and', 'or', 'of', 'in', 'on', 'at', 'to'}
+                        for word in words:
+                            if word not in skip_words and len(word) > 3:
+                                product_mappings[word] = {'code': p.product_code, 'price': float(price), 'name': p.product_name}
         
         order_items = []
         subtotal = 0
@@ -603,6 +615,27 @@ Respond in a helpful, professional manner."""
         except Exception as e:
             self.logger.error(f"Tracking response error: {str(e)}")
             return self._get_fallback_tracking_response(orders)
+    
+    def _format_product_mappings_for_prompt(self, products):
+        """Format product mappings for LLM prompt"""
+        if not products:
+            return "Use products from the available list above."
+        
+        mappings = []
+        for p in products[:10]:  # Limit to first 10 products
+            price = p.sales_price if hasattr(p, 'sales_price') and p.sales_price else p.price_of_product
+            name_lower = p.product_name.lower()
+            words = name_lower.split()
+            # Create key variations
+            key_words = [name_lower]
+            if len(words) > 0:
+                key_words.append(words[0])
+                if len(words) > 1:
+                    key_words.append(words[-1])
+            key_variations = ' or '.join(key_words[:3])
+            mappings.append(f'- "{key_variations}" → {p.product_code} (${price:,.2f})')
+        
+        return "\n".join(mappings)
     
     def _get_fallback_tracking_response(self, orders):
         """Fallback response for order tracking"""

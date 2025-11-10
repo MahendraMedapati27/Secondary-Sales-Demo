@@ -367,8 +367,8 @@ class EnhancedCartManager {
             response.includes('🛒') ||
             response.includes('Available:') ||
             response.includes('QB') ||
-            response.includes('Quantum') ||
-            response.includes('Neural') ||
+            // Products are now dynamically loaded - no hardcoded product names
+            false ||
             response.includes('AI') ||
             response.includes('product name') ||
             response.includes('which products') ||
@@ -601,11 +601,20 @@ class EnhancedCartManager {
                     totalAmount += itemTotal;
                     
                     cartHTML += `
-                        <div class="cart-item mb-3 p-2 border rounded">
+                        <div class="cart-item mb-3 p-2 border rounded ${freeQuantity > 0 ? 'border-success' : ''}">
+                            ${freeQuantity > 0 ? `
+                                <div class="alert alert-success alert-sm mb-2 p-2">
+                                    <strong><i class="fas fa-gift"></i> FOC Applied!</strong> You'll get <strong>${freeQuantity} free units</strong> with this order!
+                                </div>
+                            ` : ''}
                             <div class="d-flex justify-content-between align-items-center mb-2">
                                 <div>
                                     <strong>${product.name}</strong> (${product.code})<br>
-                                    <small class="text-muted">Selected: ${product.quantity} | Total: ${totalQuantity} ${freeQuantity > 0 ? `(You get ${freeQuantity} free)` : ''}</small>
+                                    <small class="text-muted">
+                                        Ordered: ${product.quantity} units
+                                        ${freeQuantity > 0 ? `<br><span class="text-success"><i class="fas fa-gift"></i> Free: ${freeQuantity} units</span>` : ''}
+                                        ${freeQuantity > 0 ? `<br><strong>Total You'll Receive: ${totalQuantity} units</strong>` : ''}
+                                    </small>
                                 </div>
                                 <div class="d-flex align-items-center">
                                     <button class="btn btn-sm btn-outline-secondary me-1" onclick="cartManager.decreaseQuantity(${index})">-</button>
@@ -743,7 +752,10 @@ class EnhancedCartManager {
     async increaseQuantity(index, maxAvailable) {
         if (this.cartState.items[index].quantity < maxAvailable) {
             this.cartState.items[index].quantity++;
-            this.updateCartDisplay();
+            await this.updateCartDisplay();
+            
+            // Check for FOC eligibility and show notification
+            await this.checkAndNotifyFOC(index);
             
             // Sync with backend
             await this.syncCartWithBackend();
@@ -753,10 +765,72 @@ class EnhancedCartManager {
     async decreaseQuantity(index) {
         if (this.cartState.items[index].quantity > 1) {
             this.cartState.items[index].quantity--;
-            this.updateCartDisplay();
+            await this.updateCartDisplay();
+            
+            // Check for FOC eligibility and show notification
+            await this.checkAndNotifyFOC(index);
             
             // Sync with backend
             await this.syncCartWithBackend();
+        }
+    }
+    
+    async checkAndNotifyFOC(index) {
+        /** Check if quantity matches FOC thresholds and show notification */
+        try {
+            const product = this.cartState.items[index];
+            const quantity = product.quantity;
+            
+            // Fetch pricing to get FOC information
+            const pricingData = await this.fetchProductPricing([product]);
+            const pricing = pricingData.pricing.find(p => p.product_code === product.code);
+            
+            if (pricing && pricing.free_quantity > 0) {
+                // Show FOC notification
+                this.showFOCNotification(product, pricing);
+            }
+        } catch (error) {
+            console.error('Error checking FOC:', error);
+        }
+    }
+    
+    showFOCNotification(product, pricing) {
+        /** Show FOC notification when quantity matches thresholds */
+        // Remove existing notification for this product
+        const existingNotification = document.getElementById(`foc-notification-${product.code}`);
+        if (existingNotification) {
+            existingNotification.remove();
+        }
+        
+        if (pricing.free_quantity > 0) {
+            const messagesDiv = document.getElementById('chatMessages');
+            const notificationDiv = document.createElement('div');
+            notificationDiv.id = `foc-notification-${product.code}`;
+            notificationDiv.className = 'alert alert-success alert-dismissible fade show mt-2';
+            notificationDiv.innerHTML = `
+                <strong><i class="fas fa-gift"></i> Free Product Alert!</strong><br>
+                You've selected <strong>${pricing.paid_quantity} units</strong> of <strong>${product.name}</strong>.<br>
+                <strong>You'll receive ${pricing.free_quantity} free units!</strong> (Total: ${pricing.total_quantity} units)<br>
+                <small class="text-muted">Scheme: ${pricing.scheme_name || 'FOC Scheme Applied'}</small>
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            `;
+            
+            // Append to last bot message or create new notification area
+            const lastBotMessage = messagesDiv.querySelector('.message.bot:last-child');
+            if (lastBotMessage) {
+                lastBotMessage.appendChild(notificationDiv);
+            } else {
+                messagesDiv.appendChild(notificationDiv);
+            }
+            
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            
+            // Auto-remove after 10 seconds
+            setTimeout(() => {
+                if (notificationDiv.parentNode) {
+                    notificationDiv.remove();
+                }
+            }, 10000);
         }
     }
 

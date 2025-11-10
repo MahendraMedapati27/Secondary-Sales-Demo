@@ -22,11 +22,7 @@ body {
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    background: #ffffff !important;
-    background-image: 
-        radial-gradient(circle at 20% 50%, rgba(37, 99, 235, 0.03) 0%, transparent 50%),
-        radial-gradient(circle at 80% 80%, rgba(30, 64, 175, 0.03) 0%, transparent 50%),
-        radial-gradient(circle at 40% 20%, rgba(59, 130, 246, 0.02) 0%, transparent 50%);
+    background: transparent !important;
     margin: 0;
     padding: 0;
 }
@@ -35,7 +31,7 @@ main {
     flex: 1;
     overflow: hidden;
     padding: 0 !important;
-    background: #ffffff;
+    background: transparent;
 }
 
 /* Chat container with split layout */
@@ -44,7 +40,7 @@ main {
     height: 100vh;
     width: 100%;
     overflow: hidden;
-    background: #ffffff;
+    background: transparent;
     position: relative;
 }
 
@@ -52,17 +48,15 @@ main {
 .avatar-section {
     flex: 1;
     position: relative;
-    background: #ffffff;
-    background-image: 
-        radial-gradient(circle at 20% 50%, rgba(37, 99, 235, 0.03) 0%, transparent 50%),
-        radial-gradient(circle at 80% 80%, rgba(30, 64, 175, 0.03) 0%, transparent 50%),
-        radial-gradient(circle at 40% 20%, rgba(59, 130, 246, 0.02) 0%, transparent 50%);
+    background: transparent;
     display: flex;
     align-items: center;
     justify-content: center;
     overflow: hidden;
     min-height: 500px;
     height: 100%;
+    z-index: 2;
+    pointer-events: auto;
 }
 
 #avatar-canvas {
@@ -269,6 +263,19 @@ main {
     }
 }
 
+/* Pulse animation for success messages */
+@keyframes pulse {
+    0% {
+        transform: scale(1);
+    }
+    50% {
+        transform: scale(1.02);
+    }
+    100% {
+        transform: scale(1);
+    }
+}
+
 @keyframes bounce {
     0%, 100% {
         transform: translateY(0);
@@ -309,15 +316,13 @@ main {
     flex: 1;
     display: flex;
     flex-direction: column;
-    background: #ffffff;
-    background-image: 
-        radial-gradient(circle at 20% 50%, rgba(37, 99, 235, 0.03) 0%, transparent 50%),
-        radial-gradient(circle at 80% 80%, rgba(30, 64, 175, 0.03) 0%, transparent 50%),
-        radial-gradient(circle at 40% 20%, rgba(59, 130, 246, 0.02) 0%, transparent 50%);
+    background: transparent;
     overflow: hidden;
     padding: 20px;
     align-items: center;
     justify-content: center;
+    position: relative;
+    z-index: 2;
 }
 
 .chat-section .card {
@@ -328,14 +333,15 @@ main {
     border-radius: 24px;
     display: flex;
     flex-direction: column;
-    background: rgba(255, 255, 255, 0.5);
+    background: rgba(255, 255, 255, 0.85);
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
-    border: 1px solid rgba(255, 255, 255, 0.3);
-    box-shadow: 0 8px 32px rgba(37, 99, 235, 0.1), 
-                0 0 0 1px rgba(255, 255, 255, 0.5) inset;
+    border: 1px solid rgba(255, 255, 255, 0.5);
+    box-shadow: 0 8px 32px rgba(37, 99, 235, 0.2), 
+                0 0 0 1px rgba(255, 255, 255, 0.7) inset;
     overflow: hidden;
     transition: all 0.3s ease;
+    opacity: 0.95;
 }
 
 .chat-section .card:hover {
@@ -345,17 +351,18 @@ main {
 }
 
 .chat-messages {
-    background: rgba(255, 255, 255, 0.3);
+    background: rgba(255, 255, 255, 0.7);
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
     border-radius: 16px;
     padding: 20px;
-    border: 1px solid rgba(255, 255, 255, 0.2);
+    border: 1px solid rgba(255, 255, 255, 0.4);
     min-height: 0; /* Important for flex scrolling */
     max-height: 100%; /* Constrain height for scrolling */
     overflow-y: auto; /* Enable scrolling */
     overflow-x: hidden; /* Prevent horizontal scroll */
     scroll-behavior: smooth; /* Smooth scrolling */
+    opacity: 1;
 }
 
 .message {
@@ -385,10 +392,12 @@ main {
 
 .message-bubble {
     display: inline-block;
-    max-width: 95%; /* Allow more width for tables */
-    padding: 12px 18px;
+    max-width: 10%; /* Reduced from 95% - narrower bubbles */
+    padding: 15px 18px;
     border-radius: 18px;
     word-wrap: break-word;
+    word-break: break-word;
+    overflow-wrap: break-word;
     box-shadow: 0 2px 5px rgba(0,0,0,0.1);
     font-size: 0.875rem; /* Smaller text size */
     line-height: 1.5;
@@ -397,30 +406,95 @@ main {
 
 /* Special handling for bubbles with tables */
 .message-bubble .table-responsive {
-    max-width: 100%; /* Tables should use full available width */
+    max-width: 50%; /* Tables should use full available width */
 }
 
 /* Alternative for browsers that don't support :has() */
 .message-bubble.table-bubble {
-    max-width: 98%; /* Even wider when containing tables */
+    max-width: 85%; /* Reduced from 98% - narrower even with tables */
     padding: 15px; /* Slightly more padding for tables */
 }
 
 /* Modern browsers with :has() support */
 @supports selector(:has(*)) {
     .message-bubble:has(.table-responsive) {
-        max-width: 98%; /* Even wider when containing tables */
+        max-width: 85%; /* Reduced from 98% - narrower even with tables */
         padding: 15px; /* Slightly more padding for tables */
     }
 }
 
 .message.user .message-bubble {
+    word-break: normal !important; /* Don't break words unnecessarily */
+    overflow-wrap: anywhere !important; /* Break long words only when necessary, at better points */
+    white-space: normal !important; /* Natural text wrapping */
+    overflow: hidden !important;
+    min-width: 0 !important;
+    width: fit-content !important; /* Make outer bubble dynamic */
+    max-width: 85% !important; /* But limit to 85% for long messages */
+    padding: 6px 18px !important; /* Increased from 1px for better readability */
+    line-height: 1.5 !important; /* Increased line height for better spacing */
+    letter-spacing: 0.3px !important; /* Add letter spacing for readability */
+    word-spacing: 0.5px !important; /* Add word spacing for better readability */
     background: linear-gradient(135deg, rgba(37, 99, 235, 0.9) 0%, rgba(30, 64, 175, 0.9) 100%);
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
     color: white;
     border: 1px solid rgba(255, 255, 255, 0.2);
     box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
+    margin-left: auto !important; /* Align to right */
+}
+
+.message.user .message-bubble > div {
+    word-break: normal !important; /* Don't break words unnecessarily */
+    overflow-wrap: anywhere !important; /* Break long words only when necessary */
+    white-space: normal !important; /* Natural text wrapping */
+    overflow: hidden !important;
+    min-width: 0 !important;
+    width: fit-content !important; /* Make outer container dynamic */
+    max-width: 100% !important; /* But don't exceed parent width */
+    padding: 18px !important; /* Add spacing between outer and inner blue boxes */
+    margin-left: auto !important; /* Align to right */
+}
+
+.message.user .message-bubble > div > div {
+    padding-top: 4px !important;
+    padding-bottom: 4px !important;
+    line-height: 1.5 !important; /* Increased for better readability */
+    letter-spacing: 0.3px !important; /* Add letter spacing */
+    word-spacing: 0.5px !important; /* Add word spacing */
+    word-break: normal !important; /* Don't break words unnecessarily */
+    overflow-wrap: anywhere !important; /* Break long words only when necessary */
+    white-space: normal !important; /* Natural text wrapping */
+    width: fit-content !important; /* Make bubble size dynamic based on content */
+    max-width: 75% !important; /* But limit to 75% for long messages */
+}
+
+.message.user > div {
+    min-width: 0 !important;
+    width: 100% !important;
+}
+
+.message.user .d-flex {
+    min-width: 0 !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    flex-wrap: wrap !important;
+}
+
+.chat-messages {
+    word-wrap: break-word !important;
+    overflow-wrap: break-word !important;
+}
+
+.chat-messages .message {
+    word-wrap: break-word !important;
+    overflow-wrap: break-word !important;
+    max-width: 100% !important;
+}
+
+.chat-messages .message > * {
+    max-width: 100% !important;
+    min-width: 0 !important;
 }
 
 /* Enhanced styling for order confirmation messages */
@@ -447,12 +521,65 @@ main {
 }
 
 .message.bot .message-bubble {
-    background: rgba(239, 246, 255, 0.8);
+    width: 85% !important; /* Fixed width for consistent bot messages */
+    max-width: 85% !important; /* Set max-width for bot messages outer container */
+    background: rgba(239, 246, 255, 0.95);
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
     color: #1e40af;
-    border: 1px solid rgba(37, 99, 235, 0.2);
-    box-shadow: 0 2px 8px rgba(37, 99, 235, 0.1);
+    border: 1px solid rgba(37, 99, 235, 0.3);
+    box-shadow: 0 2px 8px rgba(37, 99, 235, 0.15);
+}
+
+.message.bot .message-bubble > div > div {
+    max-width: 75% !important; /* Match user message inner bubble width */
+}
+
+/* Message Avatars */
+.message-avatar {
+    width: 48px;
+    height: 48px;
+    min-width: 48px;
+    min-height: 48px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    font-size: 28px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+    overflow: hidden; /* Ensure image fits within circle */
+    background: transparent; /* Remove background for image avatars */
+    position: relative; /* For absolute positioning of image */
+}
+
+.message-avatar .avatar-image {
+    width: 120% !important; /* Use full avatar width */
+    height: 120% !important; /* Use full avatar height */
+    object-fit: contain; /* Ensure image fits without distortion */
+    object-position: center center; /* Center the image content */
+    padding: 0 !important; /* Remove padding to maximize image size */
+    display: block;
+    margin: 0;
+    position: relative; /* Use relative positioning for flexbox centering */
+}
+
+.user-avatar {
+    background: linear-gradient(135deg, rgba(37, 99, 235, 0.9) 0%, rgba(30, 64, 175, 0.9) 100%);
+    color: white;
+    order: 2; /* Place avatar after message on the right */
+    margin-left: 12px; /* Move avatar further to the right */
+    /* Spacing is handled by gap in flex container */
+}
+
+.bot-avatar {
+    background: transparent; /* Transparent background for logo image */
+    order: -1 !important; /* Ensure avatar is on the left */
+    width: 48px !important; /* Same size as user avatar */
+    height: 48px !important;
+    min-width: 48px !important;
+    min-height: 48px !important;
+    overflow: hidden !important; /* Keep image within circle */
 }
 
 .message-time {
@@ -596,20 +723,22 @@ table {
 .card {
     border: none;
     border-radius: 24px;
-    background: rgba(255, 255, 255, 0.5);
+    background: rgba(255, 255, 255, 0.85);
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
+    opacity: 0.95;
 }
 
 .card-header {
-    background: linear-gradient(135deg, rgba(37, 99, 235, 0.9) 0%, rgba(30, 64, 175, 0.9) 100%) !important;
+    background: linear-gradient(135deg, rgba(37, 99, 235, 0.95) 0%, rgba(30, 64, 175, 0.95) 100%) !important;
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
-    border: 1px solid rgba(255, 255, 255, 0.2);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.1) !important;
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.2) !important;
     border-radius: 24px 24px 0 0 !important;
     color: white !important;
     padding: 1.25rem;
+    opacity: 1;
 }
 
 .bg-gradient-primary {
@@ -622,6 +751,7 @@ table {
     background: transparent;
     min-height: 0; /* Important for flex scrolling */
     overflow: hidden; /* Prevent card-body from scrolling */
+    opacity: 1;
 }
 
 .bg-light {
@@ -656,12 +786,16 @@ table {
 }
 
 #messageInput {
-    background: rgba(255, 255, 255, 0.8);
+    background: rgba(255, 255, 255, 0.95);
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
-    border: 1px solid rgba(37, 99, 235, 0.2);
+    border: 1px solid rgba(37, 99, 235, 0.3);
     border-radius: 12px;
     transition: all 0.3s ease;
+    padding: 10px 15px;
+    font-size: 0.9rem;
+    height: auto;
+    max-height: 120px;
 }
 
 #messageInput:focus {
@@ -669,6 +803,24 @@ table {
     border-color: var(--primary-color);
     box-shadow: 0 0 0 0.2rem rgba(37, 99, 235, 0.25), 0 4px 12px rgba(37, 99, 235, 0.15);
     outline: none;
+}
+
+/* Light blue search bar placeholder styling */
+#productSearchInput::placeholder {
+    color: #93c5fd !important;
+    opacity: 1;
+}
+
+#productSearchInput::-webkit-input-placeholder {
+    color: #93c5fd !important;
+}
+
+#productSearchInput::-moz-placeholder {
+    color: #93c5fd !important;
+}
+
+#productSearchInput:-ms-input-placeholder {
+    color: #93c5fd !important;
 }
 
 /* Error message styling */
@@ -761,12 +913,12 @@ table {
 
 /* Welcome message styling */
 .chat-messages .text-center {
-    background: rgba(255, 255, 255, 0.4);
+    background: rgba(255, 255, 255, 0.8);
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
     border-radius: 16px;
     padding: 30px;
-    border: 1px solid rgba(37, 99, 235, 0.1);
+    border: 1px solid rgba(37, 99, 235, 0.2);
 }
 
 .chat-messages .text-center i {

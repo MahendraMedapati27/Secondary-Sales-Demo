@@ -28,12 +28,19 @@ def create_app(config_class=Config):
     )
     app.config.from_object(config_class)
     
-    # Fix MIME type for JavaScript modules
+    # Fix MIME type for JavaScript modules and add cache-busting headers
     @app.after_request
-    def set_js_mime_type(response):
-        """Ensure JavaScript files are served with correct MIME type"""
+    def set_js_mime_type_and_cache(response):
+        """Ensure JavaScript files are served with correct MIME type and disable caching"""
         if response.mimetype == 'text/plain' and request.path.endswith('.js'):
             response.mimetype = 'application/javascript'
+        
+        # Disable caching for all static files and API responses
+        if request.path.startswith('/static/') or request.path.startswith('/enhanced-chat/'):
+            response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate, max-age=0'
+            response.headers['Pragma'] = 'no-cache'
+            response.headers['Expires'] = '0'
+        
         return response
     
     # Disable template caching in development and production - NUCLEAR OPTION
@@ -55,14 +62,10 @@ def create_app(config_class=Config):
     
     # Register blueprints
     from app.auth import auth_bp
-    from app.chatbot import chatbot_bp
     from app.enhanced_chatbot import chatbot_bp as enhanced_chatbot_bp
-    from app.whatsapp_webhook import whatsapp_bp
     
     app.register_blueprint(auth_bp, url_prefix='/auth')
-    app.register_blueprint(chatbot_bp, url_prefix='/chat')
     app.register_blueprint(enhanced_chatbot_bp, url_prefix='/enhanced-chat')
-    app.register_blueprint(whatsapp_bp, url_prefix='/webhook')
     
     # Root route
     @app.route('/')
@@ -98,6 +101,14 @@ IF EXISTS (SELECT 1 FROM sys.columns c
            WHERE o.name = 'users' AND c.name = 'otp_secret' AND c.max_length < 510)
 BEGIN
     ALTER TABLE dbo.users ALTER COLUMN otp_secret NVARCHAR(255) NULL;
+END
+"""))
+                    # Add sales_price column to products table if it doesn't exist
+                    conn.execute(text("""
+IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'dbo.products') AND type in (N'U'))
+AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.products') AND name = 'sales_price')
+BEGIN
+    ALTER TABLE dbo.products ADD sales_price FLOAT NOT NULL DEFAULT 0;
 END
 """))
             except Exception:
@@ -142,8 +153,8 @@ END
             # Initialize warehouses
             db_service.initialize_warehouses()
             
-            # Create sample products
-            db_service.create_sample_products()
+            # Create sample products - DISABLED: Use dealer_wise_stock_details instead
+            # db_service.create_sample_products()
             
             # Create sample users
             db_service.create_sample_users()

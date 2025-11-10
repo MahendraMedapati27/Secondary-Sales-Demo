@@ -242,3 +242,524 @@
     border-radius: 50%;
     animation: spin 1s linear infinite;
 }
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+/* Action buttons styling */
+.action-buttons-container {
+    margin: 16px 0 8px 0;
+    padding: 20px 16px;
+    background: linear-gradient(135deg, rgba(239, 246, 255, 0.95) 0%, rgba(255, 255, 255, 0.95) 100%);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border-radius: 16px;
+    border: 2px solid rgba(37, 99, 235, 0.1);
+    box-shadow: 0 4px 16px rgba(37, 99, 235, 0.1), 
+                inset 0 1px 0 rgba(255, 255, 255, 0.6);
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box;
+    position: relative;
+    overflow: hidden;
+}
+
+.action-btn {
+    background: linear-gradient(135deg, rgba(37, 99, 235, 0.95) 0%, rgba(30, 64, 175, 0.95) 100%);
+    color: white;
+    border: none;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    padding: 10px 16px !important;
+    font-size: 0.8rem !important;
+    font-weight: 600 !important;
+    min-width: 110px !important;
+    border-radius: 10px !important;
+    box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25),
+                0 2px 4px rgba(37, 99, 235, 0.15);
+    position: relative;
+    overflow: hidden;
+    letter-spacing: 0.3px;
+}
+
+.action-btn::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(90deg, 
+        transparent, 
+        rgba(255, 255, 255, 0.3), 
+        transparent);
+    transition: left 0.5s ease;
+}
+
+.action-btn:hover::before {
+    left: 100%;
+}
+
+.action-btn:hover {
+    transform: translateY(-3px) scale(1.02);
+    box-shadow: 0 8px 20px rgba(37, 99, 235, 0.4),
+                0 4px 8px rgba(37, 99, 235, 0.2);
+    background: linear-gradient(135deg, rgba(59, 130, 246, 0.95) 0%, rgba(37, 99, 235, 0.95) 100%);
+}
+
+.action-btn:active {
+    transform: translateY(-1px) scale(0.98);
+    box-shadow: 0 2px 8px rgba(37, 99, 235, 0.3);
+}
+
+.action-btn.loading {
+    position: relative;
+    color: transparent;
+}
+
+.action-btn.loading::after {
+    content: "";
+    position: absolute;
+    width: 16px;
+    height: 16px;
+    top: 50%;
+    left: 50%;
+    margin-left: -8px;
+    margin-top: -8px;
+    border: 2px solid transparent;
+    border-top-color: #ffffff;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+}
+
+/* Customer selection styling */
+.customer-selection-container {
+    margin: 12px 0;
+    transition: all 0.3s ease;
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box;
+}
+
+/* Add customer form styling */
+.add-customer-container {
+    margin: 12px 0;
+    transition: all 0.3s ease;
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box;
+}
+
+.add-customer-container .card {
+    border-radius: 12px !important;
+    padding: 16px !important;
+    box-shadow: 0 2px 8px rgba(37, 99, 235, 0.1) !important;
+    border: 1px solid rgba(37, 99, 235, 0.15) !important;
+}
+
+.add-customer-container h6 {
+    font-size: 0.9rem !important;
+    margin-bottom: 12px !important;
+}
+
+.add-customer-container .form-control,
+.add-customer-container .form-select {
+    transition: all 0.3s ease;
+    border-radius: 8px !important;
+    border: 1.5px solid #e5e7eb !important;
+    font-size: 0.875rem !important;
+    padding: 10px 12px !important;
+}
+
+.add-customer-container .form-control:focus,
+.add-customer-container .form-select:focus {
+    border-color: #2563eb !important;
+    box-shadow: 0 0 0 0.15rem rgba(37, 99, 235, 0.2) !important;
+}
+
+.add-customer-container .btn {
+    font-size: 0.875rem !important;
+    padding: 10px 16px !important;
+    border-radius: 8px !important;
+}
+
+/* Cancel button with red hover animation */
+.add-customer-container .cancel-customer-btn {
+    transition: all 0.3s ease !important;
+    border-color: #6c757d !important;
+    color: #6c757d !important;
+}
+
+.add-customer-container .cancel-customer-btn:hover {
+    background-color: #dc3545 !important;
+    border-color: #dc3545 !important;
+    color: white !important;
+    transform: scale(1.05);
+    box-shadow: 0 4px 12px rgba(220, 53, 69, 0.3) !important;
+}
+
+.add-customer-container .cancel-customer-btn:active {
+    transform: scale(0.98);
+    box-shadow: 0 2px 6px rgba(220, 53, 69, 0.2) !important;
+}
+
+.customer-selection-container .card {
+    border-radius: 12px !important;
+    padding: 16px !important;
+    box-shadow: 0 2px 8px rgba(37, 99, 235, 0.1) !important;
+    border: 1px solid rgba(37, 99, 235, 0.15) !important;
+    overflow-x: auto;
+}
+
+.customer-selection-container table {
+    width: 100%;
+    min-width: 400px;
+}
+
+.customer-selection-container .btn {
+    font-size: 0.8rem !important;
+    padding: 8px 14px !important;
+    border-radius: 8px !important;
+    min-width: auto !important;
+}
+
+.customer-selection-container h6 {
+    font-size: 0.9rem !important;
+    margin-bottom: 12px !important;
+}
+
+.customer-selection-container .form-select {
+    transition: all 0.3s ease;
+    font-size: 0.875rem !important;
+    padding: 10px 12px !important;
+    border-radius: 8px !important;
+    border: 1.5px solid #e5e7eb !important;
+}
+
+.customer-selection-container .form-select:focus {
+    border-color: #2563eb !important;
+    box-shadow: 0 0 0 0.15rem rgba(37, 99, 235, 0.2) !important;
+}
+
+.customer-selection-container .btn {
+    font-size: 0.875rem !important;
+    padding: 10px 16px !important;
+    border-radius: 8px !important;
+}
+
+.customer-selection-container .alert {
+    padding: 10px 12px !important;
+    font-size: 0.8rem !important;
+    border-radius: 8px !important;
+}
+
+/* Invoice filter styling */
+.invoice-filter-container {
+    margin: 12px 0;
+    transition: all 0.3s ease;
+}
+
+.invoice-filter-container .card {
+    border-radius: 12px !important;
+    padding: 16px !important;
+    box-shadow: 0 2px 8px rgba(37, 99, 235, 0.1) !important;
+    border: 1px solid rgba(37, 99, 235, 0.15) !important;
+}
+
+.invoice-filter-container h6 {
+    font-size: 0.9rem !important;
+    margin-bottom: 12px !important;
+}
+
+.invoice-filter-container .form-select {
+    transition: all 0.3s ease;
+    font-size: 0.875rem !important;
+    padding: 10px 12px !important;
+    border-radius: 8px !important;
+    border: 1.5px solid #e5e7eb !important;
+}
+
+.invoice-filter-container .form-select:focus {
+    border-color: #2563eb !important;
+    box-shadow: 0 0 0 0.15rem rgba(37, 99, 235, 0.2) !important;
+}
+
+.invoice-filter-container .btn {
+    font-size: 0.875rem !important;
+    padding: 10px 16px !important;
+    border-radius: 8px !important;
+}
+
+/* Enhanced product selection form */
+.product-selection-container {
+    margin: 12px 0;
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box;
+}
+
+.product-selection-container .card {
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box;
+    border-radius: 12px !important;
+    padding: 16px !important;
+    box-shadow: 0 2px 8px rgba(37, 99, 235, 0.1) !important;
+    border: 1px solid rgba(37, 99, 235, 0.15) !important;
+}
+
+.product-table-container {
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box;
+}
+
+.product-table-container table {
+    border-radius: 12px !important;
+    overflow: hidden !important;
+}
+
+.product-table-container table thead th:first-child {
+    border-top-left-radius: 12px !important;
+}
+
+.product-table-container table thead th:last-child {
+    border-top-right-radius: 12px !important;
+}
+
+.product-table-container table tbody tr:last-child td:first-child {
+    border-bottom-left-radius: 12px !important;
+}
+
+.product-table-container table tbody tr:last-child td:last-child {
+    border-bottom-right-radius: 12px !important;
+}
+
+/* Orders Table Styling */
+.orders-table-container {
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box;
+}
+
+.orders-table-container > div {
+    width: 100%;
+    overflow-x: auto;
+    border-radius: 12px;
+}
+
+.orders-table-container table {
+    border-radius: 12px !important;
+    overflow: hidden !important;
+    width: 100% !important;
+    table-layout: auto !important;
+}
+
+.orders-table-container table thead th:first-child {
+    border-top-left-radius: 12px !important;
+}
+
+.orders-table-container table thead th:last-child {
+    border-top-right-radius: 12px !important;
+}
+
+.orders-table-container table tbody tr:last-child td:first-child {
+    border-bottom-left-radius: 12px !important;
+}
+
+.orders-table-container table tbody tr:last-child td:last-child {
+    border-bottom-right-radius: 12px !important;
+}
+
+/* Order Selection Container Styling */
+.order-selection-container {
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box;
+}
+
+.order-selection-container .card {
+    width: 100%;
+    box-sizing: border-box;
+    border-radius: 12px !important;
+    padding: 16px !important;
+    box-shadow: 0 2px 8px rgba(37, 99, 235, 0.1) !important;
+    border: 1px solid rgba(37, 99, 235, 0.15) !important;
+}
+
+.order-selection-container .btn {
+    font-size: 0.8rem !important;
+    padding: 8px 14px !important;
+    border-radius: 8px !important;
+    min-width: auto !important;
+}
+
+.order-selection-container .form-select {
+    background-color: white !important;
+    background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%23343a40' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M2 5l6 6 6-6'/%3e%3c/svg%3e") !important;
+    background-repeat: no-repeat !important;
+    background-position: right 12px center !important;
+    background-size: 16px 12px !important;
+    appearance: none !important;
+    -webkit-appearance: none !important;
+    -moz-appearance: none !important;
+    padding: 10px 35px 10px 12px !important;
+}
+
+.order-selection-container #dateFilter,
+.order-selection-container #statusFilter {
+    background-color: white !important;
+    background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%23343a40' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M2 5l6 6 6-6'/%3e%3c/svg%3e") !important;
+    background-repeat: no-repeat !important;
+    background-position: right 8px center !important;
+    background-size: 14px 10px !important;
+    appearance: none !important;
+    -webkit-appearance: none !important;
+    -moz-appearance: none !important;
+    transition: all 0.3s ease;
+}
+
+.order-selection-container #dateFilter:focus,
+.order-selection-container #statusFilter:focus {
+    border-color: #2563eb !important;
+    box-shadow: 0 0 0 0.15rem rgba(37, 99, 235, 0.2) !important;
+}
+
+.product-selection-container h6 {
+    font-size: 0.9rem !important;
+    margin-bottom: 12px !important;
+}
+
+.product-selection-container .form-select,
+.product-selection-container .form-control {
+    transition: all 0.3s ease;
+    border-radius: 8px !important;
+    border: 1.5px solid #e5e7eb !important;
+    font-size: 0.875rem !important;
+    padding: 10px 35px 10px 12px !important;
+}
+
+.product-selection-container .form-select {
+    background-color: white !important;
+    background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%23343a40' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M2 5l6 6 6-6'/%3e%3c/svg%3e") !important;
+    background-repeat: no-repeat !important;
+    background-position: right 12px center !important;
+    background-size: 16px 12px !important;
+    appearance: none !important;
+    -webkit-appearance: none !important;
+    -moz-appearance: none !important;
+}
+
+.product-selection-container .form-select:focus,
+.product-selection-container .form-control:focus {
+    border-color: #2563eb !important;
+    box-shadow: 0 0 0 0.15rem rgba(37, 99, 235, 0.2) !important;
+}
+
+.product-selection-container .btn {
+    font-size: 0.8rem !important;
+    padding: 8px 14px !important;
+    border-radius: 8px !important;
+    min-width: auto !important;
+}
+
+/* Smooth animations */
+@keyframes slideInFromBottom {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* Enhanced chat message bubbles */
+.message-bubble {
+    animation: fadeIn 0.3s ease-out;
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* Better scrollbar styling */
+#chatMessages::-webkit-scrollbar {
+    width: 8px;
+}
+
+#chatMessages::-webkit-scrollbar-track {
+    background: rgba(0, 0, 0, 0.05);
+    border-radius: 10px;
+}
+
+#chatMessages::-webkit-scrollbar-thumb {
+    background: rgba(37, 99, 235, 0.3);
+    border-radius: 10px;
+}
+
+#chatMessages::-webkit-scrollbar-thumb:hover {
+    background: rgba(37, 99, 235, 0.5);
+}
+
+/* Stock Confirmation Table Styling */
+#stockConfirmationForm table {
+    margin-bottom: 0 !important;
+}
+
+#stockConfirmationForm table thead th {
+    background-color: #f8f9fa !important;
+    font-weight: 600 !important;
+    color: #212529 !important;
+    border-bottom: 2px solid #dee2e6 !important;
+    white-space: nowrap;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background-color: #f8f9fa !important;
+}
+
+#stockConfirmationForm table tbody tr {
+    transition: background-color 0.2s ease;
+}
+
+#stockConfirmationForm table tbody tr:hover {
+    background-color: #f1f3f5 !important;
+    cursor: pointer;
+}
+
+#stockConfirmationForm table tbody tr:active {
+    background-color: #e9ecef !important;
+}
+
+#stockConfirmationForm .table-responsive {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
+#stockConfirmationForm .table-responsive::-webkit-scrollbar {
+    height: 8px;
+}
+
+#stockConfirmationForm .table-responsive::-webkit-scrollbar-track {
+    background: rgba(0, 0, 0, 0.05);
+    border-radius: 10px;
+}
+
+#stockConfirmationForm .table-responsive::-webkit-scrollbar-thumb {
+    background: rgba(37, 99, 235, 0.3);
+    border-radius: 10px;
+}
+
+#stockConfirmationForm .table-responsive::-webkit-scrollbar-thumb:hover {
+    background: rgba(37, 99, 235, 0.5);
+}

@@ -1,6 +1,6 @@
-from flask import Blueprint, render_template, request, jsonify, session, current_app, make_response
+from flask import Blueprint, render_template, request, jsonify, session, current_app, make_response, send_file
 from app import db 
-from app.models import Conversation, User, Warehouse, Product, Order, ChatSession, CartItem
+from app.models import Conversation, User, Product, Order, ChatSession, CartItem, DealerWiseStockDetails, Customer, FOC
 from app.database_service import DatabaseService
 from app.llm_classification_service import LLMClassificationService
 from app.web_search_service import WebSearchService
@@ -9,10 +9,12 @@ from app.llm_order_service import LLMOrderService
 from app.pricing_service import PricingService
 from app.groq_service import GroqService 
 from app.email_utils import send_otp_email, send_conversation_email
+from app.stock_management_service import StockManagementService
 import logging
 import time
 from datetime import datetime
 import json
+import os
 
 chatbot_bp = Blueprint('enhanced_chatbot', __name__)
 
@@ -71,12 +73,119 @@ def get_pricing_service():
         pricing_service = PricingService()
     return pricing_service
 
+def build_product_list_with_foc(products, pricing_service):
+    """Helper function to build product list with FOC information"""
+    product_list = []
+    
+    for product in products:
+        # Handle both dict (from dealer stock) and Product objects
+        if isinstance(product, dict):
+            product_code = product.get('product_code', '')
+            product_name = product.get('product_name', '')
+            sales_price = float(product.get('sales_price', product.get('price', 0)))
+            available = int(product.get('available_quantity', 0))
+            product_id = product.get('product_id') or product.get('id')
+        else:
+            # Product object
+            price = product.sales_price if hasattr(product, 'sales_price') and product.sales_price else (product.price if hasattr(product, 'price') else 0)
+            available = product.available_for_sale if hasattr(product, 'available_for_sale') else 0
+            product_code = str(product.id) if not hasattr(product, 'product_code') else product.product_code
+            product_name = product.product_name
+            sales_price = float(price) if price else 0.0
+            available = int(available) if available else 0
+            product_id = product.id
+        
+        # Get FOC information for this product
+        # Create a minimal product-like object for FOC lookup
+        class ProductLike:
+            def __init__(self, pid, pname, pcode):
+                self.id = pid
+                self.product_name = pname
+                self.product_code = pcode
+        
+        try:
+            # Get FOC scheme directly from database
+            from app.models import FOC
+            
+            foc_text = None
+            foc_scheme = None
+            
+            # Try to find FOC by product_id
+            if product_id:
+                foc_scheme = FOC.query.filter_by(product_id=product_id, is_active=True).first()
+            
+            # If not found by ID, try by product name matching
+            if not foc_scheme and product_name:
+                # Try exact match first
+                foc_scheme = FOC.query.filter_by(product_name=product_name, is_active=True).first()
+                
+                # Try normalized matching
+                if not foc_scheme:
+                    all_foc = FOC.query.filter_by(is_active=True).all()
+                    for foc in all_foc:
+                        # Simple matching: check if product names contain same key terms
+                        product_clean = product_name.upper().split('(')[0].strip()
+                        foc_clean = foc.product_name.upper().split('(')[0].strip()
+                        if product_clean == foc_clean or product_clean in foc_clean or foc_clean in product_clean:
+                            foc_scheme = foc
+                            break
+            
+            # Parse all FOC schemes from database
+            foc_schemes_list = []
+            if foc_scheme:
+                if foc_scheme.scheme_1 and '+' in foc_scheme.scheme_1:
+                    parts = foc_scheme.scheme_1.split('+')
+                    foc_schemes_list.append({'buy': int(parts[0].strip()), 'free': int(parts[1].strip())})
+                
+                if foc_scheme.scheme_2 and '+' in foc_scheme.scheme_2:
+                    parts = foc_scheme.scheme_2.split('+')
+                    foc_schemes_list.append({'buy': int(parts[0].strip()), 'free': int(parts[1].strip())})
+                
+                if foc_scheme.scheme_3 and '+' in foc_scheme.scheme_3:
+                    parts = foc_scheme.scheme_3.split('+')
+                    foc_schemes_list.append({'buy': int(parts[0].strip()), 'free': int(parts[1].strip())})
+                
+                if foc_schemes_list:
+                    # For display, show the first scheme (lowest tier)
+                    first_scheme = foc_schemes_list[0]
+                    foc_text = f"Buy {first_scheme['buy']} Get {first_scheme['free']} Free"
+                    logger.info(f"✓ FOC found for {product_name}: {len(foc_schemes_list)} tier(s) - S1:{foc_scheme.scheme_1}, S2:{foc_scheme.scheme_2}, S3:{foc_scheme.scheme_3}")
+                else:
+                    logger.info(f"No parseable FOC schemes for {product_name}")
+            else:
+                logger.info(f"No FOC record found for {product_name}")
+        except Exception as e:
+            logger.warning(f"Could not get FOC for product {product_code}: {str(e)}")
+            foc_text = None
+            foc_schemes_list = []
+        
+        product_list.append({
+            'product_code': product_code,
+            'product_name': product_name,
+            'sales_price': sales_price,
+            'available_for_sale': available,
+            'foc': foc_text,  # Add FOC information for display
+            'foc_schemes': foc_schemes_list  # Add all FOC schemes for calculation
+        })
+    
+    return product_list
+
 def get_llm_service():
     """Get LLM service instance (GroqService)"""
     global llm_service
     if llm_service is None:
         llm_service = GroqService()
     return llm_service
+
+def get_stock_management_service():
+    """Get stock management service instance"""
+    global stock_management_service
+    if stock_management_service is None:
+        stock_management_service = StockManagementService()
+    return stock_management_service
+
+# Initialize stock management service
+stock_management_service = None
 
 @chatbot_bp.route('/')
 def chat():
@@ -215,6 +324,65 @@ def test_vrm():
     else:
         return f"VRM file not found at: {vrm_path}", 404
 
+
+def get_default_action_buttons(user):
+    """Get default action buttons based on user type"""
+    # Company users get report generation buttons
+    if user and user.role == 'company':
+        return [
+            {'text': 'Generate Report', 'action': 'generate_report'},
+            {'text': 'Help', 'action': 'help'}
+        ]
+    
+    action_buttons = [
+        {'text': 'Place Order', 'action': 'place_order'},
+        {'text': 'Track Order', 'action': 'track_order'},
+        {'text': 'Company Info', 'action': 'company_info'}
+    ]
+    
+    # For distributors (dealers), check for pending stocks and add button if needed
+    if user and user.role == 'distributor':
+        try:
+            stock_service = get_stock_management_service()
+            pending_result = stock_service.get_pending_stock_arrivals(user.unique_id)
+            
+            if pending_result['success'] and pending_result['count'] > 0:
+                # Add "Pending Stocks" button at the beginning
+                action_buttons.insert(0, {'text': 'Pending Stocks', 'action': 'pending_stocks'})
+        except Exception as e:
+            logger.error(f"Error checking pending stocks for action buttons: {str(e)}")
+    
+    return action_buttons
+
+def ensure_action_buttons(response_data, user):
+    """Ensure response has action buttons, adding defaults if missing"""
+    # Skip adding default buttons for company users if they already have interactive_report_selection
+    if isinstance(response_data, tuple):
+        # Flask jsonify response (tuple)
+        response_obj, status_code = response_data
+        if hasattr(response_obj, 'get_json'):
+            data = response_obj.get_json()
+            if data:
+                # Don't add default buttons if interactive components exist
+                if data.get('interactive_report_selection'):
+                    return jsonify(data), status_code
+                    
+                if 'action_buttons' not in data or not data.get('action_buttons'):
+                    data['action_buttons'] = get_default_action_buttons(user)
+                return jsonify(data), status_code
+        return response_data
+    elif isinstance(response_data, dict):
+        # Dict response
+        # Don't add default buttons if interactive components exist
+        if response_data.get('interactive_report_selection'):
+            return response_data
+            
+        if 'action_buttons' not in response_data or not response_data.get('action_buttons'):
+            response_data['action_buttons'] = get_default_action_buttons(user)
+        return response_data
+    
+    return response_data
+
 @chatbot_bp.route('/message', methods=['POST'])
 def process_message():
     """Process chat message with enhanced RB (Powered by Quantum Blue AI) logic"""
@@ -259,27 +427,34 @@ def process_message():
             # Set user session
             session['user_id'] = user.id
             session['unique_id'] = user.unique_id
-            session['user_type'] = user.user_type
-            session['warehouse_location'] = user.nearest_warehouse
+            session['user_type'] = user.role
+            session['area'] = user.area  # Use area instead of nearest_warehouse
             session['onboarding_state'] = 'ask_intent'
             
             # Create chat session
             chat_session = db_service.create_chat_session(user.id)
             session['session_id'] = chat_session.session_id
             
-            # Generate welcome message with intent question
+            # Generate welcome message with action buttons
             welcome_message = generate_welcome_message(user)
-            intent_message = "How can I help you today? Would you like to:\n• Place an order\n• Track an order\n• Get product information\n• Company information\n• Or something else?"
             
-            full_message = f"{welcome_message}\n\n{intent_message}"
+            # Get action buttons based on user role
+            action_buttons = get_default_action_buttons(user)
+            
+            # Customize message based on role
+            if user.role == 'company':
+                full_message = welcome_message  # Company welcome already has instructions
+            else:
+                full_message = f"{welcome_message}\n\nPlease select an option below:"
             
             return jsonify({
                 'response': full_message,
+                'action_buttons': action_buttons,
                 'user_info': {
                     'name': user.name,
-                    'user_type': user.user_type,
+                    'user_type': user.role,
                     'role': user.role,
-                    'warehouse': user.nearest_warehouse
+                    'warehouse': user.area  # Use area instead of nearest_warehouse
                 }
             }), 200
 
@@ -332,23 +507,54 @@ Respond with ONLY a JSON object:
                     session['onboarding_state'] = 'completed'
                     session['user_intent'] = detected_intent
                     
+                    # Initialize context_data for all intents
+                    context_data = {}
+                    
                     # Generate appropriate response based on intent
                     if detected_intent == 'PLACE_ORDER':
+                        # For MRs, check if customer is already selected
+                        if user.role == 'mr':
+                            # Check if customer is already selected in session
+                            if 'selected_customer_id' not in session:
+                                # First, ask whether to select existing customer or add new customer
+                                response = "To place an order, I need to know which customer you're ordering for. Would you like to select an existing customer or add a new customer?"
+                                
+                                save_conversation(user.id, user_message, response)
+                                
+                                return jsonify({
+                                    'response': response,
+                                    'action_buttons': [
+                                        {'text': 'Select Customer', 'action': 'select_customer'},
+                                        {'text': 'Add New Customer', 'action': 'add_new_customer'}
+                                    ]
+                                }), 200
+                        
+                        # Get actual products from database for dynamic examples
+                        products = db_service.get_products_from_dealer_stock(user.area) if user.area else []
+                        
+                        if products:
+                            # Create dynamic example from first 3 products
+                            example_products = products[:3]
+                            example_text = 'For example: "Order '
+                            example_parts = []
+                            for i, p in enumerate(example_products):
+                                qty = 10 if i == 0 else (5 if i == 1 else 3)  # Vary quantities
+                                example_parts.append(f"{qty} {p.product_name} ({p.product_code})")
+                                if i < len(example_products) - 1:
+                                    example_parts.append(', ')
+                            example_text += ''.join(example_parts) + '" or "Order 10 units of product ' + example_products[0].product_code.replace('RB', '') + ', 5 units of ' + example_products[1].product_code.replace('RB', '') + '"'
+                        else:
+                            example_text = 'For example: "Order 10 units of product 001, 5 units of 002"'
+                        
                         return jsonify({
-                            'response': 'Great! I can help you place an order. Please tell me which products you would like to order and their quantities.\n\nFor example: "Order 50 Quantum Processor, 30 Neural Network Module, and 100 AI Memory Card" or "Order 60 units of product 001, 25 units of 002"'
+                            'response': f'Great! I can help you place an order. Please tell me which products you would like to order and their quantities.\n\n{example_text}'
                         }), 200
                     elif detected_intent == 'TRACK_ORDER':
-                        return jsonify({
-                            'response': 'I can help you track your order. Please provide your Order ID, or I can show you your recent orders.'
-                        }), 200
+                        # Call handle_track_order directly to show orders table and selection box
+                        return handle_track_order(user_message, user, context_data)
                     elif detected_intent == 'PRODUCT_INFO':
-                        # Show available products
-                        warehouse = db_service.get_warehouse_by_location(user.nearest_warehouse) if user.nearest_warehouse else None
-                        products = db_service.get_products_by_warehouse(warehouse.id) if warehouse else db_service.get_products_by_warehouse(1)  # Fallback to warehouse 1
-                        product_list = "\n".join([f"• {p.product_name} ({p.product_code}) - ${p.price_of_product} - Available: {p.available_for_sale}" for p in products[:10]])
-                        return jsonify({
-                            'response': f'Here are our available products:\n\n{product_list}\n\nWould you like to place an order for any of these products?'
-                        }), 200
+                        # Redirect to handle_product_info_or_query for consistent table display
+                        return handle_product_info_or_query(user_message, user, context_data)
                     elif detected_intent == 'COMPANY_INFO':
                         company_info = db_service.get_company_info()
                         info_text = f"About {company_info['company_name']}:\n{company_info['description']}\n\nFeatures:\n" + "\n".join([f"• {f}" for f in company_info['features']])
@@ -358,30 +564,51 @@ Respond with ONLY a JSON object:
                     
                     # For OTHER intent, continue to normal flow
                 except Exception as e:
-                    logger.error(f"Error classifying intent: {str(e)}")
+                    logger.error(f"Error classifying intent: {str(e)}", exc_info=True)
                     # Fall through to normal flow
                     session['onboarding_state'] = 'completed'
+                    # Initialize context_data for fallback
+                    context_data = {}
             else:
                 # Fallback: simple keyword matching
                 message_lower = user_message.lower()
                 session['onboarding_state'] = 'completed'
-                if any(kw in message_lower for kw in ['order', 'buy', 'purchase', 'place order']):
+                if any(kw in message_lower for kw in ['order', 'buy', 'purchase', 'place order', 'i want to place an order']):
                     session['user_intent'] = 'PLACE_ORDER'
+                    # For MRs, check if customer is already selected
+                    if user.role == 'mr':
+                        # Check if customer is already selected in session
+                        if 'selected_customer_id' not in session:
+                            # First, ask whether to select existing customer or add new customer
+                            response = "To place an order, I need to know which customer you're ordering for. Would you like to select an existing customer or add a new customer?"
+                            
+                            save_conversation(user.id, user_message, response)
+                            
+                            return jsonify({
+                                'response': response,
+                                'action_buttons': [
+                                    {'text': 'Select Customer', 'action': 'select_customer'},
+                                    {'text': 'Add New Customer', 'action': 'add_new_customer'}
+                                ]
+                            }), 200
+                    
                     return jsonify({
-                        'response': 'Great! I can help you place an order. Please tell me which products you would like to order and their quantities.\n\nFor example: "Order 50 Quantum Processor, 30 Neural Network Module, and 100 AI Memory Card"'
+                        'response': 'Great! I can help you place an order. Please tell me which products you would like to order and their quantities.\n\nFor example: "Order 50 units of product RB001, 30 units of product RB002, and 100 units of product RB003"'
                     }), 200
-                elif any(kw in message_lower for kw in ['track', 'status', 'where is']):
+                elif any(kw in message_lower for kw in ['track', 'status', 'where is', 'track order', 'i want to track an order']):
                     session['user_intent'] = 'TRACK_ORDER'
-                    return jsonify({
-                        'response': 'I can help you track your order. Please provide your Order ID, or I can show you your recent orders.'
-                    }), 200
+                    # Initialize context_data if not already created
+                    context_data = {}
+                    # Call handle_track_order directly to show orders table and selection box
+                    return handle_track_order(user_message, user, context_data)
                 else:
                     session['user_intent'] = 'OTHER'
 
         # Main chat flow (verified user)
         session_user_id = session.get('user_id')
         if not session_user_id:
-            return jsonify({'response': 'Please complete the onboarding process first.'}), 200
+            # During onboarding, no action buttons needed
+            return jsonify({'response': 'Please complete the onboarding process first.', 'action_buttons': []}), 200
 
         # Get services
         db_service = get_db_service()
@@ -393,15 +620,19 @@ Respond with ONLY a JSON object:
 
         # Get user context
         user = User.query.get(session_user_id)
-        warehouse_location = session.get('warehouse_location')
         
-        # Get user's warehouse
-        warehouse = db_service.get_warehouse_by_location(warehouse_location)
+        # COMPANY USER FLOW - Handle report generation requests
+        if user and user.role == 'company':
+            return handle_company_requests(user_message, user)
+        
+        # Get user's warehouse based on area
+        area = user.area if user else None
+        warehouse = db_service.get_warehouse_by_area(area) if area else None
         context_data = {
-            'user_warehouse': warehouse_location,
-            'user_email': user.email,
-            'user_type': user.user_type,
-            'user_role': user.role
+            'user_warehouse': area,
+            'user_email': user.email if user else None,
+            'user_type': user.role if user else None,
+            'user_role': user.role if user else None
         }
 
         # Get recent orders for context
@@ -410,6 +641,56 @@ Respond with ONLY a JSON object:
 
         # Get conversation history
         conversation_history = db_service.get_conversation_history(session_user_id, limit=10)
+
+        # Check for place order messages FIRST - before any other processing
+        # This ensures MRs see customer selection buttons
+        message_lower = user_message.lower().strip()
+        place_order_keywords = ['i want to place an order', 'place an order', 'place order', 'i want to order', 'order products']
+        if any(keyword in message_lower for keyword in place_order_keywords):
+            logger.info(f"Detected place order message: {user_message}. User type: {user.role}")
+            if user.role == 'mr':
+                logger.info(f"MR user detected. Checking for selected_customer_id in session: {'selected_customer_id' in session}")
+            return handle_place_order(user_message, user, context_data, conversation_history)
+
+        # Check for simple greetings FIRST (CRITICAL - prevent "hi" from confirming orders)
+        # This must come before cart check to avoid misinterpretation
+        greeting_keywords = ['hi', 'hello', 'hey', 'good morning', 'good afternoon', 'good evening', 'hola', 'namaste']
+        if message_lower in greeting_keywords or any(message_lower.startswith(g) for g in greeting_keywords):
+            logger.info(f"Detected greeting message: {user_message}")
+            # Check if user has items in cart
+            cart_items = db_service.get_cart_items(session_user_id)
+            if cart_items:
+                cart_count = len(cart_items)
+                greeting_response = f"Hello! 👋 You currently have {cart_count} item(s) in your cart. Would you like to:\n• Add more products\n• View your cart\n• Confirm and place your order"
+                save_conversation(user.id, user_message, greeting_response)
+                return jsonify({
+                    'response': greeting_response,
+                    'action_buttons': [
+                        {'text': 'Add More Products', 'action': 'place_order'},
+                        {'text': 'View Cart', 'action': 'view_cart'},
+                        {'text': 'Confirm Order', 'action': 'confirm_order'}
+                    ]
+                }), 200
+            else:
+                # No cart items - show standard welcome options
+                return ensure_action_buttons(jsonify({
+                    'response': f"Hello {user.name}! 👋 How can I help you today?"
+                }), user), 200
+        
+        # Check for "select customer", "change customer", and "add new customer" messages BEFORE LLM classification
+        # This prevents misclassification when user has items in cart
+        if message_lower == 'select customer' or message_lower == 'select existing customer':
+            logger.info(f"Detected select customer message: {user_message}")
+            return handle_select_customer(user, context_data)
+        elif message_lower == 'change customer' or message_lower == 'change the customer' or message_lower == 'change my customer':
+            logger.info(f"Detected change customer message: {user_message}")
+            # Clear the current selected customer from session
+            session.pop('selected_customer_id', None)
+            session.pop('selected_customer_unique_id', None)
+            return handle_select_customer(user, context_data)
+        elif message_lower == 'add new customer' or message_lower == 'add customer':
+            logger.info(f"Detected add new customer message: {user_message}")
+            return handle_add_new_customer(user, context_data)
 
         # Use LLM to analyze if user wants to confirm order or add products
         # Get cart items to check if user has items to confirm
@@ -431,7 +712,7 @@ Context:
 Determine the user's intent:
 
 1. **CONFIRM_ORDER** - User wants to place/confirm/finalize the order for items already in cart
-   Examples: "confirm my order", "place the order", "proceed", "yes", "ok", "go ahead", "finalize"
+   Examples: "confirm my order", "place the order", "proceed with order", "yes proceed", "finalize order"
    
 2. **ADD_TO_CART** - User wants to add more products to the cart
    Examples: "add 5 quantum sensors", "ok add more items", "put 10 processors", "include product 001"
@@ -445,16 +726,20 @@ Determine the user's intent:
 5. **DATABASE_QUERY** - User wants to query database for specific information
    Examples: "show me all products in database", "list available products", "what's in stock"
 
-Important Rules:
+6. **GREETING** - User is just greeting (hi, hello, hey, etc.) - NOT confirming order
+   Examples: "hi", "hello", "hey", "good morning"
+
+CRITICAL RULES:
+- **GREETINGS are NEVER order confirmations**: "hi", "hello", "hey" → GREETING (not CONFIRM_ORDER)
+- Simple words like "ok", "yes" ALONE (without "order"/"proceed") → GREETING (NOT CONFIRM_ORDER)
+- For CONFIRM_ORDER, user MUST explicitly mention: "order", "confirm", "proceed with order", "place order"
 - If message asks to "list", "show", "display" products/database → PRODUCT_INFO or DATABASE_QUERY
 - If message contains product names/codes AND action words like "add", "put", "include" → ADD_TO_CART
-- If message is a simple confirmation like "ok", "yes", "proceed" WITHOUT product mentions → CONFIRM_ORDER
-- If message explicitly says "confirm order", "place order" → CONFIRM_ORDER
-- NEVER treat product listing requests as order confirmations
+- NEVER treat product listing requests or greetings as order confirmations
 
 Respond with ONLY a JSON object:
 {{
-    "intent": "CONFIRM_ORDER" | "ADD_TO_CART" | "MODIFY_CART" | "PRODUCT_INFO" | "DATABASE_QUERY",
+    "intent": "CONFIRM_ORDER" | "ADD_TO_CART" | "MODIFY_CART" | "PRODUCT_INFO" | "DATABASE_QUERY" | "GREETING",
     "confidence": 0.0-1.0,
     "reasoning": "brief explanation"
 }}"""
@@ -481,7 +766,20 @@ Respond with ONLY a JSON object:
                     logger.info(f"LLM Intent Analysis: {detected_intent} (confidence: {confidence:.2f}) - {reasoning}")
                     
                     # Handle different intents
-                    if detected_intent == 'CONFIRM_ORDER' and confidence >= 0.7:
+                    if detected_intent == 'GREETING':
+                        # User is just greeting - respond politely and show cart status
+                        cart_count = len(cart_items)
+                        greeting_response = f"Hello! 👋 You currently have {cart_count} item(s) in your cart. Would you like to:\n• Add more products\n• View your cart\n• Confirm and place your order"
+                        save_conversation(user.id, user_message, greeting_response)
+                        return jsonify({
+                            'response': greeting_response,
+                            'action_buttons': [
+                                {'text': 'Add More Products', 'action': 'place_order'},
+                                {'text': 'View Cart', 'action': 'view_cart'},
+                                {'text': 'Confirm Order', 'action': 'confirm_order'}
+                            ]
+                        }), 200
+                    elif detected_intent == 'CONFIRM_ORDER' and confidence >= 0.7:
                         return handle_order_confirmation(user, session_user_id)
                     elif detected_intent in ['PRODUCT_INFO', 'DATABASE_QUERY']:
                         # Handle product listing/database queries
@@ -494,45 +792,419 @@ Respond with ONLY a JSON object:
                     logger.error(f"Error analyzing intent with LLM: {str(e)}")
                     # Fallback to keyword matching if LLM fails
                     message_lower = user_message.lower().strip()
+                    
+                    # Check for greetings first (CRITICAL - prevent "hi" from confirming orders)
+                    greeting_keywords = ['hi', 'hello', 'hey', 'good morning', 'good afternoon', 'good evening', 'hola', 'namaste']
+                    if message_lower in greeting_keywords or any(message_lower.startswith(g) for g in greeting_keywords):
+                        cart_count = len(cart_items)
+                        greeting_response = f"Hello! 👋 You currently have {cart_count} item(s) in your cart. Would you like to:\n• Add more products\n• View your cart\n• Confirm and place your order"
+                        save_conversation(user.id, user_message, greeting_response)
+                        return jsonify({
+                            'response': greeting_response,
+                            'action_buttons': [
+                                {'text': 'Add More Products', 'action': 'place_order'},
+                                {'text': 'View Cart', 'action': 'view_cart'},
+                                {'text': 'Confirm Order', 'action': 'confirm_order'}
+                            ]
+                        }), 200
+                    
                     add_keywords = ['add', 'put', 'include']
                     has_add_word = any(keyword in message_lower for keyword in add_keywords)
-                    has_product_mention = any(keyword in message_lower for keyword in [
-                        'quantum', 'processor', 'sensor', 'memory', 'neural', 'controller',
-                        'rb001', 'rb002', 'rb003', 'rb004', 'rb005',
-                        '001', '002', '003', '004', '005'
-                    ])
+                    # Check for product codes dynamically instead of hardcoded names
+                    import re
+                    has_product_mention = bool(re.search(r'\b(rb|bd|qb|product)\s*\d+|\d+\s*(rb|bd|qb|product)\b', message_lower, re.IGNORECASE))
                     
-                    # Only confirm if no "add" keyword with product mention
+                    # Only confirm if no "add" keyword with product mention AND explicitly mentions order/confirm/proceed
                     if not (has_add_word and has_product_mention):
-                        confirmation_keywords = ['yes proceed', 'confirm order', 'place order', 'proceed', 'confirm', 'yes', 'ok']
+                        confirmation_keywords = ['confirm order', 'place order', 'proceed with order', 'finalize order', 'yes proceed']
                         if any(keyword in message_lower for keyword in confirmation_keywords):
                             return handle_order_confirmation(user, session_user_id)
         
-        # Classify user intent using LLM
-        classification_result = classification_service.classify_user_intent(user_message, context_data)
+        # Check for stock confirmation requests for distributors FIRST (before intent classification)
+        # This prevents "show pending stocks" from being misclassified as PRODUCT_INFO
+        # Also handles "pending orders" as a synonym for "pending stocks"
+        if user.role == 'distributor':
+            message_lower = user_message.lower().strip()
+            stock_keywords = [
+                'pending stock', 'pending stocks', 'pending order', 'pending orders',
+                'stock arrival', 'confirm stock', 'show stock', 'show pending stock', 
+                'show pending stocks', 'show pending orders', 'stock to confirm', 
+                'pending arrivals', 'list pending', 'view pending', 'pending items',
+                'list pending stock', 'view pending stock', 'display pending stock'
+            ]
+            if any(keyword in message_lower for keyword in stock_keywords):
+                logger.info(f"Detected stock confirmation request: {user_message}")
+                return handle_stock_confirmation(user_message, user, context_data)
+        
+        # Check for "confirm cart" message - show Edit Cart / Place Order options
+        message_lower = user_message.lower().strip()
+        if message_lower in ['confirm cart', 'confirm my cart', 'cart confirmed']:
+            cart_items = db_service.get_cart_items(session_user_id)
+            if not cart_items:
+                response = "Your cart is empty. Please add some products to your cart first."
+                save_conversation(user.id, user_message, response)
+                return jsonify({
+                    'response': response,
+                    'action_buttons': [
+                        {'text': 'Place Order', 'action': 'place_order'}
+                    ]
+                }), 200
+            
+            # Calculate cart total
+            total = sum(item.total_price for item in cart_items)
+            response = f"Your cart has been confirmed! You have {len(cart_items)} item(s) in your cart with a total of ${total:,.2f}.\n\nWhat would you like to do next?"
+            save_conversation(user.id, user_message, response)
+            return jsonify({
+                'response': response,
+                'action_buttons': [
+                    {'text': 'Edit Cart', 'action': 'edit_cart'},
+                    {'text': 'Place Order', 'action': 'place_order_final'}
+                ]
+            }), 200
+        
+        # Check for "edit cart" message - show cart editing interface
+        if message_lower in ['edit cart', 'edit my cart', 'modify cart', 'change cart']:
+            cart_items = db_service.get_cart_items(session_user_id)
+            if not cart_items:
+                response = "Your cart is empty. There's nothing to edit."
+                save_conversation(user.id, user_message, response)
+                return jsonify({
+                    'response': response,
+                    'action_buttons': [
+                        {'text': 'Place Order', 'action': 'place_order'}
+                    ]
+                }), 200
+            
+            # Return cart items for editing
+            cart_data = []
+            for item in cart_items:
+                product_name = item.product_code
+                if hasattr(item, 'product') and item.product:
+                    product_name = item.product.product_name
+                elif hasattr(item, 'product_name'):
+                    product_name = item.product_name
+                
+                cart_data.append({
+                    'id': item.id,
+                    'product_code': item.product_code,
+                    'product_name': product_name,
+                    'quantity': item.quantity,
+                    'unit_price': item.unit_price,
+                    'total_price': item.total_price
+                })
+            
+            total = sum(item.total_price for item in cart_items)
+            response = f"Here are the items in your cart. You can view and edit them using the cart modal.\n\nTotal: ${total:,.2f}"
+            save_conversation(user.id, user_message, response)
+            return jsonify({
+                'response': response,
+                'cart_items': cart_data,
+                'action_buttons': [
+                    {'text': 'View Cart', 'action': 'view_cart'},
+                    {'text': 'Place Order', 'action': 'place_order_final'}
+                ]
+            }), 200
+        
+        # Check for "place order" message (final confirmation) - actually place the order
+        if message_lower in ['place order', 'place my order', 'finalize order', 'confirm order']:
+            return handle_order_confirmation(user, session_user_id)
+        
+        # Check for "track order" messages BEFORE intent classification
+        # This handles messages like "track order", "I want to track an order" from the action button
+        track_order_keywords = ['track order', 'i want to track an order', 'track my order', 'show my orders', 'view my orders']
+        if message_lower in track_order_keywords or ('track' in message_lower and 'order' in message_lower):
+            logger.info(f"Detected track order message: {user_message}")
+            # context_data is already initialized above
+            return handle_track_order(user_message, user, context_data)
+        
+        # Check for "add to cart" messages BEFORE intent classification
+        # This handles messages like "add 3 BD-20008 to cart" or "add 3 BD-20008 (Product Name) to cart" from the product selection form
+        import re
+        add_to_cart_patterns = [
+            r'add\s+(\d+)\s+([a-z0-9_-]+)\s+\(([^)]+)\)\s+to\s+cart',  # With product name: "add 3 BD-20008 (Product Name) to cart"
+            r'add\s+(\d+)\s+([a-z0-9_-]+)\s+to\s+cart',  # Without product name: "add 3 BD-20008 to cart"
+            r'add\s+(\d+)\s+([a-z0-9_-]+)',  # Simple: "add 3 BD-20008"
+            r'put\s+(\d+)\s+([a-z0-9_-]+)\s+in\s+cart',
+            r'include\s+(\d+)\s+([a-z0-9_-]+)'
+        ]
+        
+        product_name_from_message = None
+        for pattern in add_to_cart_patterns:
+            match = re.search(pattern, message_lower, re.IGNORECASE)
+            if match:
+                # This is an "add to cart" message - extract quantity and product code directly
+                quantity = int(match.group(1))
+                product_code = match.group(2).upper().strip()  # Normalize product code
+                # Check if product name was included in the message (pattern with 3 groups)
+                if len(match.groups()) >= 3 and match.group(3):
+                    product_name_from_message = match.group(3).strip()
+                
+                logger.info(f"Direct add to cart: {quantity} x {product_code}")
+                
+                # Try direct processing first (bypass LLM for simple "add X CODE to cart" format)
+                try:
+                    # Get user and product
+                    user = User.query.get(session_user_id)
+                    if not user:
+                        return jsonify({'error': 'User not found'}), 401
+                    
+                    # Find product - for MRs, check dealer stock first
+                    product = None
+                    product_name = product_name_from_message  # Use product name from message if provided
+                    
+                    if user.role == 'mr' and user.area:
+                        # For MRs, get products from dealer stock in their area
+                        dealer_products = db_service.get_products_from_dealer_stock(user.area)
+                        for p in dealer_products:
+                            # Handle dict from dealer stock
+                            p_code = p.get('product_code', '') if isinstance(p, dict) else (p.product_code if hasattr(p, 'product_code') else '')
+                            if p_code.upper() == product_code.upper():
+                                # If product_name was provided in message, match by name too
+                                if product_name:
+                                    p_name = p.get('product_name', '') if isinstance(p, dict) else p.product_name
+                                    if p_name.lower() == product_name.lower():
+                                        # Found matching product in dealer stock
+                                        product_name = p.get('product_name', '') if isinstance(p, dict) else p.product_name
+                                        # Try to find Product record with matching product_id from dealer stock
+                                        from app.models import Product
+                                        product_id = p.get('product_id') if isinstance(p, dict) else (p.product_id if hasattr(p, 'product_id') else None)
+                                        product = Product.query.get(product_id) if product_id else None
+                                        if not product:
+                                            # Try to find Product by name
+                                            product = Product.query.filter_by(product_name=product_name).first()
+                                        break
+                                else:
+                                    # No product name in message, use dealer stock name
+                                    product_name = p.get('product_name') if isinstance(p, dict) else p.product_name
+                                    # Try to find Product record
+                                    from app.models import Product
+                                    product_id = p.get('product_id') if isinstance(p, dict) else (p.product_id if hasattr(p, 'product_id') else None)
+                                    product = Product.query.get(product_id) if product_id else None
+                                    if not product:
+                                        # Try to find Product by name
+                                        product = Product.query.filter_by(product_name=product_name).first()
+                                    break
+                    
+                    # Fallback to regular product lookup
+                    if not product:
+                        product = db_service.get_product_by_code(product_code)
+                        if product and not product_name:
+                            product_name = product.product_name
+                    
+                    if not product:
+                        return jsonify({
+                            'response': f'Product {product_code} not found. Please check the product code and try again.',
+                            'action_buttons': [
+                                {'text': 'Try Again', 'action': 'place_order'}
+                            ]
+                        }), 200
+                    
+                    # Use product name from message/dealer stock if available, otherwise from product
+                    if not product_name:
+                        product_name = product.product_name
+                    
+                    # Calculate pricing
+                    enhanced_order_service = get_enhanced_order_service()
+                    pricing = enhanced_order_service.pricing_service.calculate_product_pricing(product.id, quantity)
+                    
+                    if 'error' in pricing:
+                        return jsonify({
+                            'response': f'Error calculating price for {product_name}: {pricing["error"]}',
+                            'action_buttons': [
+                                {'text': 'Try Again', 'action': 'place_order'}
+                            ]
+                        }), 200
+                    
+                    # Add to cart directly - pass product_name to distinguish products with same code
+                    product_code = product_code or str(product.id)
+                    unit_price = pricing.get('pricing', {}).get('final_price', 0)
+                    cart_item, message = db_service.add_to_cart(
+                        session_user_id,
+                        product.id,
+                        product_code,
+                        product_name,
+                        quantity,
+                        unit_price
+                    )
+                    
+                    # Block quantity for MR orders when adding to cart
+                    if cart_item and user.role == 'mr' and user.area:
+                        enhanced_order_service = get_enhanced_order_service()
+                        warehouse = db_service.get_warehouse_by_area(user.area)
+                        if warehouse:
+                            enhanced_order_service._block_quantity_for_mr_order(
+                                user=user,
+                                product_code=product_code,
+                                quantity=quantity,
+                                warehouse=warehouse
+                            )
+                            logger.info(f"Blocked {quantity} units of {product_code} for MR order (added to cart)")
+                    
+                    if cart_item:
+                        # Get updated cart items
+                        cart_items = db_service.get_cart_items(session_user_id)
+                        cart_data = []
+                        for item in cart_items:
+                            product_name = item.product_code
+                            if hasattr(item, 'product') and item.product:
+                                product_name = item.product.product_name
+                            elif hasattr(item, 'product_name'):
+                                product_name = item.product_name
+                            
+                            cart_data.append({
+                                'id': item.id,
+                                'product_code': item.product_code,
+                                'product_name': product_name,
+                                'quantity': item.quantity,
+                                'unit_price': item.unit_price,
+                                'total_price': item.total_price,
+                                'base_price': getattr(item, 'base_price', item.unit_price),
+                                'discount_amount': getattr(item, 'discount_amount', 0),
+                                'final_price': getattr(item, 'final_price', item.unit_price),
+                                'scheme_applied': getattr(item, 'scheme_applied', None),
+                                'free_quantity': getattr(item, 'free_quantity', 0),
+                                'paid_quantity': getattr(item, 'paid_quantity', item.quantity)
+                            })
+                        
+                        save_conversation(user.id, user_message, f'Added {quantity} {product_name} to cart')
+                        return jsonify({
+                            'response': f'✅ Added {quantity} unit(s) of {product_name} ({product_code}) to cart!',
+                            'cart_items': cart_data,
+                            'action_buttons': [
+                                {'text': 'View Cart', 'action': 'view_cart'},
+                                {'text': 'Add More Items', 'action': 'place_order'},
+                                {'text': 'Place Order', 'action': 'confirm_order'}
+                            ]
+                        }), 200
+                    else:
+                        return jsonify({
+                            'response': f'Failed to add {product_name} to cart: {message}',
+                            'action_buttons': [
+                                {'text': 'Try Again', 'action': 'place_order'},
+                                {'text': 'View Cart', 'action': 'view_cart'}
+                            ]
+                        }), 200
+                        
+                except Exception as e:
+                    logger.error(f"Error in direct add to cart: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+                    # Fallback to LLM-based processing
+                    logger.info("Falling back to LLM-based processing")
+                
+                # This is an "add to cart" message - process it
+                enhanced_order_service = get_enhanced_order_service()
+                result = enhanced_order_service.process_order_request(user_message, session_user_id, conversation_history)
+                
+                if result.get('success'):
+                    # Get updated cart items
+                    cart_items = db_service.get_cart_items(session_user_id)
+                    cart_data = []
+                    for item in cart_items:
+                        # Get product name from relationship or fallback
+                        product_name = item.product_code
+                        if hasattr(item, 'product') and item.product:
+                            product_name = item.product.product_name
+                        elif hasattr(item, 'product_name'):
+                            product_name = item.product_name
+                        
+                        cart_data.append({
+                            'id': item.id,
+                            'product_code': item.product_code,
+                            'product_name': product_name,
+                            'quantity': item.quantity,
+                            'unit_price': item.unit_price,
+                            'total_price': item.total_price,
+                            'base_price': getattr(item, 'base_price', item.unit_price),
+                            'discount_amount': getattr(item, 'discount_amount', 0),
+                            'final_price': getattr(item, 'final_price', item.unit_price),
+                            'scheme_applied': getattr(item, 'scheme_applied', None),
+                            'free_quantity': getattr(item, 'free_quantity', 0),
+                            'paid_quantity': getattr(item, 'paid_quantity', item.quantity)
+                        })
+                    
+                    save_conversation(user.id, user_message, result.get('message', 'Items added to cart'))
+                    return jsonify({
+                        'response': result.get('message', 'Items added to cart'),
+                        'cart_items': cart_data,
+                        'action_buttons': [
+                            {'text': 'View Cart', 'action': 'view_cart'},
+                            {'text': 'Add More Items', 'action': 'place_order'},
+                            {'text': 'Place Order', 'action': 'confirm_order'}
+                        ]
+                    }), 200
+                else:
+                    save_conversation(user.id, user_message, result.get('message', 'Error adding items to cart'))
+                    return jsonify({
+                        'response': result.get('message', 'Error adding items to cart'),
+                        'action_buttons': [
+                            {'text': 'Try Again', 'action': 'place_order'},
+                            {'text': 'View Cart', 'action': 'view_cart'}
+                        ]
+                    }), 200
+        
+        # Ensure context_data is always defined before classification
+        if 'context_data' not in locals() or context_data is None:
+            context_data = {
+                'user_warehouse': area,
+                'user_email': user.email if user else None,
+                'user_type': user.role if user else None,
+                'user_role': user.role if user else None
+            }
+        
+        # Classify user intent using LLM (only if not stock confirmation and not add to cart)
+        try:
+            classification_result = classification_service.classify_user_intent(user_message, context_data)
+        except Exception as e:
+            logger.error(f"Error in classification service: {str(e)}", exc_info=True)
+            # Fallback to default classification
+            classification_result = {'classification': 'OTHER', 'confidence': 0.0}
         intent = classification_result.get('classification', 'OTHER')
         
         logger.info(f"Intent classified as: {intent}")
-
+        
         # Process based on classification
+        
+        # Check for action buttons first
+        message_lower = user_message.lower().strip()
+        
+        # Process based on classification and add intent to response
+        response = None
         if intent == 'PLACE_ORDER':
-            return handle_place_order(user_message, user, context_data, conversation_history)
+            response = handle_place_order(user_message, user, context_data, conversation_history)
         elif intent == 'TRACK_ORDER':
-            return handle_track_order(user_message, user, context_data)
+            response = handle_track_order(user_message, user, context_data)
         elif intent == 'CALCULATE_COST':
-            return handle_calculate_cost(user_message, user, context_data, conversation_history)
+            response = handle_calculate_cost(user_message, user, context_data, conversation_history)
         elif intent == 'COMPANY_INFO':
-            return handle_company_info(user_message, user)
+            response = handle_company_info(user_message, user)
         elif intent == 'WEB_SEARCH':
-            return handle_web_search(user_message, user, context_data)
+            response = handle_web_search(user_message, user, context_data)
         elif intent == 'PRODUCT_INFO':
-            return handle_product_info_or_query(user_message, user, context_data)
+            response = handle_product_info_or_query(user_message, user, context_data)
         else:
-            return handle_general_conversation(user_message, user, context_data)
+            response = handle_general_conversation(user_message, user, context_data)
+        
+        # Intent tracking (voice disabled)
+        if response:
+            # Extract response data if it's a tuple (jsonify response)
+            if isinstance(response, tuple):
+                response_obj, status_code = response
+                if hasattr(response_obj, 'get_json'):
+                    data = response_obj.get_json()
+                    if data:
+                        data['intent'] = intent
+                        return jsonify(data), status_code
+            elif isinstance(response, dict):
+                response['intent'] = intent
+                return response
+        
+        return response
 
     except Exception as e:
         logger.error(f"Error processing message: {str(e)}")
-        return jsonify({'response': 'Sorry, I encountered an error. Please try again.'}), 500
+        user = User.query.get(session.get('user_id')) if session.get('user_id') else None
+        return ensure_action_buttons(jsonify({'response': 'Sorry, I encountered an error. Please try again.'}), user), 500
 
 def handle_order_confirmation(user, user_id):
     """Handle order confirmation and placement"""
@@ -567,88 +1239,227 @@ def handle_order_confirmation(user, user_id):
             
     except Exception as e:
         logger.error(f"Error handling order confirmation: {str(e)}")
-        return jsonify({'response': 'Sorry, I encountered an error placing your order. Please try again.'}), 500
+        user = User.query.get(user_id) if user_id else None
+        return ensure_action_buttons(jsonify({'response': 'Sorry, I encountered an error placing your order. Please try again.'}), user), 500
 
 def handle_place_order(user_message, user, context_data, conversation_history):
-    """Handle order placement requests"""
+    """Handle order placement requests - Show customer selection for MRs, then product selection"""
     try:
-        enhanced_order_service = get_enhanced_order_service()
+        db_service = get_db_service()
         
-        # Process order request using LLM extraction
-        result = enhanced_order_service.process_order_request(
-            user_message, 
-            user.id, 
-            conversation_history
-        )
+        logger.info(f"handle_place_order called. User type: {user.role}, User ID: {user.id}")
+        logger.info(f"Session keys: {list(session.keys())}")
+        logger.info(f"selected_customer_id in session: {'selected_customer_id' in session}")
         
-        if result['success']:
-            # Save conversation
-            save_conversation(user.id, user_message, result['message'])
+        # For MRs, check if customer is already selected
+        if user.role == 'mr':
+            # Check if customer is already selected in session
+            if 'selected_customer_id' not in session:
+                # First, ask whether to select existing customer or add new customer
+                response = "To place an order, I need to know which customer you're ordering for. Would you like to select an existing customer or add a new customer?"
+                
+                logger.info(f"MR without selected customer. Returning customer selection buttons.")
+                save_conversation(user.id, user_message, response)
+                
+                return jsonify({
+                    'response': response,
+                    'action_buttons': [
+                        {'text': 'Select Customer', 'action': 'select_customer'},
+                        {'text': 'Add New Customer', 'action': 'add_new_customer'}
+                    ]
+                }), 200
             
-            return jsonify({
-                'response': result['message'],
-                'cart_items': result.get('cart_items', []),
-                'order_summary': result.get('order_summary', {}),
-                'errors': result.get('errors', []),
-                'suggestions': result.get('suggestions', []),
-                'action_buttons': [
-                    {'text': 'View Cart', 'action': 'view_cart'},
-                    {'text': 'Place Order', 'action': 'place_order'},
-                    {'text': 'Add More Items', 'action': 'add_items'}
-                ]
-            }), 200
+            # Customer is selected, proceed with product selection
+            selected_customer = Customer.query.get(session.get('selected_customer_id'))
+            if not selected_customer:
+                # Customer not found, reset selection
+                session.pop('selected_customer_id', None)
+                return handle_place_order(user_message, user, context_data, conversation_history)
+        
+        # For non-MRs, proceed directly to product selection
+        
+        # Get available products for the user
+        if user.role == 'mr' and user.area:
+            # Get products from dealer stock in MR's area
+            products = db_service.get_products_from_dealer_stock(user.area)
+        elif user.role == 'distributor' and user.area:
+            # For distributors, get products from dealer_wise_stock_details (their own stock)
+            products = db_service.get_products_from_dealer_stock(user.area)
         else:
-            save_conversation(user.id, user_message, result['message'])
+            # Fallback: use Product table only if no area or not MR/distributor
+            warehouse = db_service.get_warehouse_by_area(user.area) if user.area else None
+            if warehouse:
+                products = db_service.get_products_by_warehouse(warehouse.id)
+            else:
+                from app.models import Product
+                products = Product.query.all()
+        
+        if not products:
+            response = "No products are currently available in your area. Please contact support."
+            save_conversation(user.id, user_message, response)
             return jsonify({
-                'response': result['message'],
-                'suggestions': result.get('suggestions', []),
+                'response': response,
                 'action_buttons': [
-                    {'text': 'View Products', 'action': 'view_products'},
                     {'text': 'Get Help', 'action': 'help'}
                 ]
             }), 200
+        
+        # Build product list for interactive UI with FOC information using helper
+        pricing_service = get_pricing_service()
+        product_list = build_product_list_with_foc(products, pricing_service)
+        
+        # Show customer info if MR
+        customer_info = ""
+        if user.role == 'mr' and 'selected_customer_id' in session:
+            selected_customer = Customer.query.get(session.get('selected_customer_id'))
+            if selected_customer:
+                customer_info = f"\n**Ordering for:** {selected_customer.name} ({selected_customer.unique_id})\n\n"
+        
+        response = f"Great! I can help you place an order.{customer_info}Please use the product selection form below to select products and quantities."
+        
+        save_conversation(user.id, user_message, response)
+        
+        # Pass change customer info to frontend so it can add button inside the form
+        # But don't show action buttons at the bottom
+        action_buttons = []
+        if user.role == 'mr' and 'selected_customer_id' in session:
+            # Pass this info so frontend can add change customer button in the form
+            action_buttons.append({'text': 'Change Customer', 'action': 'change_customer'})
+        
+        return jsonify({
+            'response': response,
+            'products': product_list,
+            'interactive_product_selection': True,  # Flag for frontend to render interactive UI
+            'show_product_table': True,  # Flag to show table outside selection box
+            'action_buttons': action_buttons  # Pass info but don't display - buttons are in the form
+        }), 200
             
     except Exception as e:
         logger.error(f"Error handling place order: {str(e)}")
-        return jsonify({'response': 'Sorry, I encountered an error processing your order. Please try again.'}), 500
+        return ensure_action_buttons(jsonify({'response': 'Sorry, I encountered an error processing your order. Please try again.'}), user), 500
 
-def handle_track_order(user_message, user, context_data):
+def handle_track_order(user_message, user, context_data=None):
+    """Handle track order requests. context_data is optional."""
+    if context_data is None:
+        context_data = {}
     db_service = get_db_service()
     enhanced_order_service = get_enhanced_order_service()
     try:
         import re
+        from app.models import Order
+        from datetime import datetime, timedelta
+        
         message_lower = user_message.lower()
         order_id_pat = r'([A-Z]{2}\d{8}\w+)'  # e.g. QB20251030F475CA7D
         match_id = re.search(order_id_pat, user_message)
         order_id = match_id.group(1) if match_id else None
         
-        # Check if this is a confirmation request (more flexible)
+        # Check if this is a confirmation or rejection request
         is_confirm_request = any(keyword in message_lower for keyword in ['confirm order', 'confirm the order']) and order_id
+        is_reject_request = any(keyword in message_lower for keyword in ['reject order', 'reject the order', 'cancel order']) and order_id
+        
+        # If distributor and reject intent
+        if user.role == 'distributor' and order_id and is_reject_request:
+            # Attempt to reject
+            reject_res = enhanced_order_service.reject_order_by_distributor(order_id, user.id)
+            if reject_res['success']:
+                response_msg = f"❌ **Order Rejected**\n\n{reject_res['message']}\n\nThe stock has been unblocked and is now available for other orders."
+                action_buttons = [
+                    {'text': 'View All Orders', 'action': 'track_order'},
+                    {'text': 'Back to Home', 'action': 'home'}
+                ]
+                return jsonify({'response': response_msg, 'action_buttons': action_buttons}), 200
+            else:
+                return ensure_action_buttons(jsonify({'response': reject_res['message']}), user), 200
         
         # If distributor and confirm intent
-        if user.user_type == 'distributor' and order_id and is_confirm_request:
+        if user.role == 'distributor' and order_id and is_confirm_request:
             # Attempt to confirm:
             confirm_res = enhanced_order_service.confirm_order_by_distributor(order_id, user.id)
             if confirm_res['success']:
                 # After confirmation, present the order table with updated status
                 stat = enhanced_order_service.get_order_status_for_distributor(order_id, user.id)
                 response_msg = stat['message'] + "\n\n✅ **Order successfully confirmed!**"
-                return jsonify({'response': response_msg, 'action_buttons': []}), 200
+                action_buttons = [
+                    {'text': 'Track Another Order', 'action': 'track_order'},
+                    {'text': 'View All Orders', 'action': 'track_order'},
+                    {'text': 'Place New Order', 'action': 'place_order'}
+                ]
+                return jsonify({'response': response_msg, 'action_buttons': action_buttons}), 200
             else:
-                return jsonify({'response': confirm_res['message']}), 200
+                return ensure_action_buttons(jsonify({'response': confirm_res['message']}), user), 200
         
         # Otherwise, follow normal track logic
-        if user.user_type == 'distributor':
+        if user.role == 'distributor':
             if order_id:
+                # Show specific order details
                 order_stat = enhanced_order_service.get_order_status_for_distributor(order_id, user.id)
                 if order_stat['success']:
-                    msg = order_stat['message']
-                    actions = []
-                    if order_stat.get('can_confirm'):
-                        actions.append({'text':'Confirm Order','action':f'confirm_order_{order_id}'})
-                    return jsonify({'response':msg, 'action_buttons':actions}), 200
+                    order = Order.query.filter_by(order_id=order_id).first()
+                    if order:
+                        # Get order items with FOC
+                        items_list = []
+                        total_items = 0
+                        for item in order.order_items:
+                            free_qty = item.free_quantity or 0
+                            total_qty = item.quantity + free_qty
+                            total_items += total_qty
+                            
+                            items_list.append({
+                                'product_name': item.product.product_name,
+                                'product_code': item.product_code,
+                                'quantity': item.quantity,
+                                'free_quantity': free_qty,
+                                'total_quantity': total_qty,
+                                'unit_price': item.unit_price,
+                                'total_price': item.total_price
+                            })
+                        
+                        # Build response with order details using bullet points
+                        msg = f"**📦 Order Details**\n\n"
+                        msg += f"**📋 Order Information:**\n"
+                        msg += f"• **Order ID:** {order.order_id}\n"
+                        msg += f"• **Status:** {order.status.replace('_', ' ').title()}\n"
+                        msg += f"• **MR:** {order.mr.name if order.mr else 'N/A'}\n"
+                        msg += f"• **Area:** {order.mr.area if order.mr else 'N/A'}\n"
+                        msg += f"• **Date:** {order.created_at.strftime('%B %d, %Y at %I:%M %p') if order.created_at else 'N/A'}\n"
+                        msg += f"• **Total Items:** {total_items} units\n\n"
+                        
+                        msg += "**🛍️ Order Items:**\n"
+                        for item in items_list:
+                            if item['free_quantity'] > 0:
+                                msg += f"• **{item['product_name']}** ({item['product_code']})\n"
+                                msg += f"  - Quantity: {item['quantity']} paid + **{item['free_quantity']} FREE** = **{item['total_quantity']} total units**\n"
+                                msg += f"  - Unit Price: ${item['unit_price']:,.2f}\n"
+                                msg += f"  - Total: ${item['total_price']:,.2f}\n"
+                            else:
+                                msg += f"• **{item['product_name']}** ({item['product_code']})\n"
+                                msg += f"  - Quantity: {item['quantity']} units\n"
+                                msg += f"  - Unit Price: ${item['unit_price']:,.2f}\n"
+                                msg += f"  - Total: ${item['total_price']:,.2f}\n"
+                        
+                        # Add tax information
+                        if hasattr(order, 'subtotal') and order.subtotal:
+                            msg += f"\n**💰 Payment Summary:**\n"
+                            msg += f"• **Subtotal:** ${order.subtotal:,.2f}\n"
+                            msg += f"• **Tax (5%):** ${order.tax_amount:,.2f}\n"
+                            msg += f"• **Grand Total:** ${order.total_amount:,.2f}\n"
+                        else:
+                            msg += f"\n**💰 Total Amount:** ${order.total_amount:,.2f}\n"
+                        
+                        # Add action buttons based on order status
+                        actions = []
+                        if order.status == 'pending':
+                            actions.append({'text': '✅ Confirm Order', 'action': f'confirm_order_{order_id}'})
+                            actions.append({'text': '❌ Reject Order', 'action': f'reject_order_{order_id}'})
+                        actions.append({'text': 'View All Orders', 'action': 'track_order'})
+                        actions.append({'text': 'Back to Home', 'action': 'home'})
+                        
+                        return jsonify({'response': msg, 'action_buttons': actions}), 200
+                    else:
+                        return ensure_action_buttons(jsonify({'response': 'Order not found'}), user), 200
                 else:
-                    return jsonify({'response':order_stat['message']}), 200
+                    return ensure_action_buttons(jsonify({'response': order_stat['message']}), user), 200
             else:
                 # Check if user is asking for specific status
                 message_lower = user_message.lower()
@@ -656,11 +1467,13 @@ def handle_track_order(user_message, user, context_data):
                 filter_description = "all orders"
                 
                 # Detect status filter in message
-                if 'pending' in message_lower:
-                    # Special handling for pending orders - show PendingOrderProducts
-                    pending_items = db_service.get_pending_order_products(warehouse_location=user.nearest_warehouse, status='pending')
+                # Note: "pending orders" (out-of-stock orders) is different from "pending stocks" (stock arrivals to confirm)
+                # This handler only shows out-of-stock orders, not stock arrivals
+                if 'pending' in message_lower and 'stock' not in message_lower:
+                    # Special handling for pending orders - show PendingOrderProducts (out-of-stock orders)
+                    pending_items = db_service.get_pending_order_products(area=user.area, status='pending')
                     if not pending_items:
-                        return jsonify({'response': 'No pending orders found in your warehouse.'}), 200
+                        return ensure_action_buttons(jsonify({'response': 'No pending orders found in your warehouse.'}), user), 200
                     
                     summary = "**Pending orders for your warehouse:**\n\n"
                     summary += "| Product Code | Product Name | Requested Qty | Customer | Order ID | Requested Date |\n"
@@ -671,7 +1484,7 @@ def handle_track_order(user_message, user, context_data):
                         order_ref = item.original_order_id if item.original_order_id else 'N/A'
                         summary += f"| {item.product_code} | {item.product_name} | {item.requested_quantity} | {customer_name} | {order_ref} | {item.created_at.strftime('%Y-%m-%d')} |\n"
                     summary += '\n**Note:** These products are waiting for stock to arrive. They will be automatically ordered when available.'
-                    return jsonify({'response': summary}), 200
+                    return ensure_action_buttons(jsonify({'response': summary}), user), 200
                 elif 'confirmed' in message_lower:
                     status_filter = ['confirmed', 'distributor_confirmed']
                     filter_description = "confirmed orders"
@@ -685,52 +1498,168 @@ def handle_track_order(user_message, user, context_data):
                     status_filter = ['delivered']
                     filter_description = "delivered orders"
                 
-                orders = db_service.get_orders_for_distributor(user, status_filter)
+                # Get all orders for distributor's area
+                # Get orders from distributor's area
+                orders = Order.query.join(User, Order.mr_id == User.id).filter(
+                    User.area == user.area
+                ).order_by(Order.created_at.desc()).all()
                 
                 if not orders:
-                    status_msg = f"No {filter_description} found in your warehouse." if status_filter else "No orders found in your warehouse."
-                    return jsonify({'response': status_msg}), 200
+                    return ensure_action_buttons(jsonify({'response': 'No orders found in your area.'}), user), 200
                 
-                # Create a proper table with headers
-                summary = f"**{filter_description.replace('orders', 'Orders').title()} for your warehouse:**\n\n"
-                summary += "| Order ID | Status | Total Amount | Order Date |\n"
-                summary += "|----------|--------|--------------|------------|\n"
-                for o in orders:
-                    status_display = (o.status or o.order_stage or 'Unknown').replace('_', ' ').title()
-                    summary += f"| {o.order_id} | {status_display} | ${o.total_amount:.2f} | {o.order_date.strftime('%Y-%m-%d')} |\n"
-                summary += '\n**To see details or confirm:** `track order <order_id>` or `confirm order <order_id>`'
-                return jsonify({'response': summary}), 200
+                # Get unique MRs, statuses, and dates for filters
+                unique_mrs = sorted(list(set([o.mr.name for o in orders if o.mr])))
+                unique_statuses = sorted(list(set([o.status for o in orders if o.status])))
+                unique_dates = sorted(list(set([o.created_at.strftime('%Y-%m-%d') for o in orders if o.created_at])), reverse=True)
+                
+                # Build orders list with details
+                orders_data = []
+                for o in orders[:50]:  # Show latest 50 orders
+                    orders_data.append({
+                        'order_id': o.order_id,
+                        'mr_name': o.mr.name if o.mr else 'N/A',
+                        'mr_id': o.mr_unique_id if o.mr_unique_id else 'N/A',
+                        'status': o.status,
+                        'status_display': o.status.replace('_', ' ').title() if o.status else 'Unknown',
+                        'total_amount': float(o.total_amount) if o.total_amount else 0.0,
+                        'order_date': o.created_at.strftime('%Y-%m-%d') if o.created_at else 'N/A',
+                        'order_time': o.created_at.strftime('%H:%M') if o.created_at else 'N/A',
+                        'order_datetime': o.created_at.strftime('%Y-%m-%d %H:%M') if o.created_at else 'N/A',
+                        'area': o.mr.area if o.mr else 'N/A',
+                        'can_confirm': o.status == 'pending',
+                        'items_count': o.order_items.count() if hasattr(o.order_items, 'count') else 0
+                    })
+                
+                # Return selection box for distributors
+                response_msg = f"**📊 Order Management - {user.area} Area**\n\n"
+                response_msg += f"Found **{len(orders_data)}** orders in your area.\n\n"
+                response_msg += "**Use filters below to narrow down orders:**\n"
+                response_msg += "• Filter by MR Name\n"
+                response_msg += "• Filter by Status (Pending, Confirmed, Rejected)\n"
+                response_msg += "• Filter by Date\n\n"
+                response_msg += "Select an order to view details and take action (Confirm/Reject)."
+                
+                save_conversation(user.id, user_message, response_msg)
+                
+                return jsonify({
+                    'response': response_msg,
+                    'interactive_order_selection': True,  # Flag for frontend to show selection box
+                    'order_selection_type': 'distributor',  # Type of selection
+                    'orders': orders_data,
+                    'show_orders_table': True,  # Show orders in table format first
+                    'filters': {
+                        'mr_names': unique_mrs,
+                        'statuses': unique_statuses,
+                        'dates': unique_dates
+                    }
+                }), 200
         # fall back to self-tracking for non-distributors
         if order_id:
             status = enhanced_order_service.get_order_status(order_id, user.id)
             if status['success']:
-                table = '| Product | Qty | Unit Price | Discount | Scheme | Total |\n|--------|-----|-----------|----------|--------|-------|\n'
+                # Build order details table
+                table = '| Product | Quantity | Unit Price | Total |\n|--------|----------|-----------|-------|\n'
                 for i in status['order']['items']:
-                    pq = i.get('paid_quantity')
-                    fq = i.get('free_quantity',0)
-                    qty = f"{pq} + {fq} = {pq+fq}" if fq else str(pq)
-                    table += f"| {i['product_name']} ({i['product_code']}) | {qty} | ${i['unit_price']} | ${i['discount_amount']} | {i['scheme_applied']} | ${i['total_price']} |\n"
-                msg = f"**Track Order - {order_id}:**\n**Status:** {status['order']['status']}\n**Total:** ${status['order']['total_amount']}\n\n{table}"
-                return jsonify({'response':msg}), 200
+                    # Get quantity (handle different field names)
+                    quantity = i.get('quantity') or i.get('product_quantity_ordered') or 0
+                    # Get free quantity if available
+                    free_quantity = i.get('free_quantity', 0)
+                    # Format quantity display
+                    if free_quantity and free_quantity > 0:
+                        qty_display = f"{quantity} + {free_quantity} free = {quantity + free_quantity}"
+                    else:
+                        qty_display = str(quantity) if quantity else '0'
+                    
+                    # Build table row with safe field access
+                    product_name = i.get('product_name') or i.get('product_code', 'Unknown')
+                    product_code = i.get('product_code', 'N/A')
+                    unit_price = float(i.get('unit_price', 0)) if i.get('unit_price') else 0.0
+                    total_price = float(i.get('total_price', 0)) if i.get('total_price') else 0.0
+                    
+                    table += f"| {product_name} ({product_code}) | {qty_display} | ${unit_price:,.2f} | ${total_price:,.2f} |\n"
+                
+                # Format status display
+                status_display = status['order']['status'].replace('_', ' ').title()
+                order_stage_display = status['order'].get('order_stage', '').replace('_', ' ').title() if status['order'].get('order_stage') else ''
+                
+                # Build message with tax information
+                msg = f"**📦 Track Order - {order_id}:**\n\n"
+                msg += f"**📊 Order Information:**\n"
+                msg += f"• **Status:** {status_display}\n"
+                if order_stage_display:
+                    msg += f"• **Order Stage:** {order_stage_display}\n"
+                if status['order'].get('order_date'):
+                    from datetime import datetime
+                    try:
+                        order_date = datetime.fromisoformat(status['order']['order_date'].replace('Z', '+00:00'))
+                        msg += f"• **Order Date:** {order_date.strftime('%B %d, %Y at %I:%M %p')}\n"
+                    except:
+                        msg += f"• **Order Date:** {status['order']['order_date']}\n"
+                
+                msg += f"\n{table}\n"
+                
+                # Get order object to show tax breakdown
+                order_obj = Order.query.filter_by(order_id=order_id).first()
+                if order_obj and hasattr(order_obj, 'subtotal') and order_obj.subtotal:
+                    msg += f"\n**💰 Payment Summary:**\n"
+                    msg += f"• **Subtotal:** ${order_obj.subtotal:,.2f}\n"
+                    msg += f"• **Tax (5%):** ${order_obj.tax_amount:,.2f}\n"
+                    msg += f"• **Grand Total:** ${order_obj.total_amount:,.2f}\n"
+                else:
+                    # Old orders without tax - show total only
+                    msg += f"\n**💰 Total Amount:** ${status['order']['total_amount']:,.2f}\n"
+                
+                # Add action buttons to continue conversation
+                action_buttons = [
+                    {'text': 'Track Another Order', 'action': 'track_order'},
+                    {'text': 'Place New Order', 'action': 'place_order'}
+                ]
+                
+                return jsonify({
+                    'response': msg,
+                    'action_buttons': action_buttons,
+                    'animate_order_details': True  # Flag to trigger staggered animation
+                }), 200
             else:
-                return jsonify({'response':status['message']}), 200
-        orders = db_service.get_orders_by_email(user.email)
+                return ensure_action_buttons(jsonify({'response':status['message']}), user), 200
+        # Get orders by mr_id (for MRs)
+        if user.role == 'mr':
+            # For MRs, get orders where they are the MR
+            orders = Order.query.filter(
+                Order.mr_id == user.id
+            ).order_by(Order.created_at.desc()).all()
+        else:
+            # For other users, get orders by user_id
+            orders = db_service.get_orders_by_user(user.id)
+        
         if not orders:
-            return jsonify({'response':'No orders found in your account.'}), 200
-        # Create a proper table with headers
-        summary = '**Your recent orders:**\n\n'
-        summary += '| Order ID | Status | Total Amount | Order Date |\n'
-        summary += '|----------|--------|--------------|------------|\n'
-        for o in orders[:5]:
+            return ensure_action_buttons(jsonify({'response':'No orders found in your account.'}), user), 200
+        
+        # Prepare orders data for frontend display
+        orders_list = []
+        for o in orders[:10]:  # Show up to 10 recent orders
             status_display = (o.status or o.order_stage or 'Unknown').replace('_', ' ').title()
-            summary += f"| {o.order_id} | {status_display} | ${o.total_amount:.2f} | {o.order_date.strftime('%Y-%m-%d')} |\n"
-        summary += '\n**To see details:** `track order <order_id>`'
-        return jsonify({'response':summary}), 200
+            orders_list.append({
+                'order_id': o.order_id,
+                'status': status_display,
+                'total_amount': float(o.total_amount) if o.total_amount else 0.0,
+                'order_date': o.created_at.strftime('%Y-%m-%d') if o.created_at else 'N/A',
+                'status_raw': o.status or o.order_stage or 'unknown'
+            })
+        
+        # Return response with orders data for interactive display
+        return jsonify({
+            'response': 'Here are your recent orders. Select an order to view details:',
+            'show_orders_table': True,
+            'orders': orders_list,
+            'interactive_order_selection': True,
+            'action_buttons': []  # Prevent showing action buttons when order selection is active
+        }), 200
     except Exception as e:
         import traceback
         traceback.print_exc()
         logger.error(f"Error handling track order: {str(e)}")
-        return jsonify({'response':'Sorry, I encountered an error tracking your order. Please try again.'}), 500
+        return ensure_action_buttons(jsonify({'response':'Sorry, I encountered an error tracking your order. Please try again.'}), user), 500
 
 def handle_calculate_cost(user_message, user, context_data, conversation_history):
     """Handle cost calculation requests"""
@@ -744,8 +1673,7 @@ def handle_calculate_cost(user_message, user, context_data, conversation_history
             return jsonify({
                 'response': response,
                 'action_buttons': [
-                    {'text': 'Add Products', 'action': 'place_order'},
-                    {'text': 'View Products', 'action': 'view_products'}
+                    {'text': 'Add Products', 'action': 'place_order'}
                 ]
             }), 200
         
@@ -768,7 +1696,7 @@ def handle_calculate_cost(user_message, user, context_data, conversation_history
         
     except Exception as e:
         logger.error(f"Error handling calculate cost: {str(e)}")
-        return jsonify({'response': 'Sorry, I encountered an error calculating the cost. Please try again.'}), 500
+        return ensure_action_buttons(jsonify({'response': 'Sorry, I encountered an error calculating the cost. Please try again.'}), user), 500
 
 def handle_company_info(user_message, user):
     """Handle company information requests"""
@@ -798,7 +1726,7 @@ def handle_company_info(user_message, user):
         
     except Exception as e:
         logger.error(f"Error handling company info: {str(e)}")
-        return jsonify({'response': 'Sorry, I encountered an error retrieving company information.'}), 500
+        return ensure_action_buttons(jsonify({'response': 'Sorry, I encountered an error retrieving company information.'}), user), 500
 
 def handle_product_info_or_query(user_message, user, context_data):
     """Handle product information and database queries"""
@@ -806,12 +1734,15 @@ def handle_product_info_or_query(user_message, user, context_data):
         db_service = get_db_service()
         llm_service = get_llm_service()
         
-        # For distributors, handle dynamic database queries
-        if user.user_type == 'distributor':
-            # Check if this is a complex database query
-            message_lower = user_message.lower()
+        # For distributors, double-check if they meant "pending stock" not "products"
+        if user.role == 'distributor':
+            message_lower = user_message.lower().strip()
+            # If message contains "pending" or "stock" keywords, redirect to stock confirmation
+            if any(kw in message_lower for kw in ['pending', 'stock', 'arrival']):
+                logger.info(f"Redirecting distributor product query to stock confirmation: {user_message}")
+                return handle_stock_confirmation(user_message, user, context_data)
             
-            # Check for complex queries like "how many orders", "total revenue", "top products", etc.
+            # Check if this is a complex database query
             complex_query_indicators = [
                 'how many', 'total', 'count', 'sum', 'average', 'top', 'most', 
                 'least', 'analyze', 'statistics', 'stats', 'report', 'summary',
@@ -825,85 +1756,105 @@ def handle_product_info_or_query(user_message, user, context_data):
                 return handle_distributor_analytics(user_message, user, db_service, llm_service)
         
         # For all users, handle simple product listing
-        # Get user's warehouse for filtering
-        warehouse = db_service.get_warehouse_by_location(user.nearest_warehouse) if user.nearest_warehouse else None
-        
-        # Get all products from user's warehouse or all products
-        if warehouse:
-            products = db_service.get_products_by_warehouse(warehouse.id)
+        # For MRs, get products from dealer_wise_stock_details; for distributors, get from their dealer stock too
+        if user.role == 'mr' and user.area:
+            # Get products from dealer stock in MR's area
+            products = db_service.get_products_from_dealer_stock(user.area)
+        elif user.role == 'distributor' and user.area:
+            # For distributors, get products from dealer_wise_stock_details (their own stock)
+            products = db_service.get_products_from_dealer_stock(user.area)
         else:
-            # Get all products if no warehouse
-            products = Product.query.filter_by(is_active=True).all()
+            # Fallback: use Product table only if no area or not MR/distributor
+            warehouse = db_service.get_warehouse_by_area(user.area) if user.area else None
+            if warehouse:
+                products = db_service.get_products_by_warehouse(warehouse.id)
+            else:
+                # Get all products if no warehouse
+                from app.models import Product
+                products = Product.query.all()
         
         if not products:
-            response = "No products are currently available in the database."
+            response = "No products are currently available in your area."
+            save_conversation(user.id, user_message, response)
+            return jsonify({
+                'response': response,
+                'action_buttons': [
+                    {'text': 'Place Order', 'action': 'place_order'},
+                    {'text': 'Track Order', 'action': 'track_order'},
+                    {'text': 'Get Help', 'action': 'help'}
+                ]
+            }), 200
         else:
-            # Build product list response
-            response = f"Here are all the products available in the database:\n\n"
+            # Build simple response message
+            response = f"Here are all the products available in your area:\n\n"
+            response += f"**Total Products:** {len(products)}\n\n"
+            response += "Would you like to place an order for any of these products?"
             
-            # Group by product code (handle duplicates)
-            unique_products = {}
+            # Build product list for table display
+            product_list = []
             for product in products:
-                if product.product_code not in unique_products:
-                    unique_products[product.product_code] = {
-                        'name': product.product_name,
-                        'code': product.product_code,
-                        'price': product.price_of_product,
-                        'available': product.available_for_sale,
-                        'warehouse': product.warehouse.location_name if product.warehouse else 'N/A'
-                    }
+                # Handle both dictionary (from dealer stock) and Product objects
+                if isinstance(product, dict):
+                    # Dictionary from dealer stock
+                    price = product.get('sales_price', product.get('price', 0))
+                    available = product.get('available_quantity', 0)
+                    product_name = product.get('product_name', '')
+                    product_code = product.get('product_code', '')
                 else:
-                    # If duplicate, add to available quantity
-                    unique_products[product.product_code]['available'] += product.available_for_sale
+                    # Product object
+                    price = product.sales_price if hasattr(product, 'sales_price') and product.sales_price else product.price
+                    available = 0  # Will be in dealer stock
+                    product_name = product.product_name
+                    product_code = str(product.id)
+                
+                product_list.append({
+                    'product_name': product_name,
+                    'product_code': product_code,
+                    'sales_price': float(price) if price else 0.0,
+                    'available_for_sale': int(available) if available else 0
+                })
             
-            # Display products
-            for code, info in unique_products.items():
-                response += f"**{info['name']} ({info['code']})**\n"
-                response += f"  • Price: ${info['price']:.2f}\n"
-                response += f"  • Available Stock: {info['available']} units\n"
-                response += f"  • Warehouse: {info['warehouse']}\n\n"
-            
-            response += f"\n**Total Products:** {len(unique_products)}\n"
-            response += "\nWould you like to place an order for any of these products?"
-        
-        save_conversation(user.id, user_message, response)
-        return jsonify({
-            'response': response,
-            'action_buttons': [
-                {'text': 'Place Order', 'action': 'place_order'},
-                {'text': 'View Products', 'action': 'view_products'},
-                {'text': 'Get Help', 'action': 'help'}
-            ]
-        }), 200
+            save_conversation(user.id, user_message, response)
+            return jsonify({
+                'response': response,
+                'products': product_list,
+                'show_product_table': True,  # Flag to show table in frontend
+                'action_buttons': [
+                    {'text': 'Place Order', 'action': 'place_order'},
+                    {'text': 'Track Order', 'action': 'track_order'},
+                    {'text': 'Get Help', 'action': 'help'}
+                ]
+            }), 200
         
     except Exception as e:
         logger.error(f"Error handling product info/query: {str(e)}")
-        return jsonify({'response': 'Sorry, I encountered an error retrieving product information. Please try again.'}), 500
+        return ensure_action_buttons(jsonify({'response': 'Sorry, I encountered an error retrieving product information. Please try again.'}), user), 500
 
 def handle_distributor_analytics(user_message, user, db_service, llm_service):
     """Handle dynamic database queries and analytics for distributors"""
     try:
         from app.models import Order, OrderItem, Product, User
         
-        # Build warehouse context
-        warehouse_location = user.nearest_warehouse
+        # Build warehouse context using user's area
+        area = user.area if user.area else 'N/A'
         
-        # Get relevant data for analytics
-        warehouse_orders = Order.query.filter_by(warehouse_location=warehouse_location).all()
+        # Get relevant data for analytics - filter orders by user's area
+        # Explicitly specify join condition to avoid ambiguous foreign key error
+        warehouse_orders = Order.query.join(User, Order.mr_id == User.id).filter(User.area == area).all()
         
         # Create context for LLM
         analytics_context = f"""
-Warehouse: {warehouse_location}
+Area: {area}
 Total Orders: {len(warehouse_orders)}
 Recent Orders: {min(10, len(warehouse_orders))} orders
 Order Statuses: {', '.join(set(o.status for o in warehouse_orders[:10]))}
 
 Available Tables and Data:
-- orders: Order information (order_id, status, total_amount, order_date, user_email, warehouse_location)
+- orders: Order information (order_id, status, total_amount, order_date, user_email, user_id)
 - order_items: Order line items (product_code, quantity, unit_price, total_price)
 - products: Product information (product_code, product_name, price_of_product, available_for_sale, warehouse_id)
 - pending_order_products: Pending orders waiting for stock (product_code, requested_quantity, customer, status)
-- users: Customer information (name, email, user_type, warehouse_location)
+- users: Customer information (name, email, user_type, area)
 
 User Query: {user_message}
 """
@@ -953,14 +1904,13 @@ Provide a direct answer:"""
         return jsonify({
             'response': response_text,
             'action_buttons': [
-                {'text': 'View Orders', 'action': 'track_order'},
-                {'text': 'View Products', 'action': 'view_products'}
+                {'text': 'View Orders', 'action': 'track_order'}
             ]
         }), 200
         
     except Exception as e:
         logger.error(f"Error handling distributor analytics: {str(e)}")
-        return jsonify({'response': 'Sorry, I encountered an error processing your analytics request. Please try again.'}), 500
+        return ensure_action_buttons(jsonify({'response': 'Sorry, I encountered an error processing your analytics request. Please try again.'}), user), 500
 
 def handle_web_search(user_message, user, context_data):
     """Handle web search requests"""
@@ -982,14 +1932,195 @@ def handle_web_search(user_message, user, context_data):
             return jsonify({
                 'response': response,
                 'action_buttons': [
-                    {'text': 'View Products', 'action': 'view_products'},
                     {'text': 'Get Help', 'action': 'help'}
                 ]
             }), 200
             
     except Exception as e:
         logger.error(f"Error handling web search: {str(e)}")
-        return jsonify({'response': 'Sorry, I encountered an error with the web search.'}), 500
+        return ensure_action_buttons(jsonify({'response': 'Sorry, I encountered an error with the web search.'}), user), 500
+
+def handle_stock_confirmation(user_message, user, context_data):
+    """Handle stock confirmation requests for dealers"""
+    try:
+        import re
+        from app.models import DealerWiseStockDetails
+        
+        db_service = get_db_service()
+        stock_service = get_stock_management_service()
+        
+        message_lower = user_message.lower()
+        
+        # Check if user wants to see pending stock
+        if any(keyword in message_lower for keyword in ['show', 'list', 'display', 'pending', 'view']):
+            # Check if user specified an invoice_id
+            invoice_id = None
+            invoice_match = re.search(r'invoice[_\s]*id[:\s]*([A-Za-z0-9_-]+)', message_lower, re.IGNORECASE)
+            if invoice_match:
+                invoice_id = invoice_match.group(1).strip()
+            
+            # Check if user specified a date filter
+            date_filter = None
+            date_match = re.search(r'date[:\s]*(\d{4}-\d{2}-\d{2})', message_lower, re.IGNORECASE)
+            if date_match:
+                date_filter = date_match.group(1).strip()
+            
+            # Get pending stock arrivals (with optional filters)
+            result = stock_service.get_pending_stock_arrivals(user.unique_id, invoice_id=invoice_id, date_filter=date_filter)
+            
+            if not result['success'] or not result['stocks']:
+                if invoice_id:
+                    response = f"You have no pending stock arrivals for invoice ID: {invoice_id}."
+                elif date_filter:
+                    response = f"You have no pending stock arrivals for date: {date_filter}."
+                else:
+                    response = "You have no pending stock arrivals to confirm."
+                save_conversation(user.id, user_message, response)
+                return jsonify({
+                    'response': response,
+                    'action_buttons': [
+                        {'text': 'View Orders', 'action': 'track_order'}
+                    ]
+                }), 200
+            
+            # Create a simplified response message
+            response = f"**You have {result['count']} pending stock arrival(s) to confirm:**\n\n"
+            response += "**Use the form below to view and confirm stock:**\n"
+            
+            # Remove purchase_price from stocks data before sending to frontend
+            stocks_for_display = []
+            for stock in result['stocks']:
+                stock_display = {k: v for k, v in stock.items() if k != 'purchase_price'}
+                stocks_for_display.append(stock_display)
+            
+            save_conversation(user.id, user_message, response)
+            return jsonify({
+                'response': response,
+                'stocks': stocks_for_display,
+                'invoice_ids': result.get('invoice_ids', []),
+                'dispatch_dates': result.get('dispatch_dates', []),
+                'interactive_stock_confirmation': True,  # Flag for frontend to render interactive UI
+                'show_stock_table': True,  # Flag to show table in form
+                'action_buttons': [
+                    {'text': 'View Orders', 'action': 'track_order'}
+                ]
+            }), 200
+        
+        # Check if user wants to confirm stock
+        # Pattern: "confirm stock <id>" or "confirm stock <id> received <quantity>"
+        confirm_pattern = r'confirm\s+stock\s+(\d+)'
+        match = re.search(confirm_pattern, message_lower)
+        
+        if match:
+            stock_id = int(match.group(1))
+            
+            # Try to extract received quantity
+            received_qty_match = re.search(r'received\s+(\d+)', message_lower)
+            received_quantity = int(received_qty_match.group(1)) if received_qty_match else None
+            
+            # Try to extract adjustment reason - improved regex to capture everything after "reason"
+            # Pattern: "reason" followed by whitespace, then capture everything until end of string
+            reason_match = re.search(r'reason\s+(.+)', message_lower, re.IGNORECASE | re.DOTALL)
+            adjustment_reason = reason_match.group(1).strip() if reason_match else None
+            
+            # Log extracted values for debugging
+            logger.info(f"Stock confirmation - ID: {stock_id}, Received: {received_quantity}, Reason: {adjustment_reason}")
+            
+            # Confirm stock arrival
+            result = stock_service.confirm_stock_arrival(
+                stock_id,
+                user.id,
+                received_quantity,
+                adjustment_reason
+            )
+            
+            if result['success']:
+                stock_detail = result['stock_detail']
+                response = f"✅ **Stock confirmed successfully!**\n\n"
+                response += f"**Product:** {stock_detail['product_name']} ({stock_detail['product_code']})\n"
+                response += f"**Quantity Received:** {stock_detail.get('received_quantity', stock_detail['quantity'])} units\n"
+                
+                if result.get('quantity_adjusted'):
+                    response += f"⚠️ **Quantity Adjusted:** Yes\n"
+                    response += f"**Reason:** {stock_detail.get('adjustment_reason', 'N/A')}\n"
+                    response += f"**Note:** An email has been sent to the company about this adjustment.\n"
+                
+                response += f"\n**Status:** {stock_detail['status']}\n"
+                response += f"**Confirmed At:** {stock_detail.get('confirmed_at', 'N/A')}\n"
+                
+                # Check if there are more pending stocks
+                pending_result = stock_service.get_pending_stock_arrivals(user.unique_id)
+                
+                if pending_result['success'] and pending_result['count'] > 0:
+                    response += f"\n**You have {pending_result['count']} more pending stock arrival(s) to confirm.**\n"
+                
+                save_conversation(user.id, user_message, response)
+                
+                response_data = {
+                    'response': response,
+                    'stock_detail': stock_detail,
+                    'action_buttons': [
+                        {'text': 'Show Pending Stock', 'action': 'show_pending_stock'},
+                        {'text': 'View Orders', 'action': 'track_order'}
+                    ]
+                }
+                
+                # Show interactive form for remaining stocks if any
+                if pending_result['success'] and pending_result['count'] > 0:
+                    response_data['interactive_stock_confirmation'] = True
+                    response_data['stocks'] = pending_result['stocks']
+                    response_data['invoice_ids'] = pending_result.get('invoice_ids', [])
+                    response_data['dispatch_dates'] = pending_result.get('dispatch_dates', [])
+                    response_data['show_stock_table'] = True
+                
+                return jsonify(response_data), 200
+            else:
+                response = f"❌ **Error:** {result['message']}"
+                save_conversation(user.id, user_message, response)
+                return jsonify({
+                    'response': response,
+                    'action_buttons': [
+                        {'text': 'Show Pending Stock', 'action': 'show_pending_stock'},
+                        {'text': 'Get Help', 'action': 'help'}
+                    ]
+                }), 200
+        
+        # If no pattern matched, show help
+        response = "**Stock Confirmation Help:**\n\n"
+        response += "To view pending stock arrivals:\n"
+        response += "• Type: `show pending stock` or `list pending arrivals`\n\n"
+        response += "To confirm stock:\n"
+        response += "• Type: `confirm stock <stock_id>` (e.g., 'confirm stock 1')\n"
+        response += "• If quantity differs: `confirm stock <stock_id> received <quantity>` (e.g., 'confirm stock 1 received 95')\n"
+        response += "• With reason: `confirm stock <stock_id> received <quantity> reason <reason>`\n\n"
+        response += "**Example:**\n"
+        response += "• 'show pending stock' - View all pending arrivals\n"
+        response += "• 'confirm stock 1' - Confirm stock ID 1 with sent quantity\n"
+        response += "• 'confirm stock 1 received 95' - Confirm stock ID 1 with 95 units received\n"
+        response += "• 'confirm stock 1 received 95 reason damaged during transit' - Confirm with quantity and reason\n"
+        
+        save_conversation(user.id, user_message, response)
+        return jsonify({
+            'response': response,
+            'action_buttons': [
+                {'text': 'Show Pending Stock', 'action': 'show_pending_stock'},
+                {'text': 'View Orders', 'action': 'track_order'}
+            ]
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error handling stock confirmation: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        response = f"Sorry, I encountered an error processing your stock confirmation request: {str(e)}"
+        save_conversation(user.id, user_message, response)
+        return jsonify({
+            'response': response,
+            'action_buttons': [
+                {'text': 'Show Pending Stock', 'action': 'show_pending_stock'},
+                {'text': 'Get Help', 'action': 'help'}
+            ]
+        }), 500
 
 def handle_general_conversation(user_message, user, context_data):
     """Handle general conversation using LLM"""
@@ -999,13 +2130,26 @@ def handle_general_conversation(user_message, user, context_data):
         if not llm_service.client:
             response = "I'm here to help you with orders, tracking, and company information. How can I assist you today?"
             save_conversation(user.id, user_message, response)
+            
+            # Build action buttons
+            action_buttons = [
+                {'text': 'Place Order', 'action': 'place_order'},
+                {'text': 'Track Order', 'action': 'track_order'},
+                {'text': 'Company Info', 'action': 'company_info'}
+            ]
+            
+            # For distributors (dealers), check for pending stocks and add button if needed
+            if user.role == 'distributor':
+                stock_service = get_stock_management_service()
+                pending_result = stock_service.get_pending_stock_arrivals(user.unique_id)
+                
+                if pending_result['success'] and pending_result['count'] > 0:
+                    # Add "Pending Stocks" button at the beginning
+                    action_buttons.insert(0, {'text': 'Pending Stocks', 'action': 'pending_stocks'})
+            
             return jsonify({
                 'response': response,
-                'action_buttons': [
-                    {'text': 'Place Order', 'action': 'place_order'},
-                    {'text': 'Track Order', 'action': 'track_order'},
-                    {'text': 'Company Info', 'action': 'company_info'}
-                ]
+                'action_buttons': action_buttons
             }), 200
         
         # Generate contextual response
@@ -1015,9 +2159,9 @@ User: {user_message}
 
 User Context:
 - Name: {user.name}
-- Type: {user.user_type}
+- Type: {user.role}
 - Role: {user.role or 'N/A'}
-- Warehouse: {user.nearest_warehouse or 'N/A'}
+- Area: {user.area or 'N/A'}
 
 Your task:
 1. Provide a helpful, friendly response
@@ -1037,38 +2181,91 @@ Respond naturally and helpfully."""
         response = response_obj.choices[0].message.content
         save_conversation(user.id, user_message, response)
         
+        # Build action buttons
+        action_buttons = [
+            {'text': 'Place Order', 'action': 'place_order'},
+            {'text': 'Track Order', 'action': 'track_order'},
+            {'text': 'Company Info', 'action': 'company_info'}
+        ]
+        
+        # For distributors (dealers), check for pending stocks and add button if needed
+        if user.role == 'distributor':
+            stock_service = get_stock_management_service()
+            pending_result = stock_service.get_pending_stock_arrivals(user.unique_id)
+            
+            if pending_result['success'] and pending_result['count'] > 0:
+                # Add "Pending Stocks" button at the beginning
+                action_buttons.insert(0, {'text': 'Pending Stocks', 'action': 'pending_stocks'})
+        
+        action_buttons.append({'text': 'Get Help', 'action': 'help'})
+        
         return jsonify({
             'response': response,
-            'action_buttons': [
-                {'text': 'Place Order', 'action': 'place_order'},
-                {'text': 'Track Order', 'action': 'track_order'},
-                {'text': 'Company Info', 'action': 'company_info'},
-                {'text': 'Get Help', 'action': 'help'}
-            ]
+            'action_buttons': action_buttons
         }), 200
         
     except Exception as e:
         logger.error(f"Error handling general conversation: {str(e)}")
         response = "I'm here to help you with orders, tracking, and company information. How can I assist you today?"
         save_conversation(user.id, user_message, response)
+        
+        # Build action buttons
+        action_buttons = [
+            {'text': 'Place Order', 'action': 'place_order'},
+            {'text': 'Track Order', 'action': 'track_order'},
+            {'text': 'Company Info', 'action': 'company_info'}
+        ]
+        
+        # For distributors (dealers), check for pending stocks and add button if needed
+        if user.role == 'distributor':
+            stock_service = get_stock_management_service()
+            pending_result = stock_service.get_pending_stock_arrivals(user.unique_id)
+            
+            if pending_result['success'] and pending_result['count'] > 0:
+                # Add "Pending Stocks" button at the beginning
+                action_buttons.insert(0, {'text': 'Pending Stocks', 'action': 'pending_stocks'})
+        
         return jsonify({
             'response': response,
-            'action_buttons': [
-                {'text': 'Place Order', 'action': 'place_order'},
-                {'text': 'Track Order', 'action': 'track_order'},
-                {'text': 'Company Info', 'action': 'company_info'}
-            ]
+            'action_buttons': action_buttons
         }), 200
 
 def generate_welcome_message(user):
     """Generate personalized welcome message based on user type"""
-    if user.user_type == 'customer':
+    if user.role == 'company':
+        return f"""Welcome {user.name}! 👋
+
+**RB Company Analytics System**
+
+I'm your database reporting assistant. I can help you:
+
+• **Generate Database Reports** - Export any table to CSV
+• **Filter Columns** - Select specific data you need
+• **Email Delivery** - Receive reports directly in your inbox
+
+**Available Reports:**
+- Users, Orders, Order Items, Products
+- Customers, Cart Items, FOC Schemes
+- Dealer Stock, Pending Orders, Email Logs
+
+Type **"generate report"** to get started or **"help"** for more information."""
+    elif user.role == 'customer':
         return f"Welcome back, {user.name}! I'm here to help you with your orders and answer any questions about our products. What would you like to do today?"
-    elif user.user_type == 'mr':
+    elif user.role == 'mr':
         return f"Hello {user.name}! As a Medical Representative, you can place orders for your clients and track deliveries. How can I assist you today?"
-    elif user.user_type == 'distributor':
-        return f"Welcome {user.name}! As a Distributor, you can manage orders, confirm deliveries, and track inventory. What would you like to do?"
-    elif user.user_type == 'pharmacy':
+    elif user.role == 'distributor':
+        # Check for pending stocks to confirm
+        stock_service = get_stock_management_service()
+        pending_result = stock_service.get_pending_stock_arrivals(user.unique_id)
+        
+        welcome_msg = f"Welcome {user.name}! As a Distributor, you can manage orders, confirm deliveries, and track inventory."
+        
+        if pending_result['success'] and pending_result['count'] > 0:
+            welcome_msg += f"\n\n📦 **Important:** You have {pending_result['count']} pending stock arrival(s) to confirm. Type 'show pending stock' or 'show pending orders' to view and confirm them."
+        
+        welcome_msg += "\n\nWhat would you like to do?"
+        return welcome_msg
+    elif user.role == 'pharmacy':
         return f"Hello {user.name}! As a Pharmacy, you can place orders and track your deliveries. How can I help you today?"
     else:
         return f"Welcome back, {user.name}! I'm here to help you with your orders and answer any questions. What would you like to do today?"
@@ -1089,6 +2286,372 @@ def save_conversation(user_id, user_message, bot_response):
     except Exception as e:
         logger.error(f"Error saving conversation: {str(e)}")
 
+def handle_select_customer(user, context_data):
+    """Handle select customer action - show customer selection form"""
+    try:
+        if user.role != 'mr':
+            return jsonify({
+                'response': 'Only Medical Representatives can select customers.',
+                'action_buttons': []
+            }), 200
+        
+        # Get customers for this MR
+        customers = Customer.query.filter_by(
+            mr_unique_id=user.unique_id,
+            is_active=True
+        ).all()
+        
+        if not customers:
+            response = "No customers are assigned to you. Please add a new customer or contact support to assign customers."
+            save_conversation(user.id, "select customer", response)
+            return jsonify({
+                'response': response,
+                'action_buttons': [
+                    {'text': 'Add New Customer', 'action': 'add_new_customer'},
+                    {'text': 'Get Help', 'action': 'help'}
+                ]
+            }), 200
+        
+        # Build customer list (only name and ID)
+        customer_list = []
+        for customer in customers:
+            customer_list.append({
+                'id': customer.id,
+                'unique_id': customer.unique_id,
+                'name': customer.name
+            })
+        
+        response = "Please select the customer for whom you want to place an order:"
+        
+        save_conversation(user.id, "select customer", response)
+        
+        return jsonify({
+            'response': response,
+            'customers': customer_list,
+            'interactive_customer_selection': True,
+            'show_customer_table': True,  # Flag to show table outside selection box
+            'action_buttons': []  # No action buttons - removed Add New Customer and Cancel
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error handling select customer: {str(e)}")
+        return jsonify({
+            'response': 'Sorry, I encountered an error. Please try again.',
+            'action_buttons': []
+        }), 200
+
+def handle_add_new_customer(user, context_data):
+    """Handle add new customer action - show add customer form"""
+    try:
+        if user.role != 'mr':
+            return jsonify({
+                'response': 'Only Medical Representatives can add customers.',
+                'action_buttons': []
+            }), 200
+        
+        response = "Please fill in the details below to add a new customer."
+        
+        save_conversation(user.id, "add new customer", response)
+        
+        return jsonify({
+            'response': response,
+            'interactive_add_customer': True
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error handling add new customer: {str(e)}")
+        return jsonify({
+            'response': 'Sorry, I encountered an error. Please try again.',
+            'action_buttons': []
+        }), 200
+
+@chatbot_bp.route('/select_customer', methods=['POST'])
+def select_customer():
+    """Select customer for MR order"""
+    try:
+        user_id = session.get('user_id')
+        if not user_id:
+            return jsonify({'error': 'User not logged in'}), 401
+        
+        user = User.query.get(user_id)
+        if not user or user.role != 'mr':
+            return jsonify({'error': 'Only MRs can select customers'}), 403
+        
+        data = request.get_json()
+        customer_id = data.get('customer_id')
+        
+        if not customer_id:
+            return jsonify({'error': 'Customer ID is required'}), 400
+        
+        # Verify customer belongs to this MR
+        customer = Customer.query.filter_by(
+            id=customer_id,
+            mr_unique_id=user.unique_id,
+            is_active=True
+        ).first()
+        
+        if not customer:
+            return jsonify({'error': 'Customer not found or not assigned to you'}), 404
+        
+        # Store selected customer in session
+        session['selected_customer_id'] = customer.id
+        session['selected_customer_unique_id'] = customer.unique_id
+        
+        # Get available products for the MR
+        db_service = get_db_service()
+        if user.area:
+            products = db_service.get_products_from_dealer_stock(user.area)
+        else:
+            from app.models import Product
+            products = Product.query.all()
+        
+        # Build product list for interactive UI with FOC information using helper
+        pricing_service = get_pricing_service()
+        product_list = build_product_list_with_foc(products, pricing_service)
+        
+        # Create response message with customer info
+        response = f"Great! I can help you place an order.\n**Ordering for:** {customer.name} ({customer.unique_id})\n\nPlease use the product selection form below to select products and quantities."
+        
+        # Save conversation
+        save_conversation(user.id, f"Selected customer: {customer.name}", response)
+        
+        return jsonify({
+            'success': True,
+            'message': f'Customer {customer.name} selected successfully',
+            'customer': {
+                'id': customer.id,
+                'unique_id': customer.unique_id,
+                'name': customer.name,
+                'email': customer.email,
+                'phone': customer.phone
+            },
+            'response': response,
+            'products': product_list,
+            'interactive_product_selection': True,  # Flag for frontend to render interactive UI
+            'show_product_table': True,  # Flag to show table outside selection box
+            'action_buttons': [{'text': 'Change Customer', 'action': 'change_customer'}]
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error selecting customer: {str(e)}")
+        return jsonify({'error': 'Error selecting customer'}), 500
+
+@chatbot_bp.route('/select_order', methods=['POST'])
+def select_order():
+    """Select order for distributor to view details and confirm/reject"""
+    try:
+        user_id = session.get('user_id')
+        if not user_id:
+            return jsonify({'error': 'User not logged in'}), 401
+        
+        user = User.query.get(user_id)
+        if not user or user.role != 'distributor':
+            return jsonify({'error': 'Only distributors can use this feature'}), 403
+        
+        data = request.get_json()
+        order_id = data.get('order_id')
+        
+        if not order_id:
+            return jsonify({'error': 'Order ID is required'}), 400
+        
+        # Get order details
+        enhanced_order_service = get_enhanced_order_service()
+        order = Order.query.filter_by(order_id=order_id).first()
+        
+        if not order:
+            return jsonify({'error': 'Order not found'}), 404
+        
+        # Verify order is in distributor's area
+        if order.mr and order.mr.area != user.area:
+            return jsonify({'error': 'This order is not in your area'}), 403
+        
+        # Get order items with FOC
+        items_list = []
+        total_items = 0
+        for item in order.order_items:
+            free_qty = item.free_quantity or 0
+            total_qty = item.quantity + free_qty
+            total_items += total_qty
+            
+            items_list.append({
+                'product_name': item.product.product_name,
+                'product_code': item.product_code,
+                'quantity': item.quantity,
+                'free_quantity': free_qty,
+                'total_quantity': total_qty,
+                'unit_price': float(item.unit_price) if item.unit_price else 0.0,
+                'total_price': float(item.total_price) if item.total_price else 0.0
+            })
+        
+        # Build detailed response
+        order_details = {
+            'order_id': order.order_id,
+            'mr_name': order.mr.name if order.mr else 'N/A',
+            'mr_email': order.mr.email if order.mr else 'N/A',
+            'mr_phone': order.mr.phone if order.mr else 'N/A',
+            'status': order.status,
+            'status_display': order.status.replace('_', ' ').title() if order.status else 'Unknown',
+            'total_amount': float(order.total_amount) if order.total_amount else 0.0,
+            'total_items': total_items,
+            'order_date': order.created_at.strftime('%Y-%m-%d') if order.created_at else 'N/A',
+            'order_time': order.created_at.strftime('%H:%M') if order.created_at else 'N/A',
+            'order_datetime': order.created_at.strftime('%Y-%m-%d %H:%M:%S') if order.created_at else 'N/A',
+            'area': order.mr.area if order.mr else 'N/A',
+            'items': items_list,
+            'can_confirm': order.status == 'pending',
+            'can_reject': order.status == 'pending'
+        }
+        
+        return jsonify({
+            'success': True,
+            'order': order_details
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error selecting order: {str(e)}")
+        return jsonify({'error': 'Error selecting order'}), 500
+
+@chatbot_bp.route('/confirm_order_action', methods=['POST'])
+def confirm_order_action():
+    """Confirm order by distributor"""
+    try:
+        user_id = session.get('user_id')
+        if not user_id:
+            return jsonify({'error': 'User not logged in'}), 401
+        
+        user = User.query.get(user_id)
+        if not user or user.role != 'distributor':
+            return jsonify({'error': 'Only distributors can confirm orders'}), 403
+        
+        data = request.get_json()
+        order_id = data.get('order_id')
+        
+        if not order_id:
+            return jsonify({'error': 'Order ID is required'}), 400
+        
+        # Confirm order
+        enhanced_order_service = get_enhanced_order_service()
+        result = enhanced_order_service.confirm_order_by_distributor(order_id, user.id)
+        
+        return jsonify(result), 200 if result['success'] else 400
+        
+    except Exception as e:
+        logger.error(f"Error confirming order: {str(e)}")
+        return jsonify({'error': 'Error confirming order'}), 500
+
+@chatbot_bp.route('/reject_order_action', methods=['POST'])
+def reject_order_action():
+    """Reject order by distributor"""
+    try:
+        user_id = session.get('user_id')
+        if not user_id:
+            return jsonify({'error': 'User not logged in'}), 401
+        
+        user = User.query.get(user_id)
+        if not user or user.role != 'distributor':
+            return jsonify({'error': 'Only distributors can reject orders'}), 403
+        
+        data = request.get_json()
+        order_id = data.get('order_id')
+        rejection_reason = data.get('reason', 'No reason provided')
+        
+        if not order_id:
+            return jsonify({'error': 'Order ID is required'}), 400
+        
+        # Reject order
+        enhanced_order_service = get_enhanced_order_service()
+        result = enhanced_order_service.reject_order_by_distributor(order_id, user.id, rejection_reason)
+        
+        return jsonify(result), 200 if result['success'] else 400
+        
+    except Exception as e:
+        logger.error(f"Error rejecting order: {str(e)}")
+        return jsonify({'error': 'Error rejecting order'}), 500
+
+@chatbot_bp.route('/add_customer', methods=['POST'])
+def add_customer():
+    """Add new customer for MR"""
+    try:
+        user_id = session.get('user_id')
+        if not user_id:
+            return jsonify({'error': 'User not logged in'}), 401
+        
+        user = User.query.get(user_id)
+        if not user or user.role != 'mr':
+            return jsonify({'error': 'Only MRs can add customers'}), 403
+        
+        data = request.get_json()
+        name = data.get('name', '').strip()
+        email = data.get('email', '').strip()
+        phone = data.get('phone', '').strip()
+        address = data.get('address', '').strip()
+        
+        if not name:
+            return jsonify({'error': 'Customer name is required'}), 400
+        
+        # Create new customer
+        customer = Customer(
+            name=name,
+            email=email if email else None,
+            phone=phone if phone else None,
+            address=address if address else None,
+            mr_unique_id=user.unique_id,
+            mr_id=user.id,
+            is_active=True
+        )
+        
+        # Generate unique ID
+        customer.generate_unique_id()
+        
+        # Save to database
+        db.session.add(customer)
+        db.session.commit()
+        
+        # Store selected customer in session
+        session['selected_customer_id'] = customer.id
+        session['selected_customer_unique_id'] = customer.unique_id
+        
+        # Get available products for the MR
+        db_service = get_db_service()
+        if user.area:
+            products = db_service.get_products_from_dealer_stock(user.area)
+        else:
+            from app.models import Product
+            products = Product.query.all()
+        
+        # Build product list for interactive UI with FOC information using helper
+        pricing_service = get_pricing_service()
+        product_list = build_product_list_with_foc(products, pricing_service)
+        
+        # Create response message with customer info
+        response = f"Great! I can help you place an order.\n**Ordering for:** {customer.name} ({customer.unique_id})\n\nPlease use the product selection form below to select products and quantities."
+        
+        # Save conversation
+        save_conversation(user.id, f"Added new customer: {customer.name}", response)
+        
+        return jsonify({
+            'success': True,
+            'message': f'Customer {customer.name} added successfully',
+            'customer': {
+                'id': customer.id,
+                'unique_id': customer.unique_id,
+                'name': customer.name,
+                'email': customer.email,
+                'phone': customer.phone,
+                'address': customer.address
+            },
+            'response': response,
+            'products': product_list,
+            'interactive_product_selection': True,  # Flag for frontend to render interactive UI
+            'show_product_table': True,  # Flag to show table outside selection box
+            'action_buttons': [{'text': 'Change Customer', 'action': 'change_customer'}]
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error adding customer: {str(e)}")
+        return jsonify({'error': f'Error adding customer: {str(e)}'}), 500
+
 @chatbot_bp.route('/place_order', methods=['POST'])
 def place_order():
     """Place order from cart"""
@@ -1098,9 +2661,21 @@ def place_order():
             return jsonify({'error': 'User not logged in'}), 401
         
         enhanced_order_service = get_enhanced_order_service()
-        result = enhanced_order_service.place_order(user_id)
+        
+        # Get customer details if MR
+        user = User.query.get(user_id)
+        customer_id = None
+        if user and user.role == 'mr' and 'selected_customer_id' in session:
+            customer_id = session.get('selected_customer_id')
+        
+        result = enhanced_order_service.place_order(user_id, customer_id=customer_id)
         
         if result['success']:
+            # Clear selected customer after order is placed (MR can place order for one customer at a time)
+            if user and user.role == 'mr' and 'selected_customer_id' in session:
+                session.pop('selected_customer_id', None)
+                session.pop('selected_customer_unique_id', None)
+            
             return jsonify({
                 'success': True,
                 'message': result['message'],
@@ -1117,6 +2692,83 @@ def place_order():
         logger.error(f"Error placing order: {str(e)}")
         return jsonify({'error': 'Error placing order'}), 500
 
+@chatbot_bp.route('/cart/add', methods=['POST'])
+def add_to_cart_api():
+    """Add product to cart via API (for bulk additions)"""
+    try:
+        user_id = session.get('user_id')
+        if not user_id:
+            return jsonify({'error': 'User not logged in'}), 401
+        
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+        
+        data = request.get_json()
+        product_code = data.get('product_code')
+        quantity = data.get('quantity')
+        
+        if not product_code or not quantity:
+            return jsonify({'error': 'Product code and quantity required'}), 400
+        
+        quantity = int(quantity)
+        if quantity <= 0:
+            return jsonify({'error': 'Quantity must be greater than 0'}), 400
+        
+        # Get product from dealer stock
+        db_service = get_db_service()
+        products = db_service.get_products_from_dealer_stock(user.area)
+        
+        product = None
+        for p in products:
+            if p.get('product_code') == product_code:
+                product = p
+                break
+        
+        if not product:
+            return jsonify({'error': 'Product not found'}), 404
+        
+        # Get pricing
+        pricing_service = get_pricing_service()
+        pricing = pricing_service.calculate_product_pricing(
+            product.get('product_id'),
+            quantity
+        )
+        
+        if 'error' in pricing:
+            return jsonify({'error': pricing['error']}), 400
+        
+        # Add to cart
+        unit_price = pricing['pricing']['final_price']
+        cart_item, message = db_service.add_to_cart(
+            user_id,
+            product.get('product_id'),
+            product_code,
+            product.get('product_name'),
+            quantity,
+            unit_price
+        )
+        
+        if cart_item:
+            return jsonify({
+                'success': True,
+                'message': message,
+                'cart_item': {
+                    'id': cart_item.id,
+                    'product_code': cart_item.product_code,
+                    'product_name': cart_item.product_name,
+                    'quantity': cart_item.quantity,
+                    'unit_price': cart_item.unit_price
+                },
+                'pricing': pricing
+            }), 200
+        else:
+            return jsonify({'error': message}), 400
+            
+    except Exception as e:
+        logger.error(f"Error adding to cart: {str(e)}")
+        return jsonify({'error': 'Error adding product to cart'}), 500
+
 @chatbot_bp.route('/cart', methods=['GET'])
 def get_cart():
     """Get user's cart items"""
@@ -1125,30 +2777,90 @@ def get_cart():
         if not user_id:
             return jsonify({'error': 'User not logged in'}), 401
         
+        db_service = get_db_service()
         cart_items = db_service.get_cart_items(user_id)
         cart_data = []
         
+        # Get pricing service to calculate FOC for cart items
+        from app.pricing_service import PricingService
+        pricing_service = PricingService()
+        
         for item in cart_items:
+            # Get product name from cart item (now stored in CartItem) or fallback
+            product_name = item.product_code
+            if hasattr(item, 'product_name') and item.product_name:
+                product_name = item.product_name
+            elif hasattr(item, 'product') and item.product:
+                product_name = item.product.product_name
+            
+            # Calculate current pricing with FOC
+            if hasattr(item, 'product') and item.product:
+                pricing_result = pricing_service.calculate_product_pricing(item.product.id, item.quantity)
+                if 'error' not in pricing_result:
+                    scheme_info = pricing_result.get('scheme', {})
+                    pricing_info = pricing_result.get('pricing', {})
+                    free_quantity = scheme_info.get('free_quantity', 0)
+                    paid_quantity = scheme_info.get('paid_quantity', item.quantity)
+                    total_quantity = scheme_info.get('total_quantity', item.quantity)
+                    scheme_name = scheme_info.get('name')
+                    scheme_applied = scheme_info.get('applied', False)
+                    total_price = pricing_info.get('total_amount', item.total_price)
+                    final_price = pricing_info.get('final_price', item.unit_price)
+                else:
+                    # Fallback to cart item values
+                    free_quantity = getattr(item, 'free_quantity', 0)
+                    paid_quantity = item.quantity
+                    total_quantity = item.quantity
+                    scheme_name = None
+                    scheme_applied = False
+                    total_price = item.total_price
+                    final_price = item.unit_price
+            else:
+                # Fallback to cart item values
+                free_quantity = getattr(item, 'free_quantity', 0)
+                paid_quantity = item.quantity
+                total_quantity = item.quantity
+                scheme_name = None
+                scheme_applied = False
+                total_price = item.total_price
+                final_price = item.unit_price
+            
             cart_data.append({
                 'id': item.id,
                 'product_code': item.product_code,
-                'product_name': item.product.product_name,
-                'quantity': item.product_quantity,
+                'product_name': product_name,
+                'quantity': item.quantity,
                 'unit_price': item.unit_price,
-                'total_price': item.total_price,
-                'base_price': item.base_price,
-                'discount_amount': item.discount_amount,
-                'final_price': item.final_price,
-                'scheme_applied': item.scheme_applied,
-                'free_quantity': item.free_quantity,
-                'paid_quantity': item.paid_quantity
+                'total_price': total_price,
+                'base_price': getattr(item, 'base_price', item.unit_price),
+                'discount_amount': getattr(item, 'discount_amount', 0),
+                'final_price': final_price,
+                'scheme_applied': scheme_applied,
+                'scheme_name': scheme_name,
+                'free_quantity': free_quantity,
+                'paid_quantity': paid_quantity,
+                'total_quantity': total_quantity
             })
         
-        return jsonify({'cart_items': cart_data}), 200
+        # Calculate subtotal, tax (5%), and grand total
+        subtotal = sum(item['total_price'] for item in cart_data)
+        tax_rate = 0.05  # 5% tax
+        tax_amount = subtotal * tax_rate
+        grand_total = subtotal + tax_amount
+        
+        return jsonify({
+            'cart_items': cart_data,
+            'subtotal': round(subtotal, 2),
+            'tax_rate': tax_rate,
+            'tax_amount': round(tax_amount, 2),
+            'grand_total': round(grand_total, 2)
+        }), 200
         
     except Exception as e:
         logger.error(f"Error getting cart: {str(e)}")
-        return jsonify({'error': 'Error getting cart'}), 500
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': f'Error getting cart: {str(e)}'}), 500
 
 @chatbot_bp.route('/cart/<int:item_id>', methods=['DELETE'])
 def remove_from_cart(item_id):
@@ -1158,16 +2870,225 @@ def remove_from_cart(item_id):
         if not user_id:
             return jsonify({'error': 'User not logged in'}), 401
         
+        db_service = get_db_service()
+        
+        # Get cart item before removing to unblock quantities for MR orders
+        cart_item = CartItem.query.get(item_id)
+        if cart_item:
+            user = User.query.get(user_id)
+            # Unblock quantities for MR orders when removing from cart
+            if user and user.role == 'mr' and user.area and cart_item:
+                enhanced_order_service = get_enhanced_order_service()
+                enhanced_order_service._unblock_quantity_for_mr_order(
+                    user=user,
+                    product_code=cart_item.product_code,
+                    quantity=cart_item.quantity
+                )
+                logger.info(f"Unblocked {cart_item.quantity} units of {cart_item.product_code} for MR order (removed from cart)")
+        
         success, message = db_service.remove_from_cart(item_id)
         
         if success:
-            return jsonify({'message': message}), 200
+            # Return updated cart items
+            cart_items = db_service.get_cart_items(user_id)
+            cart_data = []
+            for item in cart_items:
+                # Get product name from cart item (now stored in CartItem) or fallback
+                product_name = item.product_code
+                if hasattr(item, 'product_name') and item.product_name:
+                    product_name = item.product_name
+                elif hasattr(item, 'product') and item.product:
+                    product_name = item.product.product_name
+                
+                cart_data.append({
+                    'id': item.id,
+                    'product_code': item.product_code,
+                    'product_name': product_name,
+                    'quantity': item.quantity,
+                    'unit_price': item.unit_price,
+                    'total_price': item.total_price,
+                    'base_price': getattr(item, 'base_price', item.unit_price),
+                    'discount_amount': getattr(item, 'discount_amount', 0),
+                    'final_price': getattr(item, 'final_price', item.unit_price),
+                    'scheme_applied': getattr(item, 'scheme_applied', None),
+                    'free_quantity': getattr(item, 'free_quantity', 0),
+                    'paid_quantity': getattr(item, 'paid_quantity', item.quantity)
+                })
+            return jsonify({'message': message, 'cart_items': cart_data}), 200
         else:
             return jsonify({'error': message}), 400
             
     except Exception as e:
         logger.error(f"Error removing from cart: {str(e)}")
         return jsonify({'error': 'Error removing from cart'}), 500
+
+@chatbot_bp.route('/cart/<int:item_id>/quantity', methods=['PATCH'])
+def update_cart_quantity(item_id):
+    """Update cart item quantity"""
+    try:
+        user_id = session.get('user_id')
+        if not user_id:
+            return jsonify({'error': 'User not logged in'}), 401
+        
+        data = request.get_json()
+        new_quantity = data.get('quantity')
+        
+        if not new_quantity or new_quantity < 1:
+            return jsonify({'error': 'Invalid quantity'}), 400
+        
+        db_service = get_db_service()
+        
+        # Get cart item
+        cart_item = CartItem.query.filter_by(id=item_id, user_id=user_id).first()
+        if not cart_item:
+            return jsonify({'error': 'Cart item not found'}), 404
+        
+        # Get product to check availability
+        product = Product.query.get(cart_item.product_id)
+        if not product:
+            return jsonify({'error': 'Product not found'}), 404
+        
+        # Check stock availability
+        if new_quantity > product.available_for_sale:
+            return jsonify({'error': f'Insufficient stock. Only {product.available_for_sale} units available.'}), 400
+        
+        # For MR orders, adjust blocked quantities when quantity changes
+        user = User.query.get(user_id)
+        old_quantity = cart_item.quantity
+        quantity_diff = new_quantity - old_quantity
+        
+        if user and user.role == 'mr' and user.area:
+            enhanced_order_service = get_enhanced_order_service()
+            if quantity_diff > 0:
+                # Increase - block more
+                enhanced_order_service._block_quantity_for_mr_order(
+                    user=user,
+                    product_code=cart_item.product_code,
+                    quantity=quantity_diff
+                )
+                logger.info(f"Blocked additional {quantity_diff} units of {cart_item.product_code} for MR order (quantity increased)")
+            elif quantity_diff < 0:
+                # Decrease - unblock some
+                enhanced_order_service._unblock_quantity_for_mr_order(
+                    user=user,
+                    product_code=cart_item.product_code,
+                    quantity=abs(quantity_diff)
+                )
+                logger.info(f"Unblocked {abs(quantity_diff)} units of {cart_item.product_code} for MR order (quantity decreased)")
+        
+        # Update quantity
+        cart_item.quantity = new_quantity
+        cart_item.paid_quantity = new_quantity
+        
+        # Recalculate pricing
+        pricing_service = get_pricing_service()
+        pricing = pricing_service.calculate_product_pricing(product.id, new_quantity)
+        
+        if 'error' in pricing:
+            return jsonify({'error': pricing['error']}), 400
+        
+        # Update cart item pricing
+        cart_item.base_price = pricing['base_price']
+        cart_item.discount_amount = pricing['discount']['amount']
+        cart_item.final_price = pricing['pricing']['final_price']
+        cart_item.free_quantity = pricing['scheme']['free_quantity']
+        cart_item.paid_quantity = pricing['scheme']['paid_quantity']
+        cart_item.total_price = cart_item.final_price * cart_item.paid_quantity
+        
+        db.session.commit()
+        
+        # Return updated cart items
+        cart_items = db_service.get_cart_items(user_id)
+        cart_data = []
+        for item in cart_items:
+            # Get product name from cart item (now stored in CartItem) or fallback
+            product_name = item.product_code
+            if hasattr(item, 'product_name') and item.product_name:
+                product_name = item.product_name
+            elif hasattr(item, 'product') and item.product:
+                product_name = item.product.product_name
+            
+            cart_data.append({
+                'id': item.id,
+                'product_code': item.product_code,
+                'product_name': product_name,
+                'quantity': item.quantity,
+                'unit_price': item.unit_price,
+                'total_price': item.total_price,
+                'base_price': getattr(item, 'base_price', item.unit_price),
+                'discount_amount': getattr(item, 'discount_amount', 0),
+                'final_price': getattr(item, 'final_price', item.unit_price),
+                'scheme_applied': getattr(item, 'scheme_applied', None),
+                'free_quantity': getattr(item, 'free_quantity', 0),
+                'paid_quantity': getattr(item, 'paid_quantity', item.quantity)
+            })
+        
+        return jsonify({'message': 'Quantity updated successfully', 'cart_items': cart_data}), 200
+        
+    except Exception as e:
+        logger.error(f"Error updating cart quantity: {str(e)}")
+        db.session.rollback()
+        return jsonify({'error': 'Error updating cart quantity'}), 500
+
+@chatbot_bp.route('/api/products', methods=['GET'])
+def get_products_api():
+    """Get products API for autocomplete"""
+    try:
+        user_id = session.get('user_id')
+        if not user_id:
+            return jsonify({'error': 'User not logged in'}), 401
+        
+        db_service = get_db_service()
+        user = User.query.get(user_id)
+        
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+        
+        # Get products - For MRs, get from dealer_wise_stock_details; for distributors, use Product table
+        area = user.area if user else None
+        
+        if user.role == 'mr' and area:
+            products = db_service.get_products_from_dealer_stock(area)
+        else:
+            warehouse = db_service.get_warehouse_by_area(area) if area else None
+            if warehouse:
+                products = db_service.get_products_by_warehouse(warehouse.id)
+            else:
+                products = Product.query.all()
+        
+        product_list = []
+        for product in products:
+            # Handle both Product objects and dictionaries from dealer stock
+            if isinstance(product, dict):
+                # Already a dictionary from dealer stock
+                product_list.append({
+                    'product_code': product.get('product_code', ''),
+                    'product_name': product.get('product_name', ''),
+                    'product_description': '',
+                    'price_of_product': float(product.get('sales_price', product.get('price', 0))),
+                    'available_for_sale': int(product.get('available_quantity', 0)),
+                    'sales_price': float(product.get('sales_price', 0)),
+                    'batch_number': '',
+                    'expiry_date': product.get('earliest_expiry')
+                })
+            else:
+                # Product object from database
+                product_list.append({
+                    'product_code': str(product.id),  # Use ID as code for new schema
+                    'product_name': product.product_name,
+                    'product_description': '',
+                    'price_of_product': float(product.price) if product.price else 0.0,
+                    'available_for_sale': 0,  # Will be calculated from dealer stock
+                    'sales_price': float(product.price) if product.price else 0.0,
+                    'batch_number': '',
+                    'expiry_date': None
+                })
+        
+        return jsonify({'products': product_list}), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting products: {str(e)}")
+        return jsonify({'error': 'Error getting products'}), 500
 
 @chatbot_bp.route('/distributor/confirm_order', methods=['POST'])
 def distributor_confirm_order():
@@ -1181,7 +3102,7 @@ def distributor_confirm_order():
             return jsonify({'error': 'User not logged in'}), 401
         
         user = User.query.get(distributor_user_id)
-        if not user or user.user_type != 'distributor':
+        if not user or user.role != 'distributor':
             return jsonify({'error': 'Access denied. Distributor access required.'}), 403
         
         enhanced_order_service = get_enhanced_order_service()
@@ -1202,3 +3123,402 @@ def distributor_confirm_order():
     except Exception as e:
         logger.error(f"Error confirming order: {str(e)}")
         return jsonify({'error': 'Error confirming order'}), 500
+
+@chatbot_bp.route('/stock/pending', methods=['GET'])
+def get_pending_stock_arrivals():
+    """Get pending stock arrivals for dealer"""
+    try:
+        dealer_user_id = session.get('user_id')
+        if not dealer_user_id:
+            return jsonify({'error': 'User not logged in'}), 401
+        
+        user = User.query.get(dealer_user_id)
+        if not user or user.role != 'distributor':
+            return jsonify({'error': 'Access denied. Distributor access required.'}), 403
+        
+        stock_service = get_stock_management_service()
+        result = stock_service.get_pending_stock_arrivals(user.unique_id)
+        
+        if result['success']:
+            return jsonify({
+                'success': True,
+                'stocks': result['stocks'],
+                'count': result['count']
+            }), 200
+        else:
+            return jsonify({
+                'success': False,
+                'message': result['message']
+            }), 400
+            
+    except Exception as e:
+        logger.error(f"Error getting pending stock arrivals: {str(e)}")
+        return jsonify({'error': 'Error getting pending stock arrivals'}), 500
+
+@chatbot_bp.route('/stock/confirm', methods=['POST'])
+def confirm_stock_arrival():
+    """Dealer confirm stock arrival"""
+    try:
+        dealer_user_id = session.get('user_id')
+        if not dealer_user_id:
+            return jsonify({'error': 'User not logged in'}), 401
+        
+        user = User.query.get(dealer_user_id)
+        if not user or user.role != 'distributor':
+            return jsonify({'error': 'Access denied. Distributor access required.'}), 403
+        
+        data = request.get_json()
+        stock_detail_id = data.get('stock_detail_id')
+        received_quantity = data.get('received_quantity')
+        adjustment_reason = data.get('adjustment_reason')
+        
+        stock_service = get_stock_management_service()
+        result = stock_service.confirm_stock_arrival(
+            stock_detail_id,
+            dealer_user_id,
+            received_quantity,
+            adjustment_reason
+        )
+        
+        if result['success']:
+            return jsonify({
+                'success': True,
+                'message': result['message'],
+                'stock_detail': result['stock_detail'],
+                'quantity_adjusted': result.get('quantity_adjusted', False)
+            }), 200
+        else:
+            return jsonify({
+                'success': False,
+                'message': result['message']
+            }), 400
+            
+    except Exception as e:
+        logger.error(f"Error confirming stock arrival: {str(e)}")
+        return jsonify({'error': 'Error confirming stock arrival'}), 500
+
+@chatbot_bp.route('/stock/adjust', methods=['POST'])
+def adjust_stock_quantity():
+    """Adjust stock quantity after confirmation"""
+    try:
+        dealer_user_id = session.get('user_id')
+        if not dealer_user_id:
+            return jsonify({'error': 'User not logged in'}), 401
+        
+        user = User.query.get(dealer_user_id)
+        if not user or user.role != 'distributor':
+            return jsonify({'error': 'Access denied. Distributor access required.'}), 403
+        
+        data = request.get_json()
+        stock_detail_id = data.get('stock_detail_id')
+        new_quantity = data.get('new_quantity')
+        reason = data.get('reason', 'Quantity adjustment')
+        
+        if not new_quantity or new_quantity < 0:
+            return jsonify({'error': 'Invalid quantity'}), 400
+        
+        stock_service = get_stock_management_service()
+        result = stock_service.adjust_stock_quantity(
+            stock_detail_id,
+            dealer_user_id,
+            new_quantity,
+            reason
+        )
+        
+        if result['success']:
+            return jsonify({
+                'success': True,
+                'message': result['message'],
+                'stock_detail': result['stock_detail']
+            }), 200
+        else:
+            return jsonify({
+                'success': False,
+                'message': result['message']
+            }), 400
+            
+    except Exception as e:
+        logger.error(f"Error adjusting stock quantity: {str(e)}")
+        return jsonify({'error': 'Error adjusting stock quantity'}), 500
+
+
+# ============= COMPANY REPORT SYSTEM =============
+
+def handle_company_requests(user_message, user):
+    """Handle all company user requests for report generation"""
+    try:
+        from app.company_report_service import CompanyReportService
+        report_service = CompanyReportService()
+        
+        message_lower = user_message.lower().strip()
+        
+        # Check for report generation keywords
+        report_keywords = ['generate report', 'export data', 'download report', 'get report', 
+                          'export table', 'i want a report', 'i need a report']
+        
+        if any(keyword in message_lower for keyword in report_keywords) or message_lower == 'generate report':
+            # Show table selection
+            available_tables = report_service.get_available_tables()
+            
+            response = f"""**📊 Database Report Generation**
+
+Welcome {user.name}! I can help you export data from any table in our database.
+
+**Available Tables:**
+
+"""
+            
+            tables_list = []
+            for table_key, table_info in available_tables.items():
+                response += f"• **{table_info['name']}** (`{table_key}`)\n"
+                response += f"  _{len(table_info['columns'])} columns available_\n\n"
+                tables_list.append({
+                    'key': table_key,
+                    'name': table_info['name'],
+                    'columns': table_info['columns']
+                })
+            
+            response += "**How it works:**\n"
+            response += "1. Select a table from the list above\n"
+            response += "2. Choose which columns to include (or select all)\n"
+            response += "3. Receive the CSV file via email\n\n"
+            response += "Please select a table to continue."
+            
+            save_conversation(user.id, user_message, response)
+            
+            return jsonify({
+                'response': response,
+                'interactive_report_selection': True,
+                'tables': tables_list,
+                'action_buttons': []
+            }), 200
+        
+        # Greeting for company users
+        elif any(greeting in message_lower for greeting in ['hi', 'hello', 'hey', 'good morning', 'good afternoon']):
+            response = f"""Hello {user.name}! 👋
+
+Welcome to RB Company Analytics.
+
+I'm here to help you generate database reports and export data. You can request reports from any table in our system.
+
+What would you like to do?"""
+            
+            save_conversation(user.id, user_message, response)
+            
+            return jsonify({
+                'response': response,
+                'action_buttons': [
+                    {'text': 'Generate Report', 'action': 'generate_report'},
+                    {'text': 'Help', 'action': 'help'}
+                ]
+            }), 200
+        
+        # Help message
+        elif 'help' in message_lower:
+            response = """**🆘 Company Report System Help**
+
+**Available Commands:**
+• **"Generate Report"** - Start the report generation process
+• **"Export Data"** - Same as Generate Report
+• **"Help"** - Show this help message
+
+**Report Generation Process:**
+1. I'll show you all available tables
+2. You select which table to export
+3. Choose specific columns or export all
+4. Receive the CSV file via email
+
+**Available Tables:**
+• Users (MRs & Distributors)
+• Orders
+• Order Items  
+• Products (Master)
+• Customers
+• Cart Items
+• FOC Schemes
+• Dealer Stock Details
+• Pending Order Products
+• Email Logs
+
+Simply type **"generate report"** to get started!"""
+            
+            save_conversation(user.id, user_message, response)
+            
+            return jsonify({
+                'response': response,
+                'action_buttons': [
+                    {'text': 'Generate Report', 'action': 'generate_report'}
+                ]
+            }), 200
+        
+        # Default response
+        else:
+            response = f"""I'm not sure how to help with that. As a company admin, I can help you:
+
+• **Generate database reports** (type "generate report")
+• **Export data to CSV** (type "export data")
+• **Get help** (type "help")
+
+What would you like to do?"""
+            
+            save_conversation(user.id, user_message, response)
+            
+            return jsonify({
+                'response': response,
+                'action_buttons': [
+                    {'text': 'Generate Report', 'action': 'generate_report'},
+                    {'text': 'Help', 'action': 'help'}
+                ]
+            }), 200
+            
+    except Exception as e:
+        logger.error(f"Error handling company request: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'response': 'Sorry, I encountered an error. Please try again.',
+            'action_buttons': [
+                {'text': 'Generate Report', 'action': 'generate_report'}
+            ]
+        }), 500
+
+
+@chatbot_bp.route('/company/select_table', methods=['POST'])
+def select_company_table():
+    """Handle company table selection for report generation"""
+    try:
+        from app.company_report_service import CompanyReportService
+        
+        data = request.json
+        table_key = data.get('table_key')
+        user_id = session.get('user_id')
+        
+        if not user_id:
+            return jsonify({'error': 'Not authenticated'}), 401
+        
+        user = User.query.get(user_id)
+        if not user or user.role != 'company':
+            return jsonify({'error': 'Unauthorized'}), 403
+        
+        report_service = CompanyReportService()
+        available_tables = report_service.get_available_tables()
+        
+        if table_key not in available_tables:
+            return jsonify({'error': 'Invalid table'}), 400
+        
+        table_info = available_tables[table_key]
+        
+        response = f"""**✅ Table Selected: {table_info['name']}**
+
+This table has **{len(table_info['columns'])}** columns available.
+
+**Column Selection:**
+
+You can choose to:
+• **Export all columns** (recommended for complete data)
+• **Select specific columns** (for focused analysis)
+
+**Available Columns:**
+
+"""
+        
+        for col in table_info['columns']:
+            response += f"• `{col}`\n"
+        
+        response += "\n**What would you like to do?**"
+        
+        save_conversation(user.id, f"Selected table: {table_key}", response)
+        
+        return jsonify({
+            'response': response,
+            'table_key': table_key,
+            'table_name': table_info['name'],
+            'columns': table_info['columns'],
+            'show_column_selection': True,
+            'action_buttons': []
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error selecting table: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@chatbot_bp.route('/company/generate_report', methods=['POST'])
+def generate_company_report():
+    """Generate and send report to company email"""
+    try:
+        from app.company_report_service import CompanyReportService
+        
+        data = request.json
+        table_key = data.get('table_key')
+        selected_columns = data.get('selected_columns', [])
+        user_id = session.get('user_id')
+        
+        if not user_id:
+            return jsonify({'error': 'Not authenticated'}), 401
+        
+        user = User.query.get(user_id)
+        if not user or user.role != 'company':
+            return jsonify({'error': 'Unauthorized'}), 403
+        
+        report_service = CompanyReportService()
+        
+        # Generate report
+        logger.info(f"Generating report for table: {table_key}, columns: {selected_columns}")
+        report_result = report_service.generate_report(table_key, selected_columns)
+        
+        if not report_result.get('success'):
+            return jsonify({
+                'error': report_result.get('error', 'Report generation failed')
+            }), 400
+        
+        # Send email
+        email_result = report_service.send_report_email(
+            user.email,
+            table_key,
+            report_result,
+            selected_columns
+        )
+        
+        if not email_result.get('success'):
+            return jsonify({
+                'error': email_result.get('error', 'Failed to send email')
+            }), 500
+        
+        # Success response
+        response = f"""**✅ Report Generated Successfully!**
+
+Your report has been generated and sent to your email.
+
+**Report Details:**
+• **Table:** {report_result['table_name']}
+• **Records:** {report_result['row_count']:,} rows
+• **Columns:** {report_result['column_count']} columns
+• **File:** {report_result['filename']}
+• **Sent to:** {user.email}
+
+📧 Please check your email inbox (and spam folder) for the report.
+
+Would you like to generate another report?"""
+        
+        save_conversation(user.id, f"Generated report: {table_key}", response)
+        
+        return jsonify({
+            'response': response,
+            'success': True,
+            'action_buttons': [
+                {'text': 'Generate Another Report', 'action': 'generate_report'},
+                {'text': 'Done', 'action': 'home'}
+            ]
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error generating report: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'error': str(e),
+            'response': 'Sorry, there was an error generating your report. Please try again.'
+        }), 500

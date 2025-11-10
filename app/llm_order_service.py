@@ -35,8 +35,9 @@ class LLMOrderService:
             # Build product mapping dynamically
             product_code_map = {}
             for product in products:
-                code = product.product_code
-                name = product.product_name
+                # Handle both dict (dealer stock) and Product object
+                code = product.get('product_code') if isinstance(product, dict) else str(product.id)
+                name = product.get('product_name') if isinstance(product, dict) else product.product_name
                 if code not in product_code_map:
                     product_code_map[code] = {
                         'name': name,
@@ -57,6 +58,9 @@ class LLMOrderService:
                         bot_msg = msg.get('bot_response', '')
                     conversation_context += f"User: {user_msg}\n"
                     conversation_context += f"Bot: {bot_msg}\n"
+            
+            # Generate dynamic examples from actual products
+            dynamic_examples = self._generate_dynamic_examples(products[:3]) if len(products) >= 3 else ""
             
             extraction_prompt = f"""You are an AI assistant for RB (Powered by Quantum Blue AI) that extracts product orders from user messages.
 
@@ -84,13 +88,13 @@ QUANTITY EXTRACTION (MOST IMPORTANT):
 5. Count the digits: single digit = single digit value, double digit = double digit value
 6. NEVER multiply quantities by 10
 7. NEVER confuse product codes "(001)" with quantities
-8. If you see "- 6 Quantum Processor (001)" in a list, quantity is 6, product code is RB001
+8. Match product codes and names from the available products list provided
 
 REMOVE OPERATIONS (CRITICAL - READ CAREFULLY):
 9. If user message contains words like "remove", "delete", "take out", "subtract" → ONLY extract the product(s) EXPLICITLY mentioned
 10. DO NOT extract products that are NOT mentioned in the remove request
-11. If user says "remove 5 Quantum Sensors" → ONLY extract RB004 with quantity -5 (NOT other products)
-12. If user says "remove 5 Neural Network Module Pro" → ONLY extract RB002 with quantity -5 (NOT other products)
+11. Match products by code or name from the available products list
+12. Extract quantities as negative numbers for remove operations
 13. If user says "remove only X" or "remove just X" → ONLY extract that specific product
 14. NEVER extract multiple products for a single product remove request
 15. ALWAYS set quantity to NEGATIVE for remove operations
@@ -120,62 +124,9 @@ PRODUCT CODE HANDLING:
 - All of these should match to the product code in the database
 - Extract the numeric part and match it to the corresponding product code above
 
-EXTRACTION EXAMPLES - FOLLOW THESE EXACTLY:
+EXTRACTION EXAMPLES - Use actual products from the list above:
 
-Example 1:
-User Message: "Order 6 Quantum Processor (001)"
-CORRECT Extraction: {{"product_code": "RB001", "quantity": 6, ...}}
-WRONG Extraction: {{"product_code": "RB001", "quantity": 60, ...}} ← NEVER DO THIS
-
-Example 2:
-User Message: "Order 10 Neural Network Module Pro (002)"
-CORRECT Extraction: {{"product_code": "RB002", "quantity": 10, ...}}
-WRONG Extraction: {{"product_code": "RB002", "quantity": 25, ...}} ← NEVER DO THIS
-
-Example 3 (Order):
-User Message: "Order the following: - 6 Quantum Processor (001) - 10 Neural Network Module Pro (002)"
-CORRECT Extraction:
-[
-  {{"product_code": "RB001", "quantity": 6, ...}},
-  {{"product_code": "RB002", "quantity": 10, ...}}
-]
-
-Example 4 (Remove - Single Product):
-User Message: "remove 5 Quantum Sensors Advanced"
-CORRECT Extraction:
-[
-  {{"product_code": "RB004", "quantity": -5, ...}}  ← ONLY RB004, NEGATIVE for remove
-]
-WRONG Extraction (DO NOT DO THIS):
-[
-  {{"product_code": "RB001", "quantity": -6, ...}},  ← WRONG - user didn't mention RB001
-  {{"product_code": "RB004", "quantity": -5, ...}}
-]
-
-Example 5 (Remove - Single Product):
-User Message: "remove 5 Neural Network Module Pro"
-CORRECT Extraction:
-[
-  {{"product_code": "RB002", "quantity": -5, ...}}  ← ONLY RB002, NEGATIVE for remove
-]
-WRONG Extraction (DO NOT DO THIS):
-[
-  {{"product_code": "RB001", "quantity": -6, ...}},  ← WRONG - user didn't mention RB001
-  {{"product_code": "RB002", "quantity": -5, ...}}
-]
-
-Example 6 (Remove - User Clarifies):
-User Message: "i have asked you to remove only network module pro"
-CORRECT Extraction:
-[
-  {{"product_code": "RB002", "quantity": -10, ...}}  ← ONLY RB002, all quantity, NEGATIVE
-]
-WRONG Extraction (DO NOT DO THIS):
-[
-  {{"product_code": "RB001", "quantity": -6, ...}},  ← WRONG - user explicitly said "only network module pro"
-  {{"product_code": "RB002", "quantity": -10, ...}},
-  {{"product_code": "RB004", "quantity": -15, ...}}  ← WRONG - user explicitly said "only network module pro"
-]
+{dynamic_examples if dynamic_examples else "Use any products from the available list above."}
 
 CRITICAL REMOVE OPERATION RULES:
 - If user mentions ONE product to remove → Extract ONLY that product
@@ -551,22 +502,19 @@ If the user's message is unclear or doesn't contain specific order details, set 
             # Calculate pricing for all items
             pricing_details = []
             total_amount = 0
-            total_savings = 0
             
             for item in cart_items:
                 pricing = self.pricing_service.calculate_product_pricing(
                     item.product_id, 
-                    item.product_quantity
+                    item.quantity
                 )
                 
                 if 'error' not in pricing:
                     # Log detailed pricing for debugging
-                    self.logger.info(f"Pricing for {pricing['product_code']}: Qty={pricing['quantity']}, Base=${pricing['base_price']}, "
-                                   f"Final Price=${pricing['pricing']['final_price']}, Total Amount=${pricing['pricing']['total_amount']}, "
-                                   f"Scheme={pricing['scheme'].get('name', 'None')}, Free Qty={pricing['scheme'].get('free_quantity', 0)}")
+                    self.logger.info(f"Pricing for {pricing['product_code']}: Qty={pricing['quantity']}, "
+                                   f"Unit Price=${pricing['pricing']['final_price']}, Total Amount=${pricing['pricing']['total_amount']}")
                     pricing_details.append(pricing)
                     total_amount += pricing['pricing']['total_amount']
-                    total_savings += pricing['pricing']['savings']
                 else:
                     # Log error but still try to include item in table with error message
                     self.logger.warning(f"Pricing error for cart item {item.id} (product_id: {item.product_id}): {pricing.get('error', 'Unknown error')}")
@@ -575,17 +523,15 @@ If the user's message is unclear or doesn't contain specific order details, set 
                         'product_id': item.product_id,
                         'product_code': getattr(item.product, 'product_code', 'N/A'),
                         'product_name': getattr(item.product, 'product_name', 'Unknown Product'),
-                        'quantity': item.product_quantity,
+                        'quantity': item.quantity,
                         'base_price': 0,
                         'error': pricing.get('error', 'Pricing error'),
-                        'pricing': {'total_amount': 0, 'savings': 0},
-                        'discount': {'name': 'None', 'amount': 0},
-                        'scheme': {'name': 'None', 'free_quantity': 0, 'paid_quantity': item.product_quantity}
+                        'pricing': {'total_amount': 0, 'final_price': 0}
                     })
             
-            # Format pricing details for LLM in table format with discount and scheme
-            pricing_info = "| Product | Qty | Unit Price | Discount | Scheme | Total |\n"
-            pricing_info += "|---------|-----|------------|----------|--------|-------|\n"
+            # Format pricing details for LLM in simplified table format
+            pricing_info = "| Product | Qty | Unit Price | Total |\n"
+            pricing_info += "|---------|-----|------------|-------|\n"
             
             # Log total items for debugging
             self.logger.info(f"Generating order summary: {len(cart_items)} cart items, {len(pricing_details)} pricing details")
@@ -609,44 +555,27 @@ If the user's message is unclear or doesn't contain specific order details, set 
                 
                 product_display = f"{product_name} ({pricing['product_code']})"
                 
-                # Show actual ordered quantity, then free items separately
-                ordered_qty = pricing['quantity']  # This is the actual quantity user ordered
-                free_q = pricing['scheme'].get('free_quantity', 0)
+                # Simplified display - no discounts/schemes
+                ordered_qty = pricing['quantity']
+                quantity_display = str(ordered_qty)
                 
-                # Display: "6" or "6 + 2 free" format
-                if free_q > 0:
-                    quantity_display = f"{ordered_qty} + {free_q} free"
-                else:
-                    quantity_display = str(ordered_qty)
-                
-                # Discount display
-                discount_amount = pricing['discount'].get('amount', 0)
-                discount_name = pricing['discount'].get('name', 'None') if pricing['discount'].get('name') else 'None'
-                if discount_amount > 0:
-                    discount_display = f"{discount_name} (${discount_amount:.2f})"
-                else:
-                    discount_display = "None"
-                
-                # Scheme display
-                scheme_name = pricing['scheme'].get('name', 'None') if pricing['scheme'].get('name') != "No Scheme" else "None"
-                
-                # Ensure we're using total_amount (not unit price)
+                # Get unit price and total amount
+                unit_price = pricing['pricing'].get('final_price', 0)  # This is the sales_price
                 total_amt = pricing['pricing'].get('total_amount', 0)
-                # Verify calculation: should be final_price * paid_quantity (or quantity for percentage schemes)
-                final_unit_price = pricing['pricing'].get('final_price', 0)
-                paid_qty = pricing['scheme'].get('paid_quantity', ordered_qty)
-                calculated_total = final_unit_price * paid_qty
+                
+                # Verify calculation: should be unit_price * quantity
+                calculated_total = unit_price * ordered_qty
                 
                 # Detailed logging for debugging
-                self.logger.info(f"Table row for {pricing['product_code']}: Qty={ordered_qty}, Base=${pricing['base_price']:.2f}, "
-                               f"Final Unit Price=${final_unit_price:.2f}, Paid Qty={paid_qty}, "
-                               f"Total Amount=${total_amt:.2f}, Calculated Total=${calculated_total:.2f}")
+                self.logger.info(f"Table row for {pricing['product_code']}: Qty={ordered_qty}, "
+                               f"Unit Price=${unit_price:.2f}, Total Amount=${total_amt:.2f}, "
+                               f"Calculated Total=${calculated_total:.2f}")
                 
                 # Log for debugging if mismatch (with tolerance for floating point errors)
-                if abs(total_amt - calculated_total) > 0.02:  # Increased tolerance for rounding differences
+                if abs(total_amt - calculated_total) > 0.02:
                     self.logger.error(f"PRICING ERROR for {pricing['product_code']}: total_amount={total_amt} does NOT match "
-                                    f"calculated (final_price * paid_qty)={calculated_total}. "
-                                    f"Details: final_price={final_unit_price}, paid_qty={paid_qty}, quantity={ordered_qty}")
+                                    f"calculated (unit_price * quantity)={calculated_total}. "
+                                    f"Details: unit_price={unit_price}, quantity={ordered_qty}")
                     # Use calculated total if there's a mismatch
                     total_amt = calculated_total
                 elif abs(total_amt - calculated_total) > 0.01:
@@ -654,7 +583,8 @@ If the user's message is unclear or doesn't contain specific order details, set 
                     self.logger.warning(f"Minor pricing rounding difference for {pricing['product_code']}: "
                                       f"total_amount={total_amt} vs calculated={calculated_total} (diff: {abs(total_amt - calculated_total):.4f})")
                 
-                pricing_info += f"| {product_display} | {quantity_display} | ${pricing['base_price']:.2f} | {discount_display} | {scheme_name} | ${total_amt:.2f} |\n"
+                # Simplified table: Product | Quantity | Unit Price | Total Amount
+                pricing_info += f"| {product_display} | {quantity_display} | ${unit_price:.2f} | ${total_amt:.2f} |\n"
             
             user_context = ""
             if user_info:
@@ -664,10 +594,9 @@ If the user's message is unclear or doesn't contain specific order details, set 
                     user_context = f"""
 User Information:
 - Name: {user_info.name or 'N/A'}
-- Type: {user_info.user_type or 'customer'}
+- Type: {user_info.role or 'customer'}
 - Role: {user_info.role or 'N/A'}
-- Delivery Zone: {user_info.delivery_zone or 'N/A'}
-- Nearest Warehouse: {user_info.nearest_warehouse or 'N/A'}
+- Area: {user_info.area or 'N/A'}
 """
                 else:
                     # It's a dictionary
@@ -676,12 +605,16 @@ User Information:
 - Name: {user_info.get('name', 'N/A')}
 - Type: {user_info.get('user_type', 'customer')}
 - Role: {user_info.get('role', 'N/A')}
-- Delivery Zone: {user_info.get('delivery_zone', 'N/A')}
-- Nearest Warehouse: {user_info.get('nearest_warehouse', 'N/A')}
+- Area: {user_info.get('area', 'N/A')}
 """
             
             # Count how many rows should be in the table
             row_count = len(pricing_details)
+            
+            # Calculate tax (5%) and grand total
+            tax_rate = 0.05  # 5%
+            tax_amount = total_amount * tax_rate
+            grand_total = total_amount + tax_amount
 
             summary_prompt = f"""You are Quantum Blue's AI assistant generating a concise order summary for RB (Powered by Quantum Blue AI).
 
@@ -691,24 +624,27 @@ Order Details Table (THIS TABLE HAS EXACTLY {row_count} ROWS - YOU MUST INCLUDE 
 CRITICAL REQUIREMENTS:
 1. The table above has EXACTLY {row_count} product rows - you MUST include ALL {row_count} rows in your response
 2. Copy the table EXACTLY as shown - DO NOT remove any rows, DO NOT change any values
-3. After the table, add EXACTLY 3 lines (not more, not less) as shown below
+3. After the table, show subtotal, tax, and grand total as shown below
 
 Order Summary Values:
-- Total Amount: ${total_amount:.2f}
-- Total Savings: ${total_savings:.2f}
+- Subtotal: ${total_amount:.2f}
+- Tax (5%): ${tax_amount:.2f}
+- Grand Total: ${grand_total:.2f}
 
 REQUIRED OUTPUT FORMAT (copy this structure EXACTLY):
 ```
 {pricing_info}
-Total: ${total_amount:.2f}
-Savings: ${total_savings:.2f}
+Subtotal: ${total_amount:.2f}
+Tax (5%): ${tax_amount:.2f}
+Grand Total: ${grand_total:.2f}
+
 
 Would you like to add more items, remove items, or confirm your order?
 ```
 
 RULES:
 - Include ALL {row_count} table rows - do NOT skip any
-- After the table, add exactly 3 lines (Total, Savings, Question)
+- After the table, add exactly 2 lines (Total, Question)
 - DO NOT add any other text, explanations, or content
 - DO NOT modify any numbers or values from the table"""
 
@@ -730,7 +666,7 @@ RULES:
             if table_row_count < expected_row_count:
                 self.logger.warning(f"⚠️ Table row count mismatch: Expected {expected_row_count} rows, found {table_row_count} rows in LLM response. Rebuilding table...")
                 # Rebuild the summary with the correct table and exactly 3 lines after
-                summary_text = pricing_info.rstrip() + f"\n\nTotal: ${total_amount:.2f}\nSavings: ${total_savings:.2f}\n\nWould you like to add more items, remove items, or confirm your order?"
+                summary_text = pricing_info.rstrip() + f"\n\nTotal: ${total_amount:.2f}\n\nWould you like to add more items, remove items, or confirm your order?"
                 self.logger.info(f"✓ Rebuilt summary with {expected_row_count} table rows and exactly 3 lines after table")
             else:
                 self.logger.info(f"✓ LLM response contains {table_row_count} table rows (expected {expected_row_count})")
@@ -739,7 +675,6 @@ RULES:
                 'summary': summary_text,
                 'pricing_details': pricing_details,
                 'total_amount': total_amount,
-                'total_savings': total_savings,
                 'item_count': len(pricing_details)
             }
             
@@ -827,11 +762,11 @@ DO NOT use hardcoded templates. Generate a natural, friendly response."""
 Order ID: {order.order_id}
 Order Date: {order.order_date.strftime('%Y-%m-%d %H:%M:%S')}
 Status: {order.status}
-Warehouse: {order.warehouse_location}
+Area: {order.user.area if order.user else 'N/A'}
 
 Placed By:
 - Name: {placed_by_user.name}
-- Type: {placed_by_user.user_type}
+- Type: {placed_by_user.role}
 - Role: {placed_by_user.role or 'N/A'}
 - Email: {placed_by_user.email}
 - Phone: {placed_by_user.phone}
@@ -842,7 +777,7 @@ Order Items:"""
             for item in order_items:
                 order_details += f"""
 - {item.product.product_name} ({item.product_code})
-  Quantity: {item.product_quantity_ordered}
+  Quantity: {item.quantity_ordered}
   Unit Price: ${item.unit_price}
   Total: ${item.total_price}"""
             
@@ -898,13 +833,16 @@ Respond in a clear, professional manner suitable for business communication."""
             else:
                 user = None
             
-            if user and user.nearest_warehouse:
-                warehouse = self.db_service.get_warehouse_by_location(user.nearest_warehouse)
-                if warehouse:
-                    return self.db_service.get_products_by_warehouse(warehouse.id)
+            if user:
+                # For MRs, get products from dealer stock in their area
+                if user.role == 'mr' and user.area:
+                    return self.db_service.get_products_from_dealer_stock(user.area)
+                # For distributors, get their dealer stock
+                elif user.role == 'distributor':
+                    return self.db_service.get_products_from_dealer_stock(user.area)
         
-        # Fallback to all products
-        return Product.query.filter_by(is_active=True).all()
+        # Fallback to all products from Product table
+        return Product.query.all()
     
     def _format_products_for_llm(self, products):
         """Format products for LLM consumption"""
@@ -912,9 +850,21 @@ Respond in a clear, professional manner suitable for business communication."""
         # Group by product_code to avoid duplicates
         seen_codes = set()
         for product in products[:50]:  # Limit to 50 products
-            if product.product_code not in seen_codes:
-                seen_codes.add(product.product_code)
-                products_info += f"- Product Name: \"{product.product_name}\" | Product Code: \"{product.product_code}\" | Price: ${product.price_of_product} | Available Stock: {product.available_for_sale}\n"
+            # Handle both dict (dealer stock) and Product object
+            if isinstance(product, dict):
+                code = product.get('product_code', str(product.get('product_id', '')))
+                name = product.get('product_name', 'Unknown')
+                price = product.get('sales_price', 0)
+                stock = product.get('available_for_sale', 0)
+            else:
+                code = str(product.id)
+                name = product.product_name
+                price = product.price
+                stock = 0  # Product table doesn't have stock info
+            
+            if code not in seen_codes:
+                seen_codes.add(code)
+                products_info += f"- Product Name: \"{name}\" | Product Code: \"{code}\" | Price: ${price} | Available Stock: {stock}\n"
         return products_info
     
     def _generate_product_variations(self, product_name, product_code):
@@ -978,23 +928,21 @@ Respond in a clear, professional manner suitable for business communication."""
             # Build dynamic product mappings from database
             product_mappings = {}
             for product in products:
-                code = product.product_code
+                # Handle both dict (dealer stock) and Product object
+                code = product.get('product_code') if isinstance(product, dict) else str(product.id)
+                name = product.get('product_name') if isinstance(product, dict) else product.product_name
                 if code not in product_mappings:
-                    variations = self._generate_product_variations(product.product_name, code)
+                    variations = self._generate_product_variations(name, code)
+                    code_lower = code.lower()
+                    code_keywords = [code_lower, code.replace('RB', '').lower()] if 'RB' in code else [code_lower]
                     product_mappings[code] = {
-                        'name': product.product_name,
-                        'keywords': variations + [code.lower(), code.replace('RB', '').lower()]
+                        'name': name,
+                        'keywords': variations + code_keywords
                     }
         except Exception as e:
             self.logger.error(f"Error fetching products for fallback extraction: {str(e)}")
-            # Use minimal fallback if database fails
-        product_mappings = {
-                'RB001': {'name': 'Quantum Blue AI Processor', 'keywords': ['quantum processor', 'processors', 'processor', '001']},
-                'RB002': {'name': 'Neural Network Module Pro', 'keywords': ['neural network', 'neural', '002']},
-                'RB003': {'name': 'AI Memory Card Ultra', 'keywords': ['memory card', 'memory', '003']},
-                'RB004': {'name': 'Quantum Sensors Advanced', 'keywords': ['sensors', 'sensor', '004']},
-                'RB005': {'name': 'AI Controller Master', 'keywords': ['controller', 'controllers', '005']}
-            }
+            # If no products found, use empty mappings (will be handled gracefully)
+            product_mappings = {}
         
         # First, try to extract product codes with quantities (e.g., "60 Quantum Processor (001)")
         # Pattern: number + product name + (code) or just code patterns
@@ -1022,9 +970,15 @@ Respond in a clear, professional manner suitable for business communication."""
                     "original_text": match.group(0)
                 })
         
-        # Also try patterns like "- 60 Quantum Processor (001)"
-        bullet_pattern = r'[-•]\s*(\d+)\s+(?:.*?)(?:\((\d{3}|RB\d{3}|RB\d{1,3})\)|(quantum processor|neural network|memory card|sensors|controller|data analyzer|interface hub|security module))'
-        bullet_matches = re.finditer(bullet_pattern, message_lower)
+        # Also try patterns like "- 60 Product Name (001)" using dynamic product mappings
+        if product_mappings:
+            # Build dynamic keyword pattern from all products
+            all_keywords = []
+            for code, info in product_mappings.items():
+                all_keywords.extend(info['keywords'])
+            keywords_pattern = '|'.join([re.escape(kw) for kw in all_keywords[:20]])  # Limit to avoid huge regex
+            bullet_pattern = rf'[-•]\s*(\d+)\s+(?:.*?)(?:\((\d{{3}}|RB\d{{3}}|RB\d{{1,3}})\)|({keywords_pattern}))'
+            bullet_matches = re.finditer(bullet_pattern, message_lower)
         
         for match in bullet_matches:
             quantity = int(match.group(1))
@@ -1063,27 +1017,21 @@ Respond in a clear, professional manner suitable for business communication."""
                         "original_text": match.group(0)
                     })
         
-        # If no products found with code patterns, try name-based matching
-        if not cart_items:
-            quantity_patterns = [
-                (r'(\d+)\s+(?:quantum\s+blue\s+ai\s+)?processors?', 'RB001'),
-                (r'(\d+)\s+(?:neural\s+network\s+module\s+pro|neural\s+networks?|neural\s+modules?)', 'RB002'),
-                (r'(\d+)\s+(?:ai\s+memory\s+card\s+ultra|memory\s+cards?|ai\s+memory)', 'RB003'),
-                (r'(\d+)\s+(?:quantum\s+sensors\s+advanced|sensors?)', 'RB004'),
-                (r'(\d+)\s+(?:ai\s+controller\s+master|controllers?|ai\s+controllers?)', 'RB005'),
-                (r'(\d+)\s+(?:quantum\s+blue\s+data\s+analyzer|data\s+analyzers?|analyzers?)', 'RB006'),
-                (r'(\d+)\s+(?:neural\s+interface\s+hub|interface\s+hubs?|neural\s+hubs?)', 'RB007'),
-                (r'(\d+)\s+(?:quantum\s+blue\s+security\s+module|security\s+modules?|security)', 'RB008')
-            ]
-            
-            for pattern, code in quantity_patterns:
+        # If no products found with code patterns, try name-based matching using dynamic product mappings
+        if not cart_items and product_mappings:
+            # Build regex patterns dynamically from product mappings
+            for code, product_info in product_mappings.items():
+                # Create pattern from product name variations
+                name_variations = '|'.join([re.escape(kw) for kw in product_info['keywords']])
+                pattern = rf'(\d+)\s+(?:{name_variations})'
                 matches = re.finditer(pattern, message_lower)
                 for match in matches:
                     quantity = int(match.group(1))
-                    if code in product_mappings:
+                    # Check if already added
+                    if not any(item['product_code'] == code for item in cart_items):
                         cart_items.append({
                             "product_code": code,
-                            "product_name": product_mappings[code]['name'],
+                            "product_name": product_info['name'],
                             "quantity": quantity,
                             "confidence": 0.8,
                             "original_text": match.group(0)
@@ -1104,57 +1052,42 @@ Respond in a clear, professional manner suitable for business communication."""
                 'summary': "Your cart is empty. Would you like to add some products?",
                 'pricing_details': [],
                 'total_amount': 0,
-                'total_savings': 0,
+
                 'item_count': 0
             }
         
         summary = "Order Summary:\n\n"
-        summary += "| Product | Qty | Unit Price | Discount | Scheme | Total |\n"
-        summary += "|---------|-----|------------|----------|--------|-------|\n"
+        summary += "| Product | Qty | Unit Price | Total |\n"
+        summary += "|---------|-----|------------|-------|\n"
         
         total_amount = 0
-        total_savings = 0
         
         for item in cart_items:
             # Recalculate pricing for accurate totals
-            pricing = self.pricing_service.calculate_product_pricing(item.product_id, item.product_quantity)
+            pricing = self.pricing_service.calculate_product_pricing(item.product_id, item.quantity)
             
             if 'error' not in pricing:
                 item_total = pricing['pricing']['total_amount']
-                item_savings = pricing['pricing']['savings']
                 total_amount += item_total
-                total_savings += item_savings
                 
                 # Truncate long product names
                 product_name = pricing['product_name']
                 if len(product_name) > 20:
                     product_name = product_name[:17] + "..."
                 
-                # Format quantity with free items
-                ordered_qty = pricing['quantity']
-                free_q = pricing['scheme'].get('free_quantity', 0)
-                quantity_display = f"{ordered_qty} + {free_q} free" if free_q > 0 else str(ordered_qty)
+                # Get unit price
+                unit_price = pricing['pricing'].get('final_price', 0)
+                quantity_display = str(pricing['quantity'])
                 
-                # Discount display
-                discount_amount = pricing['discount'].get('amount', 0)
-                discount_name = pricing['discount'].get('name', 'None') if pricing['discount'].get('name') else 'None'
-                discount_display = f"{discount_name} (${discount_amount:.2f})" if discount_amount > 0 else "None"
-                
-                # Scheme display
-                scheme_name = pricing['scheme'].get('name', 'None') if pricing['scheme'].get('name') != "No Scheme" else "None"
-                
-                summary += f"| {product_name} ({pricing['product_code']}) | {quantity_display} | ${pricing['base_price']:.2f} | {discount_display} | {scheme_name} | ${item_total:.2f} |\n"
+                summary += f"| {product_name} ({pricing['product_code']}) | {quantity_display} | ${unit_price:.2f} | ${item_total:.2f} |\n"
         
         summary += f"\nTotal: ${total_amount:.2f}\n"
-        if total_savings > 0:
-            summary += f"Savings: ${total_savings:.2f}\n"
         summary += f"\nWould you like to add more items, remove items, or confirm your order?"
         
         return {
             'summary': summary,
             'pricing_details': [],
             'total_amount': total_amount,
-            'total_savings': 0,
             'item_count': len(cart_items)
         }
     
@@ -1165,9 +1098,9 @@ Respond in a clear, professional manner suitable for business communication."""
 Order ID: {order.order_id}
 Date: {order.order_date.strftime('%Y-%m-%d %H:%M:%S')}
 Status: {order.status}
-Warehouse: {order.warehouse_location}
+Area: {order.user.area if order.user else 'N/A'}
 
-Placed By: {placed_by_user.name} ({placed_by_user.user_type})
+Placed By: {placed_by_user.name} ({placed_by_user.role})
 Email: {placed_by_user.email}
 Phone: {placed_by_user.phone}
 
@@ -1175,7 +1108,7 @@ Order Items:
 """
         
         for item in order_items:
-            notification += f"- {item.product.product_name} ({item.product_code}) - Qty: {item.product_quantity_ordered} - ${item.total_price}\n"
+            notification += f"- {item.product.product_name} ({item.product_code}) - Qty: {item.quantity_ordered} - ${item.total_price}\n"
         
         notification += f"\nTotal Amount: ${order.total_amount}\n\nPlease review and confirm this order."
         
@@ -1183,3 +1116,61 @@ Order Items:
             'notification': notification,
             'order_details': f"Order {order.order_id} - ${order.total_amount}"
         }
+    
+    def _generate_dynamic_examples(self, products):
+        """Generate dynamic extraction examples from actual products"""
+        if not products or len(products) < 2:
+            return "Use any products from the available list above."
+        
+        examples = []
+        
+        # Helper to get product code and name from dict or object
+        def get_product_info(p):
+            if isinstance(p, dict):
+                code = p.get('product_code', str(p.get('product_id', '')))
+                name = p.get('product_name', 'Unknown')
+            else:
+                code = str(p.id)
+                name = p.product_name
+            return code, name
+        
+        # Example 1: Single product order
+        if len(products) >= 1:
+            p1_code, p1_name = get_product_info(products[0])
+            code_short = p1_code.replace('RB', '') if 'RB' in p1_code else p1_code[-3:]
+            examples.append(f"""Example 1:
+User Message: "Order 6 {p1_name} ({code_short})"
+CORRECT Extraction: {{"product_code": "{p1_code}", "quantity": 6, ...}}
+WRONG Extraction: {{"product_code": "{p1_code}", "quantity": 60, ...}} ← NEVER DO THIS""")
+        
+        # Example 2: Multiple products order
+        if len(products) >= 2:
+            p1_code, p1_name = get_product_info(products[0])
+            p2_code, p2_name = get_product_info(products[1])
+            code1_short = p1_code.replace('RB', '') if 'RB' in p1_code else p1_code[-3:]
+            code2_short = p2_code.replace('RB', '') if 'RB' in p2_code else p2_code[-3:]
+            examples.append(f"""Example 2:
+User Message: "Order the following: - 6 {p1_name} ({code1_short}) - 10 {p2_name} ({code2_short})"
+CORRECT Extraction:
+[
+  {{"product_code": "{p1_code}", "quantity": 6, ...}},
+  {{"product_code": "{p2_code}", "quantity": 10, ...}}
+]""")
+        
+        # Example 3: Remove operation
+        if len(products) >= 1:
+            p1_code, p1_name = get_product_info(products[0])
+            p2_code = get_product_info(products[1])[0] if len(products) > 1 else 'RBXXX'
+            examples.append(f"""Example 3 (Remove - Single Product):
+User Message: "remove 5 {p1_name}"
+CORRECT Extraction:
+[
+  {{"product_code": "{p1_code}", "quantity": -5, ...}}  ← ONLY this product, NEGATIVE for remove
+]
+WRONG Extraction (DO NOT DO THIS):
+[
+  {{"product_code": "{p2_code}", "quantity": -5, ...}},  ← WRONG - user didn't mention this product
+  {{"product_code": "{p1_code}", "quantity": -5, ...}}
+]""")
+        
+        return "\n\n".join(examples)

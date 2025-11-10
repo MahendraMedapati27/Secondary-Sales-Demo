@@ -13,10 +13,16 @@ let scene, camera, renderer, controls;
 let avatarObject = null;
 let avatarBones = {};
 let avatarSkeleton = null;
+let originalArmRotations = { rightArm: null, leftArm: null }; // Store original T-pose rotations
 let isAnimating = false;
 let avatarLoaded = false;
 let baseScaleY = 1.0;
 let mixer = null;
+
+// Background scene variables
+let backgroundScene, backgroundCamera, backgroundRenderer, backgroundControls;
+let backgroundObject = null;
+let backgroundSpherical = null; // Global variable for background camera spherical coordinates
 
 // Human-like behavior variables
 let mousePosition = { x: 0, y: 0 };
@@ -55,10 +61,10 @@ function initThreeScene() {
     
     console.log('[NATURAL-AVATAR] Container dimensions:', { width, height });
     
-    // Create camera
+    // Create camera - lower and slightly zoomed out
     camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 1000);
-    camera.position.set(0, 1, 4);
-    camera.lookAt(0, 1, 0);
+    camera.position.set(0, 0.8, 3.5); // Lower Y (0.8) and slightly zoomed out Z (3.5 instead of 3)
+    camera.lookAt(0, 0.5, 0); // Look at lower point
     
     // Create renderer
     renderer = new THREE.WebGLRenderer({ 
@@ -71,6 +77,12 @@ function initThreeScene() {
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     
+    // FIX COLOR ISSUES: Proper tone mapping with MAXIMUM exposure
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;  // Cinematic tone mapping
+    renderer.toneMappingExposure = 1.6;  // MAXIMUM exposure for brightness
+    renderer.outputEncoding = THREE.sRGBEncoding;  // Correct color space
+    console.log('[NATURAL-AVATAR] ✅ Renderer configured: ACESFilmic, exposure=1.6 (MAXIMUM BRIGHT)');
+    
     // Add renderer to container
     const canvasContainer = document.getElementById('three-canvas-container');
     if (canvasContainer) {
@@ -81,37 +93,43 @@ function initThreeScene() {
         return false;
     }
     
-    // Enhanced lighting
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+    // Enhanced lighting - MAXIMUM BRIGHTNESS
+    const ambientLight = new THREE.AmbientLight(0xffffff, 1.0);  // MAXIMUM ambient
     scene.add(ambientLight);
     
-    const keyLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    const keyLight = new THREE.DirectionalLight(0xffffff, 1.2);  // MAXIMUM key light
     keyLight.position.set(5, 8, 5);
     keyLight.castShadow = true;
     scene.add(keyLight);
     
-    const fillLight = new THREE.DirectionalLight(0xb3d9ff, 0.4);
+    const fillLight = new THREE.DirectionalLight(0xb3d9ff, 0.6);  // Increased fill
     fillLight.position.set(-5, 3, -5);
     scene.add(fillLight);
     
-    const rimLight = new THREE.DirectionalLight(0xffffff, 0.3);
+    const rimLight = new THREE.DirectionalLight(0xffffff, 0.5);  // Increased rim
     rimLight.position.set(0, 5, -10);
     scene.add(rimLight);
     
+    console.log('[NATURAL-AVATAR] ✅ Lighting configured (total intensity: 3.3 - MAXIMUM BRIGHT)');
+    
     // Enable orbit controls for zoom and rotation
     controls = new OrbitControls(camera, renderer.domElement);
-    controls.enabled = true;
+    controls.enabled = false; // Initially disabled, will be enabled when mouse enters avatar section
     controls.enableDamping = true;
     controls.dampingFactor = 0.05;
     controls.minDistance = 2;
     controls.maxDistance = 8;
-    controls.target.set(0, 1, 0); // Look at avatar center
+    controls.target.set(0, 0.5, 0); // Look at lower point (avatar center on floor)
     controls.update();
     
     // Track dragging state for head rotation
     controls.addEventListener('start', () => {
         isDragging = true;
         renderer.domElement.style.cursor = 'grabbing';
+        // Disable background controls when avatar is being dragged
+        if (backgroundControls) {
+            backgroundControls.enabled = false;
+        }
     });
     
     controls.addEventListener('end', () => {
@@ -121,8 +139,389 @@ function initThreeScene() {
     
     renderer.domElement.style.cursor = 'grab';
     
+    // Enable avatar controls only when mouse is over the actual avatar body
+    // Use mousemove to check if mouse is over avatar using raycasting
+    const avatarCanvasElement = renderer.domElement;
+    let isOverAvatarBody = false;
+    
+    avatarCanvasElement.addEventListener('mousemove', (e) => {
+        const rect = avatarCanvasElement.getBoundingClientRect();
+        const x = e.clientX;
+        const y = e.clientY;
+        
+        // Check if mouse is over avatar body using raycasting
+        const wasOverAvatar = isOverAvatarBody;
+        isOverAvatarBody = getIsOverAvatarBody(x, y);
+        
+        if (isOverAvatarBody && !wasOverAvatar) {
+            // Mouse entered avatar body
+            controls.enabled = true;
+            if (backgroundControls) {
+                backgroundControls.enabled = false;
+            }
+        } else if (!isOverAvatarBody && wasOverAvatar) {
+            // Mouse left avatar body
+            controls.enabled = false;
+            if (backgroundControls) {
+                backgroundControls.enabled = true;
+            }
+        }
+    });
+    
+    // Helper function to check if mouse is over avatar body (using raycasting)
+    const getIsOverAvatarBody = (x, y) => {
+        if (!avatarObject || !renderer || !camera || !scene) return false;
+        
+        const rect = avatarCanvasElement.getBoundingClientRect();
+        if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) {
+            return false;
+        }
+        
+        const mouse = new THREE.Vector2();
+        mouse.x = ((x - rect.left) / rect.width) * 2 - 1;
+        mouse.y = -((y - rect.top) / rect.height) * 2 + 1;
+        
+        const raycaster = new THREE.Raycaster();
+        raycaster.setFromCamera(mouse, camera);
+        const intersects = raycaster.intersectObject(avatarObject, true);
+        
+        return intersects.length > 0;
+    };
+    
+    // Also handle mouse leave from canvas
+    avatarCanvasElement.addEventListener('mouseleave', () => {
+        isOverAvatarBody = false;
+        controls.enabled = false;
+        if (backgroundControls) {
+            backgroundControls.enabled = true;
+        }
+    });
+    
     console.log('[NATURAL-AVATAR] ✅ Scene initialized');
     return true;
+}
+
+// Initialize background scene for office
+function initBackgroundScene() {
+    console.log('[NATURAL-AVATAR] Creating background scene...');
+    
+    const backgroundContainer = document.getElementById('background-canvas-container');
+    if (!backgroundContainer) {
+        console.warn('[NATURAL-AVATAR] ⚠️ Background container not found');
+        return false;
+    }
+    
+    // Create background scene
+    backgroundScene = new THREE.Scene();
+    backgroundScene.background = null;
+    
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+    
+    // Create background camera (wider FOV to cover entire viewport)
+    backgroundCamera = new THREE.PerspectiveCamera(60, width / height, 0.1, 1000);
+    backgroundCamera.position.set(0, 1, 5);
+    backgroundCamera.lookAt(0, 1, 0);
+    
+    // Create background renderer
+    backgroundRenderer = new THREE.WebGLRenderer({ 
+        alpha: true, 
+        antialias: true,
+        powerPreference: "high-performance"
+    });
+    backgroundRenderer.setSize(width, height);
+    backgroundRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    
+    // Add renderer to background container
+    backgroundContainer.appendChild(backgroundRenderer.domElement);
+    
+    // Add lighting to background scene
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
+    backgroundScene.add(ambientLight);
+    
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.6);
+    directionalLight.position.set(5, 10, 5);
+    backgroundScene.add(directionalLight);
+    
+    // Create a transparent overlay for background controls - positioned above everything
+    const backgroundControlElement = document.createElement('div');
+    backgroundControlElement.id = 'background-control-overlay';
+    backgroundControlElement.style.cssText = `
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        z-index: 999;
+        pointer-events: none;
+        background: transparent;
+    `;
+    document.body.appendChild(backgroundControlElement);
+    
+    // Enable orbit controls for background - attach to the dummy element
+    backgroundControls = new OrbitControls(backgroundCamera, backgroundControlElement);
+    backgroundControls.enabled = false; // Will be manually controlled
+    backgroundControls.enableDamping = true;
+    backgroundControls.dampingFactor = 0.05;
+    backgroundControls.minDistance = 3;
+    backgroundControls.maxDistance = 20;
+    backgroundControls.target.set(0, 1, 0);
+    backgroundControls.update();
+    
+    // Enable pointer events on background canvas (for rendering only)
+    backgroundRenderer.domElement.style.pointerEvents = 'none';
+    
+    // Manual mouse event handling for background controls
+    let isBackgroundDragging = false;
+    let lastMouseX = 0;
+    let lastMouseY = 0;
+    let backgroundMouseDown = false;
+    let backgroundMouseStartX = 0;
+    let backgroundMouseStartY = 0;
+    
+    // Initialize spherical coordinates from initial camera position (use global variable)
+    backgroundSpherical = new THREE.Spherical();
+    const initialOffset = new THREE.Vector3().subVectors(backgroundCamera.position, backgroundControls.target);
+    backgroundSpherical.setFromVector3(initialOffset);
+    
+    // Use raycasting to detect if mouse is over the actual avatar 3D object
+    const getIsOverAvatar = (x, y) => {
+        if (!avatarObject || !renderer || !camera || !scene) return false;
+        
+        // Get the avatar canvas element
+        const avatarCanvas = renderer.domElement;
+        const rect = avatarCanvas.getBoundingClientRect();
+        
+        // Check if mouse is within the avatar canvas bounds
+        if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) {
+            return false;
+        }
+        
+        // Convert mouse position to normalized device coordinates
+        const mouse = new THREE.Vector2();
+        mouse.x = ((x - rect.left) / rect.width) * 2 - 1;
+        mouse.y = -((y - rect.top) / rect.height) * 2 + 1;
+        
+        // Perform raycasting
+        const raycaster = new THREE.Raycaster();
+        raycaster.setFromCamera(mouse, camera);
+        
+        // Check intersection with avatar object
+        const intersects = raycaster.intersectObject(avatarObject, true);
+        
+        // Return true if ray hits the avatar
+        return intersects.length > 0;
+    };
+    
+    const getIsOverInteractiveChatElement = (x, y) => {
+        // Check if mouse is over interactive chat elements (buttons, inputs, etc.)
+        const element = document.elementFromPoint(x, y);
+        if (!element) return false;
+        
+        // Check if it's a scrollable element (chat messages area)
+        const chatMessages = element.closest('.chat-messages');
+        if (chatMessages) {
+            // Check if the element is scrollable and has scroll content
+            const hasScroll = chatMessages.scrollHeight > chatMessages.clientHeight;
+            if (hasScroll) {
+                // Check if mouse is over the scrollbar or scrollable content
+                const rect = chatMessages.getBoundingClientRect();
+                const scrollbarWidth = chatMessages.offsetWidth - chatMessages.clientWidth;
+                const isOverScrollbar = x > rect.right - scrollbarWidth - 10; // 10px tolerance
+                
+                // If over scrollable content (not scrollbar), allow scrolling
+                if (!isOverScrollbar) {
+                    return true; // Block background zoom when scrolling chat
+                }
+            }
+        }
+        
+        // Only block if it's actually an interactive element that needs clicking
+        const interactiveSelectors = [
+            'input', 'button', 'textarea', 'select', 'a',
+            '.btn', '.form-control', '[onclick]', '[role="button"]',
+            '.chat-messages', '.message-bubble'
+        ];
+        
+        // Check if element or its parent is interactive
+        let current = element;
+        while (current && current !== document.body) {
+            for (const selector of interactiveSelectors) {
+                if (current.matches && current.matches(selector)) {
+                    return true;
+                }
+            }
+            // Check if it has click handlers
+            if (current.onclick || current.getAttribute('onclick')) {
+                return true;
+            }
+            current = current.parentElement;
+        }
+        
+        return false;
+    };
+    
+    // Background is now static - disable all movement controls
+    // Manual camera control for background - DISABLED (background is static)
+    document.addEventListener('mousedown', (e) => {
+        // Background is static, so we don't handle background dragging anymore
+        // Only check for avatar or chat interactions
+        if (getIsOverAvatar(e.clientX, e.clientY)) {
+            return; // Let avatar handle it
+        }
+        
+        if (getIsOverInteractiveChatElement(e.clientX, e.clientY)) {
+            return; // Let chat handle it
+        }
+        
+        // Background is static - no dragging
+    });
+    
+    document.addEventListener('mousemove', (e) => {
+        // Background is static - no dragging
+        // Only update cursor based on position
+        if (getIsOverAvatar(e.clientX, e.clientY)) {
+            document.body.style.cursor = '';
+            return;
+        }
+        
+        if (getIsOverInteractiveChatElement(e.clientX, e.clientY)) {
+            document.body.style.cursor = '';
+            return;
+        }
+        
+        const element = document.elementFromPoint(e.clientX, e.clientY);
+        if (element) {
+            const chatSection = element.closest('.chat-section');
+            const avatarSection = element.closest('.avatar-section');
+            
+            if (chatSection || avatarSection) {
+                document.body.style.cursor = '';
+                return;
+            }
+        }
+        
+        // Over empty space - default cursor (background is static)
+        document.body.style.cursor = '';
+    });
+    
+    document.addEventListener('mouseup', (e) => {
+        // Background is static - no dragging to stop
+        // Just update cursor
+        if (getIsOverAvatar(e.clientX, e.clientY)) {
+            document.body.style.cursor = '';
+        } else if (getIsOverInteractiveChatElement(e.clientX, e.clientY)) {
+            document.body.style.cursor = '';
+        } else {
+            document.body.style.cursor = '';
+        }
+    });
+    
+    // Handle wheel for zooming - DISABLED (background is static)
+    document.addEventListener('wheel', (e) => {
+        // Background is static - no zooming
+        // Only check if over avatar for avatar zoom
+        if (getIsOverAvatar(e.clientX, e.clientY)) {
+            return; // Let avatar handle it
+        }
+        
+        // Check if over chat interface - allow scrolling
+        const element = document.elementFromPoint(e.clientX, e.clientY);
+        if (element) {
+            const chatSection = element.closest('.chat-section');
+            const chatMessages = element.closest('.chat-messages');
+            
+            if (chatSection || chatMessages) {
+                if (chatMessages) {
+                    const hasScroll = chatMessages.scrollHeight > chatMessages.clientHeight;
+                    if (hasScroll) {
+                        // Allow scrolling in chat
+                        return;
+                    }
+                }
+                return;
+            }
+        }
+        
+        // Background is static - do nothing
+    });
+    
+    
+    console.log('[NATURAL-AVATAR] ✅ Background scene initialized with controls');
+    return true;
+}
+
+// Load office background
+function loadOfficeBackground() {
+    console.log('[NATURAL-AVATAR] Loading office background...');
+    
+    // Initialize background scene if not already done
+    if (!backgroundScene) {
+        if (!initBackgroundScene()) {
+            console.warn('[NATURAL-AVATAR] ⚠️ Could not initialize background scene');
+            return;
+        }
+    }
+    
+    const loader = new GLTFLoader();
+    const backgroundPath = '/static/avatars/modern_office.glb';
+    
+    loader.load(
+        backgroundPath,
+        function (gltf) {
+            console.log('[NATURAL-AVATAR] ✅ Office background loaded successfully!');
+            
+            backgroundObject = gltf.scene;
+            
+            // Scale and position the background appropriately
+            const box = new THREE.Box3().setFromObject(backgroundObject);
+            const center = box.getCenter(new THREE.Vector3());
+            const size = box.getSize(new THREE.Vector3());
+            
+            // Scale to fit nicely in the background
+            const maxDim = Math.max(size.x, size.y, size.z);
+            const scale = 15 / maxDim; // Adjust scale as needed
+            backgroundObject.scale.multiplyScalar(scale);
+            
+            // Position the background - center it and rotate to face forward
+            backgroundObject.position.x = -center.x * scale;
+            backgroundObject.position.y = -center.y * scale;
+            backgroundObject.position.z = -center.z * scale - 3; // Move back
+            
+            // Rotate background 270 degrees in XZ plane (around Y-axis) - 90 + 90 + 90
+            backgroundObject.rotation.y = (3 * Math.PI) / 2; // 270 degrees in radians
+            
+            // Add to background scene
+            backgroundScene.add(backgroundObject);
+            
+            // Position camera to view the background correctly - lower and zoomed out more
+            backgroundCamera.position.set(0, 0.8, 7); // Lower Y (0.8) and zoomed out more Z (7 instead of 5.5)
+            backgroundCamera.lookAt(0, 0.5, 0); // Look at lower point
+            backgroundControls.target.set(0, 0.5, 0); // Target lower point
+            backgroundControls.update();
+            
+            // Update spherical coordinates (only if backgroundSpherical is initialized)
+            if (backgroundSpherical) {
+                const initialOffset = new THREE.Vector3().subVectors(backgroundCamera.position, backgroundControls.target);
+                backgroundSpherical.setFromVector3(initialOffset);
+            }
+            
+            console.log('[NATURAL-AVATAR] Office background positioned');
+            
+            // Start rendering background
+            if (!isAnimating) {
+                animate();
+            }
+        },
+        function (xhr) {
+            const progress = (xhr.loaded / xhr.total) * 100;
+            console.log('[NATURAL-AVATAR] Loading office background...', progress.toFixed(0) + '%');
+        },
+        function (error) {
+            console.warn('[NATURAL-AVATAR] ⚠️ Could not load office background:', error);
+            // Don't show error to user, just continue without background
+        }
+    );
 }
 
 // Load GLTF avatar
@@ -140,8 +539,44 @@ function loadAvatar() {
             avatarObject = gltf.scene;
             scene.add(avatarObject);
             
-            // Check for skeleton
+            // FIX MATERIALS: Prevent bright white artifacts
             avatarObject.traverse((child) => {
+                if (child.isMesh) {
+                    console.log('[NATURAL-AVATAR] Processing material for:', child.name);
+                    
+                    // Fix material properties to prevent overexposure
+                    if (child.material) {
+                        // Handle array of materials
+                        const materials = Array.isArray(child.material) ? child.material : [child.material];
+                        
+                        materials.forEach(mat => {
+                            // Reset emissive to prevent glow/brightness
+                            if (mat.emissive) {
+                                mat.emissive.setHex(0x000000);
+                                mat.emissiveIntensity = 0;
+                            }
+                            
+                            // Normalize roughness and metalness
+                            if (mat.roughness !== undefined) mat.roughness = Math.min(mat.roughness, 0.9);
+                            if (mat.metalness !== undefined) mat.metalness = Math.min(mat.metalness, 0.1);
+                            
+                            // Ensure proper color rendering
+                            if (mat.color) {
+                                // Clamp color values to prevent overexposure
+                                mat.color.r = Math.min(mat.color.r, 1.0);
+                                mat.color.g = Math.min(mat.color.g, 1.0);
+                                mat.color.b = Math.min(mat.color.b, 1.0);
+                            }
+                            
+                            // Force material update
+                            mat.needsUpdate = true;
+                        });
+                        
+                        console.log('[NATURAL-AVATAR] ✅ Fixed material for:', child.name);
+                    }
+                }
+                
+                // Check for skeleton
                 if (child.isSkinnedMesh) {
                     console.log('[NATURAL-AVATAR] Found SkinnedMesh:', child.name);
                     if (child.skeleton && !avatarSkeleton) {
@@ -151,12 +586,12 @@ function loadAvatar() {
                 }
             });
             
-            // Setup animation mixer - but DON'T play any animations (they override our bone rotations)
+            // Setup animation mixer - COMPLETELY DISABLED
             if (gltf.animations && gltf.animations.length > 0) {
-                mixer = new THREE.AnimationMixer(avatarObject);
-                console.log('[NATURAL-AVATAR] Found', gltf.animations.length, 'animations - NOT playing them (they override bone rotations)');
-                // DO NOT play animations - they will override our manual bone rotations
+                console.log('[NATURAL-AVATAR] Found', gltf.animations.length, 'animations - COMPLETELY DISABLED');
+                gltf.animations = []; // Clear all animations
             }
+            mixer = null; // Ensure no mixer
             
             // Find bones
             findAvatarBones(avatarObject);
@@ -175,8 +610,10 @@ function loadAvatar() {
             
             baseScaleY = avatarObject.scale.y;
             
+            // Calculate floor level (minimum Y of bounding box after scaling)
+            const floorLevel = box.min.y * scale;
             avatarObject.position.x = -center.x * scale;
-            avatarObject.position.y = -center.y * scale;
+            avatarObject.position.y = -floorLevel; // Stand on floor (Y=0)
             avatarObject.position.z = -center.z * scale;
             
             // Face forward
@@ -226,108 +663,146 @@ function loadAvatar() {
 
 // Set natural standing pose - arms down
 function setNaturalStandingPose() {
-    console.log('[NATURAL-AVATAR] Setting natural standing pose...');
+    console.log('[T-POSE-FIX] 🎯 Applying VRM A-SHAPE POSE (Official VRM Pose Data)...');
     
-    // Arms fully down at sides
-    // IMPORTANT: Get bones directly from skeleton to ensure we're modifying the actual bones
-    let rightArmBone = avatarBones.rightArm;
-    let leftArmBone = avatarBones.leftArm;
-    
-    // Re-assign from skeleton if available to ensure exact reference
-    if (avatarSkeleton && rightArmBone) {
-        const skeletonBone = avatarSkeleton.bones.find(b => b.name === rightArmBone.name);
-        if (skeletonBone) {
-            rightArmBone = skeletonBone;
-            avatarBones.rightArm = skeletonBone;
-            console.log('[NATURAL-AVATAR] Using skeleton bone for right arm:', skeletonBone.name);
-        }
-    }
-    if (avatarSkeleton && leftArmBone) {
-        const skeletonBone = avatarSkeleton.bones.find(b => b.name === leftArmBone.name);
-        if (skeletonBone) {
-            leftArmBone = skeletonBone;
-            avatarBones.leftArm = skeletonBone;
-            console.log('[NATURAL-AVATAR] Using skeleton bone for left arm:', skeletonBone.name);
-        }
-    }
-    
-    if (rightArmBone) {
-        const initialRot = {
-            x: rightArmBone.rotation.x,
-            y: rightArmBone.rotation.y,
-            z: rightArmBone.rotation.z
-        };
-        console.log('[NATURAL-AVATAR] Right arm INITIAL rotation:', initialRot);
-        
-        // Natural standing pose: arms hanging down naturally (not T-pose)
-        // Position arms to hang straight down at the sides like a standing human
-        rightArmBone.rotation.order = 'XYZ';
-        rightArmBone.rotation.x = 0; // Arms straight down (no forward rotation)
-        rightArmBone.rotation.y = 0; // Arms straight at sides (no outward angle)
-        rightArmBone.rotation.z = 0;
-        
-        // IMPORTANT: Disable auto-update to prevent overrides, then manually update
-        rightArmBone.matrixAutoUpdate = true;
-        
-        // Update quaternion and matrix
-        const euler = new THREE.Euler(0, 0, 0, 'XYZ');
-        rightArmBone.quaternion.setFromEuler(euler);
-        rightArmBone.updateMatrix();
-        rightArmBone.updateMatrixWorld(true); // Update world matrix recursively
-        
-        console.log('[NATURAL-AVATAR] Right arm rotation APPLIED:', {
-            x: rightArmBone.rotation.x.toFixed(3),
-            y: rightArmBone.rotation.y.toFixed(3),
-            z: rightArmBone.rotation.z.toFixed(3),
-            matrixWorld_set: !!rightArmBone.matrixWorld
+    // CRITICAL: List ALL bones to find the exact arm bone names
+    if (avatarSkeleton) {
+        console.log('[T-POSE-FIX] 📋 ALL SKELETON BONES:');
+        avatarSkeleton.bones.forEach((bone, index) => {
+            const isArmBone = bone.name.toLowerCase().includes('arm') || 
+                              bone.name.toLowerCase().includes('shoulder') ||
+                              bone.name.toLowerCase().includes('clavicle');
+            if (isArmBone) {
+                console.log(`[T-POSE-FIX]   ${index}: ${bone.name} ⭐ (ARM-RELATED)`);
+            }
         });
     }
     
-    if (leftArmBone) {
-        const initialRot = {
-            x: leftArmBone.rotation.x,
-            y: leftArmBone.rotation.y,
-            z: leftArmBone.rotation.z
-        };
-        console.log('[NATURAL-AVATAR] Left arm INITIAL rotation:', initialRot);
-        
-        // Natural standing pose: arms hanging down naturally (not T-pose)
-        leftArmBone.rotation.order = 'XYZ';
-        leftArmBone.rotation.x = 0; // Arms straight down (no forward rotation)
-        leftArmBone.rotation.y = 0; // Arms straight at sides (no outward angle)
-        leftArmBone.rotation.z = 0;
-        
-        leftArmBone.matrixAutoUpdate = true;
-        
-        // Update quaternion and matrix
-        const euler = new THREE.Euler(0, 0, 0, 'XYZ');
-        leftArmBone.quaternion.setFromEuler(euler);
-        leftArmBone.updateMatrix();
-        leftArmBone.updateMatrixWorld(true); // Update world matrix recursively
-        
-        console.log('[NATURAL-AVATAR] Left arm rotation APPLIED:', {
-            x: leftArmBone.rotation.x.toFixed(3),
-            y: leftArmBone.rotation.y.toFixed(3),
-            z: leftArmBone.rotation.z.toFixed(3),
-            matrixWorld_set: !!leftArmBone.matrixWorld
+    // STRATEGY: Use exact VRM A-shape pose quaternions from official VRM pose library
+    // This is the standard "arms down" pose for VRM avatars
+    
+    if (avatarBones.rightArm) {
+        console.log('[T-POSE-FIX] 🔍 Right arm bone name:', avatarBones.rightArm.name);
+        console.log('[T-POSE-FIX] Right arm BEFORE:', {
+            x: avatarBones.rightArm.rotation.x.toFixed(3),
+            y: avatarBones.rightArm.rotation.y.toFixed(3),
+            z: avatarBones.rightArm.rotation.z.toFixed(3)
         });
+        
+        // Store original for reference
+        originalArmRotations.rightArm = avatarBones.rightArm.rotation.x;
+        
+        // VRM A-SHAPE POSE: Use exact quaternion from VRM A-shape pose data
+        // rightUpperArm: [x, y, z, w] = [0, 0, -0.4235327838350045, 0.905880776381181]
+        const quatRight = new THREE.Quaternion(
+            0,                      // x
+            0,                      // y
+            -0.4235327838350045,    // z (negative for right arm)
+            0.905880776381181       // w
+        );
+        avatarBones.rightArm.quaternion.copy(quatRight);
+        
+        // Force update
+        avatarBones.rightArm.updateMatrix();
+        avatarBones.rightArm.updateMatrixWorld(true);
+        
+        // CRITICAL: Force skeleton update immediately
+        updateSkeleton();
+        
+        console.log('[T-POSE-FIX] Right arm AFTER (VRM A-shape quaternion):', {
+            x: avatarBones.rightArm.rotation.x.toFixed(3),
+            y: avatarBones.rightArm.rotation.y.toFixed(3),
+            z: avatarBones.rightArm.rotation.z.toFixed(3)
+        });
+        console.log('[T-POSE-FIX] ✅ Right arm VRM A-shape applied & skeleton updated');
+    } else {
+        console.error('[T-POSE-FIX] ❌ Right arm bone NOT FOUND!');
     }
     
-    // Forearms hanging straight down naturally
+    if (avatarBones.leftArm) {
+        console.log('[T-POSE-FIX] 🔍 Left arm bone name:', avatarBones.leftArm.name);
+        console.log('[T-POSE-FIX] Left arm BEFORE:', {
+            x: avatarBones.leftArm.rotation.x.toFixed(3),
+            y: avatarBones.leftArm.rotation.y.toFixed(3),
+            z: avatarBones.leftArm.rotation.z.toFixed(3)
+        });
+        
+        // Store original for reference
+        originalArmRotations.leftArm = avatarBones.leftArm.rotation.x;
+        
+        // VRM A-SHAPE POSE: Use exact quaternion from VRM A-shape pose data
+        // leftUpperArm: [x, y, z, w] = [0, 0, 0.42669474387529654, 0.904395707392066]
+        const quatLeft = new THREE.Quaternion(
+            0,                      // x
+            0,                      // y
+            0.42669474387529654,    // z (positive for left arm)
+            0.904395707392066       // w
+        );
+        avatarBones.leftArm.quaternion.copy(quatLeft);
+        
+        // Force update
+        avatarBones.leftArm.updateMatrix();
+        avatarBones.leftArm.updateMatrixWorld(true);
+        
+        // CRITICAL: Force skeleton update immediately
+        updateSkeleton();
+        
+        console.log('[T-POSE-FIX] Left arm AFTER (VRM A-shape quaternion):', {
+            x: avatarBones.leftArm.rotation.x.toFixed(3),
+            y: avatarBones.leftArm.rotation.y.toFixed(3),
+            z: avatarBones.leftArm.rotation.z.toFixed(3)
+        });
+        console.log('[T-POSE-FIX] ✅ Left arm VRM A-shape applied & skeleton updated');
+    } else {
+        console.error('[T-POSE-FIX] ❌ Left arm bone NOT FOUND!');
+    }
+    
+    // Shoulders - VRM A-shape pose quaternions
+    if (avatarBones.rightShoulder) {
+        // rightShoulder: [x, y, z, w] = [0, 0, -0.08027473717361218, 0.9967727757978284]
+        const quatRightShoulder = new THREE.Quaternion(
+            0,
+            0,
+            -0.08027473717361218,
+            0.9967727757978284
+        );
+        avatarBones.rightShoulder.quaternion.copy(quatRightShoulder);
+        avatarBones.rightShoulder.updateMatrix();
+        avatarBones.rightShoulder.updateMatrixWorld(true);
+        console.log('[T-POSE-FIX] ✅ Right shoulder VRM A-shape applied');
+    }
+    
+    if (avatarBones.leftShoulder) {
+        // leftShoulder: [x, y, z, w] = [0, 0, 0.08532541830751879, 0.9963531366893201]
+        const quatLeftShoulder = new THREE.Quaternion(
+            0,
+            0,
+            0.08532541830751879,
+            0.9963531366893201
+        );
+        avatarBones.leftShoulder.quaternion.copy(quatLeftShoulder);
+        avatarBones.leftShoulder.updateMatrix();
+        avatarBones.leftShoulder.updateMatrixWorld(true);
+        console.log('[T-POSE-FIX] ✅ Left shoulder VRM A-shape applied');
+    }
+    
+    // Forearms - slight bend for natural look
     if (avatarBones.rightForearm) {
         avatarBones.rightForearm.rotation.order = 'XYZ';
-        avatarBones.rightForearm.rotation.x = 0; // Forearms straight down
+        avatarBones.rightForearm.rotation.x = -0.1;  // Slight bend
         avatarBones.rightForearm.rotation.y = 0;
         avatarBones.rightForearm.rotation.z = 0;
         avatarBones.rightForearm.updateMatrix();
+        avatarBones.rightForearm.updateMatrixWorld(true);
     }
     
     if (avatarBones.leftForearm) {
         avatarBones.leftForearm.rotation.order = 'XYZ';
-        avatarBones.leftForearm.rotation.x = 0; // Forearms straight down
+        avatarBones.leftForearm.rotation.x = -0.1;   // Slight bend
         avatarBones.leftForearm.rotation.y = 0;
         avatarBones.leftForearm.rotation.z = 0;
         avatarBones.leftForearm.updateMatrix();
+        avatarBones.leftForearm.updateMatrixWorld(true);
     }
     
     // Relaxed hands
@@ -347,10 +822,17 @@ function setNaturalStandingPose() {
         avatarBones.leftHand.updateMatrix();
     }
     
-    // Update skeleton immediately
+    // FINAL UPDATE: Force complete skeleton update for ALL bones
+    console.log('[T-POSE-FIX] 🔄 Forcing FINAL skeleton update for all meshes...');
     updateSkeleton();
     
-    console.log('[NATURAL-AVATAR] ✅ Natural standing pose set');
+    // Extra: Force render update
+    if (renderer && scene && camera) {
+        renderer.render(scene, camera);
+        console.log('[T-POSE-FIX] 🎨 Forced render update');
+    }
+    
+    console.log('[T-POSE-FIX] ✅ VRM A-SHAPE POSE APPLIED - Arms should be down naturally!');
 }
 
 // Find avatar bones
@@ -704,6 +1186,46 @@ function animate() {
     // }
     
     if (avatarObject && avatarLoaded) {
+        // CONTINUOUS T-POSE FIX: Enforce VRM A-shape pose every frame
+        let armUpdated = false;
+        if (avatarBones.rightArm) {
+            // VRM A-shape quaternion for right arm
+            const quatRight = new THREE.Quaternion(0, 0, -0.4235327838350045, 0.905880776381181);
+            avatarBones.rightArm.quaternion.copy(quatRight);
+            avatarBones.rightArm.updateMatrix();
+            avatarBones.rightArm.updateMatrixWorld(true);
+            armUpdated = true;
+        }
+        if (avatarBones.leftArm) {
+            // VRM A-shape quaternion for left arm
+            const quatLeft = new THREE.Quaternion(0, 0, 0.42669474387529654, 0.904395707392066);
+            avatarBones.leftArm.quaternion.copy(quatLeft);
+            avatarBones.leftArm.updateMatrix();
+            avatarBones.leftArm.updateMatrixWorld(true);
+            armUpdated = true;
+        }
+        
+        // Also enforce shoulder positions
+        if (avatarBones.rightShoulder) {
+            const quatRightShoulder = new THREE.Quaternion(0, 0, -0.08027473717361218, 0.9967727757978284);
+            avatarBones.rightShoulder.quaternion.copy(quatRightShoulder);
+            avatarBones.rightShoulder.updateMatrix();
+            avatarBones.rightShoulder.updateMatrixWorld(true);
+            armUpdated = true;
+        }
+        if (avatarBones.leftShoulder) {
+            const quatLeftShoulder = new THREE.Quaternion(0, 0, 0.08532541830751879, 0.9963531366893201);
+            avatarBones.leftShoulder.quaternion.copy(quatLeftShoulder);
+            avatarBones.leftShoulder.updateMatrix();
+            avatarBones.leftShoulder.updateMatrixWorld(true);
+            armUpdated = true;
+        }
+        
+        // CRITICAL: Update skeleton every frame to reflect VRM A-shape pose
+        if (armUpdated) {
+            updateSkeleton();
+        }
+        
         // Breathing - faster when typing (excited)
         const breathingSpeed = isUserTyping ? 1.5 : 1.0;
         const breathingIntensity = isUserTyping ? 0.025 : 0.015;
@@ -744,13 +1266,17 @@ function animate() {
             }
             
             rightArmBone.rotation.order = 'XYZ';
-            // Natural hanging arm position: arms straight down at sides
-            rightArmBone.rotation.x = 0; // Arms straight down (no forward rotation)
-            rightArmBone.rotation.y = 0; // Arms straight at sides (no outward angle)
-            rightArmBone.rotation.z = 0;
+            // Natural hanging arm position: arms hanging down (not T-pose)
+            // Use stored original T-pose rotation to calculate the correct offset
+            const originalRot = originalArmRotations.rightArm !== null ? originalArmRotations.rightArm : Math.PI / 2;
+            const tPoseOffset = originalRot > 0.5 ? originalRot : Math.PI / 2; // Assume T-pose if rotation is large
+            const targetX = originalRot - tPoseOffset + 0.1; // Bring to 0 (arms down), then add slight forward tilt
+            rightArmBone.rotation.x = targetX;
+            rightArmBone.rotation.y = -0.15; // Slight inward rotation for natural arm position
+            rightArmBone.rotation.z = 0.1; // Slight rotation for natural arm position
             
             // Update quaternion and matrix
-            const euler = new THREE.Euler(0, 0, 0, 'XYZ');
+            const euler = new THREE.Euler(targetX, -0.15, 0.1, 'XYZ');
             rightArmBone.quaternion.setFromEuler(euler);
             rightArmBone.updateMatrix();
             rightArmBone.updateMatrixWorld(true);
@@ -764,13 +1290,17 @@ function animate() {
             }
             
             leftArmBone.rotation.order = 'XYZ';
-            // Natural hanging arm position: arms straight down at sides
-            leftArmBone.rotation.x = 0; // Arms straight down (no forward rotation)
-            leftArmBone.rotation.y = 0; // Arms straight at sides (no outward angle)
-            leftArmBone.rotation.z = 0;
+            // Natural hanging arm position: arms hanging down (not T-pose)
+            // Use stored original T-pose rotation to calculate the correct offset
+            const originalRot = originalArmRotations.leftArm !== null ? originalArmRotations.leftArm : Math.PI / 2;
+            const tPoseOffset = originalRot > 0.5 ? originalRot : Math.PI / 2; // Assume T-pose if rotation is large
+            const targetX = originalRot - tPoseOffset + 0.1; // Bring to 0 (arms down), then add slight forward tilt
+            leftArmBone.rotation.x = targetX;
+            leftArmBone.rotation.y = 0.15; // Slight inward rotation for natural arm position
+            leftArmBone.rotation.z = -0.1; // Slight rotation for natural arm position
             
             // Update quaternion and matrix
-            const euler = new THREE.Euler(0, 0, 0, 'XYZ');
+            const euler = new THREE.Euler(targetX, 0.15, -0.1, 'XYZ');
             leftArmBone.quaternion.setFromEuler(euler);
             leftArmBone.updateMatrix();
             leftArmBone.updateMatrixWorld(true);
@@ -778,12 +1308,14 @@ function animate() {
         
         // Keep forearms and hands still in natural position
         if (avatarBones.rightForearm && !isSpeaking) {
-            avatarBones.rightForearm.rotation.x = 0; // Natural hanging position
+            avatarBones.rightForearm.rotation.x = 0.15; // Slight forward bend for natural arm position
             avatarBones.rightForearm.updateMatrix();
+            avatarBones.rightForearm.updateMatrixWorld(true);
         }
         if (avatarBones.leftForearm && !isSpeaking) {
-            avatarBones.leftForearm.rotation.x = 0; // Natural hanging position
+            avatarBones.leftForearm.rotation.x = 0.15; // Slight forward bend for natural arm position
             avatarBones.leftForearm.updateMatrix();
+            avatarBones.leftForearm.updateMatrixWorld(true);
         }
         if (avatarBones.rightHand && !isSpeaking) {
             avatarBones.rightHand.rotation.x = 0;
@@ -810,6 +1342,15 @@ function animate() {
     }
     
     renderer.render(scene, camera);
+    
+    // Render background scene if it exists
+    if (backgroundScene && backgroundRenderer && backgroundCamera) {
+        // Update background controls
+        if (backgroundControls) {
+            backgroundControls.update();
+        }
+        backgroundRenderer.render(backgroundScene, backgroundCamera);
+    }
 }
 
 // Update status
@@ -830,6 +1371,16 @@ function handleResize() {
     camera.aspect = width / height;
     camera.updateProjectionMatrix();
     renderer.setSize(width, height);
+    
+    // Resize background renderer
+    if (backgroundRenderer && backgroundCamera) {
+        const bgWidth = window.innerWidth;
+        const bgHeight = window.innerHeight;
+        
+        backgroundCamera.aspect = bgWidth / bgHeight;
+        backgroundCamera.updateProjectionMatrix();
+        backgroundRenderer.setSize(bgWidth, bgHeight);
+    }
 }
 
 // Reset avatar view
@@ -838,11 +1389,11 @@ function resetAvatarView() {
     
     if (controls && camera) {
         // Reset camera position
-        camera.position.set(0, 1, 4);
-        camera.lookAt(0, 1, 0);
+        camera.position.set(0, 0.8, 3.5); // Lower Y and slightly zoomed out
+        camera.lookAt(0, 0.5, 0); // Look at lower point
         
-        // Reset orbit controls
-        controls.target.set(0, 1, 0);
+        // Reset orbit controls - target lower point
+        controls.target.set(0, 0.5, 0);
         controls.update();
     }
     
@@ -852,10 +1403,20 @@ function resetAvatarView() {
         const center = box.getCenter(new THREE.Vector3());
         const scale = avatarObject.scale.x;
         
+        // Calculate floor level (minimum Y of bounding box)
+        const floorLevel = box.min.y * scale;
         avatarObject.position.x = -center.x * scale;
-        avatarObject.position.y = -center.y * scale;
+        avatarObject.position.y = -floorLevel; // Stand on floor
         avatarObject.position.z = -center.z * scale;
         avatarObject.rotation.y = Math.PI;
+    }
+    
+    // Reset background view as well - lower and zoomed in
+    if (backgroundControls && backgroundCamera) {
+        backgroundCamera.position.set(0, 0.8, 7); // Lower Y and zoomed out more
+        backgroundCamera.lookAt(0, 0.5, 0); // Look at lower point
+        backgroundControls.target.set(0, 0.5, 0); // Target lower point
+        backgroundControls.update();
     }
     
     console.log('[NATURAL-AVATAR] ✅ Avatar view reset');
@@ -865,6 +1426,127 @@ function resetAvatarView() {
 function setUserTyping(typing) {
     isUserTyping = typing;
     console.log('[NATURAL-AVATAR] User typing:', typing);
+}
+
+// Set avatar speaking state (called from chat.js for voice)
+function setAvatarSpeaking(speaking) {
+    isSpeaking = speaking;
+    console.log('[NATURAL-AVATAR] Avatar speaking:', speaking);
+    
+    if (speaking) {
+        // Start speaking animation (subtle mouth movement, head movements)
+        startSpeakingAnimation();
+    } else {
+        // Stop speaking animation
+        stopSpeakingAnimation();
+    }
+}
+
+// Start speaking animation
+function startSpeakingAnimation() {
+    if (!avatarObject || !avatarLoaded) return;
+    
+    // Subtle head movements while speaking
+    if (avatarBones.head) {
+        // Slight head nod and subtle movements
+        const headAnimation = setInterval(() => {
+            if (!isSpeaking) {
+                clearInterval(headAnimation);
+                return;
+            }
+            
+            // Subtle head movements
+            const randomX = (Math.random() - 0.5) * 0.05;
+            const randomY = (Math.random() - 0.5) * 0.05;
+            animateProperty(avatarBones.head.rotation, 'x', avatarBones.head.rotation.x, avatarBones.head.rotation.x + randomX, 200);
+            animateProperty(avatarBones.head.rotation, 'y', avatarBones.head.rotation.y, avatarBones.head.rotation.y + randomY, 200);
+        }, 500);
+        
+        // Store interval for cleanup
+        if (!window.speakingAnimationInterval) {
+            window.speakingAnimationInterval = headAnimation;
+        }
+    }
+    
+    // Mouth/lip sync animation (if morph targets available)
+    avatarObject.traverse((child) => {
+        if (child.isMesh && child.morphTargetDictionary) {
+            const mouthTargets = ['mouthOpen', 'MouthOpen', 'Aa', 'aa', 'vocal', 'Vocal'];
+            for (const targetName of mouthTargets) {
+                const index = child.morphTargetDictionary[targetName];
+                if (index !== undefined) {
+                    // Subtle mouth opening animation
+                    const mouthAnimation = setInterval(() => {
+                        if (!isSpeaking) {
+                            clearInterval(mouthAnimation);
+                            animateProperty(child.morphTargetInfluences, index, child.morphTargetInfluences[index], 0, 200);
+                            return;
+                        }
+                        
+                        // Oscillate mouth opening
+                        const target = 0.2 + Math.sin(Date.now() / 200) * 0.1;
+                        animateProperty(child.morphTargetInfluences, index, child.morphTargetInfluences[index], target, 100);
+                    }, 100);
+                    
+                    // Store interval for cleanup
+                    if (!window.mouthAnimationInterval) {
+                        window.mouthAnimationInterval = mouthAnimation;
+                    }
+                    return;
+                }
+            }
+        }
+    });
+}
+
+// Stop speaking animation
+function stopSpeakingAnimation() {
+    // Clear intervals
+    if (window.speakingAnimationInterval) {
+        clearInterval(window.speakingAnimationInterval);
+        window.speakingAnimationInterval = null;
+    }
+    
+    if (window.mouthAnimationInterval) {
+        clearInterval(window.mouthAnimationInterval);
+        window.mouthAnimationInterval = null;
+    }
+    
+    // Reset head rotation to neutral
+    if (avatarBones.head) {
+        animateProperty(avatarBones.head.rotation, 'x', avatarBones.head.rotation.x, 0, 300);
+        animateProperty(avatarBones.head.rotation, 'y', avatarBones.head.rotation.y, 0, 300);
+        animateProperty(avatarBones.head.rotation, 'z', avatarBones.head.rotation.z, 0, 300);
+    }
+    
+    // Reset mouth morph targets
+    if (avatarObject) {
+        avatarObject.traverse((child) => {
+            if (child.isMesh && child.morphTargetDictionary) {
+                const mouthTargets = ['mouthOpen', 'MouthOpen', 'Aa', 'aa', 'vocal', 'Vocal'];
+                for (const targetName of mouthTargets) {
+                    const index = child.morphTargetDictionary[targetName];
+                    if (index !== undefined && child.morphTargetInfluences[index] > 0) {
+                        animateProperty(child.morphTargetInfluences, index, child.morphTargetInfluences[index], 0, 200);
+                    }
+                }
+            }
+        });
+    }
+}
+
+// Avatar speak function (for backward compatibility)
+function avatarSpeak(duration) {
+    if (!avatarObject || !avatarLoaded) return;
+    
+    isSpeaking = true;
+    setAvatarSpeaking(true);
+    
+    // Stop speaking after duration
+    setTimeout(() => {
+        isSpeaking = false;
+        setAvatarSpeaking(false);
+    }, duration);
 }
 
 // Excitement jump animation when user sends message - small, subtle jump with hands down
@@ -949,6 +1631,7 @@ function initializeAvatar() {
     
     if (initThreeScene()) {
         loadAvatar();
+        loadOfficeBackground(); // Load background after avatar scene is ready
         window.addEventListener('resize', handleResize);
     } else {
         console.error('[NATURAL-AVATAR] Scene init failed');
@@ -967,6 +1650,8 @@ if (document.readyState === 'loading') {
 window.updateStatus = updateStatus;
 window.resetAvatarView = resetAvatarView;
 window.setUserTyping = setUserTyping;
+window.setAvatarSpeaking = setAvatarSpeaking;
+window.avatarSpeak = avatarSpeak;
 window.excitementJump = excitementJump;
 
 console.log('[NATURAL-AVATAR] Module loaded successfully!');

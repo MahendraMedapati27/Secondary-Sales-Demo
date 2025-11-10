@@ -89,6 +89,7 @@ class Config:
     MAIL_PASSWORD = os.getenv('MAIL_PASSWORD')
     MAIL_DEFAULT_SENDER = os.getenv('MAIL_DEFAULT_SENDER', os.getenv('MAIL_USERNAME'))
     ADMIN_EMAIL = os.getenv('ADMIN_EMAIL')
+    COMPANY_EMAIL = os.getenv('COMPANY_EMAIL', 'mahendra@highvolt.tech')
     
     # ------------------------------------------------------------------------
     ## AUTHENTICATION SETTINGS

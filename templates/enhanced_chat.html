@@ -142,11 +142,15 @@
 })();
 </script>
 <div class="chat-container">
+    <!-- THREE.js Background Canvas (covers entire viewport) -->
+    <div id="background-canvas-container" style="width: 100%; height: 100%; position: absolute; top: 0; left: 0; z-index: 0;">
+        <!-- THREE.js will render background here -->
+    </div>
     <!-- Left Side: 3D VRM Avatar -->
-    <div class="avatar-section">
-        <div id="avatar-container" style="width: 100%; height: 100%; position: relative; min-height: 500px;">
+    <div class="avatar-section" style="position: relative; z-index: 1; pointer-events: auto;">
+        <div id="avatar-container" style="width: 100%; height: 100%; position: relative; min-height: 500px; pointer-events: auto;">
             <!-- THREE.js Canvas Container -->
-            <div id="three-canvas-container" style="width: 100%; height: 100%; position: absolute; top: 0; left: 0; z-index: 1;">
+            <div id="three-canvas-container" style="width: 100%; height: 100%; position: absolute; top: 0; left: 0; z-index: 1; pointer-events: auto;">
                 <!-- THREE.js will render here -->
             </div>
             <!-- Fallback 2D Avatar (shown if THREE.js fails) -->
@@ -170,8 +174,9 @@
         <div class="card shadow-lg h-100">
             <div class="card-header bg-gradient-primary text-white d-flex justify-content-between align-items-center">
                 <div class="d-flex align-items-center">
+                    <img src="/static/Images/Q_logo_quantum_blue-removebg-preview.png" alt="Quantum Blue Logo" style="width: 70px; height: 30px; margin-right: 12px; object-fit: contain;">
                     <h5 class="mb-0 me-3">
-                        <i class="fas fa-robot"></i> RB (Powered by Quantum Blue AI)
+                        RB (Powered by Quantum Blue AI)
                     </h5>
                     <span class="badge bg-success" id="statusBadge">
                         <i class="fas fa-circle"></i> Online
@@ -208,7 +213,7 @@
                 <!-- Chat Messages -->
                 <div id="chatMessages" class="chat-messages p-3 flex-grow-1" style="overflow-y: auto; min-height: 0;">
                     <div class="text-center text-muted py-5">
-                        <i class="fas fa-robot fa-3x mb-3"></i>
+                        <img src="/static/Images/Q_logo_quantum_blue-removebg-preview.png" alt="Quantum Blue Logo" style="width: 180px; height: 100px; margin-bottom: 24px; object-fit: contain;">
                         <h4>Welcome to RB (Powered by Quantum Blue AI)</h4>
                         <p>Your intelligent assistant for orders, tracking, and more!</p>
                     </div>
@@ -218,12 +223,19 @@
                 
                 <!-- Input Area -->
                 <div class="p-3 border-top">
-                    <div class="input-group">
-                        <input type="text" id="messageInput" class="form-control" 
-                               placeholder="Enter your unique ID to start..." autocomplete="off" />
-                        <button class="btn btn-primary" onclick="sendMessage()" id="sendButton" disabled>
-                            <i class="fas fa-paper-plane"></i> Send
-                        </button>
+                    <div class="position-relative">
+                        <div class="input-group">
+                            <input type="text" id="messageInput" class="form-control" 
+                                   placeholder="Enter your unique ID to start..." autocomplete="off" />
+                            <button class="btn btn-primary" onclick="sendMessage()" id="sendButton" disabled>
+                                <i class="fas fa-paper-plane"></i> Send
+                            </button>
+                        </div>
+                        <!-- Product Recommendations Dropdown -->
+                        <div id="productRecommendations" class="position-absolute w-100 bg-white border rounded shadow-lg" 
+                             style="top: 100%; z-index: 1000; max-height: 300px; overflow-y: auto; display: none; margin-top: 2px;">
+                            <div id="recommendationsList"></div>
+                        </div>
                     </div>
                     <div class="form-text small text-muted mt-1">
                         Press Enter to send • Shift+Enter for new line
@@ -259,7 +271,7 @@
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
-                <button type="button" class="btn btn-primary" onclick="placeOrder()">Place Order</button>
+                <button type="button" class="btn btn-success" onclick="placeOrder()">Confirm Cart & Place Order</button>
             </div>
         </div>
     </div>
@@ -338,8 +350,8 @@ document.head.appendChild(script);
 -->
 
 <!-- Avatar Functions (for chat integration) -->
-<script src="{{ url_for('static', filename='js/avatar.js') }}?v={{ range(1000, 9999) | random }}"></script>
-<script src="{{ url_for('static', filename='js/enhanced_chat.js') }}?v={{ range(1000, 9999) | random }}"></script>
+<script src="{{ url_for('static', filename='js/avatar.js') }}?v={{ cache_buster if cache_buster else range(1000, 9999) | random }}&t={{ range(1000, 9999) | random }}"></script>
+<script src="{{ url_for('static', filename='js/enhanced_chat.js') }}?v={{ cache_buster if cache_buster else range(1000, 9999) | random }}&t={{ range(1000, 9999) | random }}"></script>
 
 <!-- Fallback: If THREE.js module fails to load, show fallback avatar -->
 <script>

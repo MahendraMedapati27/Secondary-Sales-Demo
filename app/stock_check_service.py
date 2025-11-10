@@ -2,7 +2,7 @@ import logging
 from datetime import datetime, date
 from flask import current_app
 from app import db
-from app.models import Product, PendingOrderProducts, Order, OrderItem, User
+from app.models import Product, PendingOrderProducts, Order, OrderItem, User, DealerWiseStockDetails
 from app.database_service import DatabaseService
 from app.pricing_service import PricingService
 from app.email_utils import send_email
@@ -31,7 +31,11 @@ class StockCheckService:
             
             if not pending_products:
                 self.logger.info("No pending products to check")
-                return
+                return {
+                    'success': True,
+                    'fulfilled_count': 0,
+                    'fulfilled_orders': []
+                }
             
             self.logger.info(f"Found {len(pending_products)} pending products to check")
             
@@ -40,10 +44,16 @@ class StockCheckService:
             for pending in pending_products:
                 self.logger.info(f"Checking stock for {pending.product_code} (Order: {pending.original_order_id})")
                 
-                # Check if product is now available in non-expired batches
+                # Get user to find their area
+                user = User.query.get(pending.user_id)
+                if not user or not user.area:
+                    self.logger.warning(f"User or area not found for pending product {pending.id}")
+                    continue
+                
+                # Check if product is now available in dealer stock for this area
                 availability_result = self._check_product_availability(
                     pending.product_code,
-                    pending.warehouse_id,
+                    user.area,
                     pending.requested_quantity
                 )
                 
@@ -75,48 +85,63 @@ class StockCheckService:
                 'error': str(e)
             }
     
-    def _check_product_availability(self, product_code, warehouse_id, required_quantity):
+    def _check_product_availability(self, product_code, user_area, required_quantity):
         """
-        Check if product is available in non-expired batches
+        Check if product is available in dealer stock for the user's area
         Returns: {'available': bool, 'allocation_info': dict}
         """
         try:
             today = date.today()
             
-            # Get all NON-EXPIRED batches of this product in the warehouse
-            available_batches = Product.query.filter_by(
-                product_code=product_code,
-                warehouse_id=warehouse_id,
-                is_active=True
+            # Find dealers in the user's area
+            dealers_in_area = User.query.filter_by(
+                role='distributor',
+                area=user_area
+            ).all()
+            
+            if not dealers_in_area:
+                self.logger.warning(f"No dealers found in area {user_area}")
+                return {
+                    'available': False,
+                    'total_available': 0,
+                    'batches': []
+                }
+            
+            # Get all NON-EXPIRED stock from dealers in this area
+            available_stock = DealerWiseStockDetails.query.filter(
+                DealerWiseStockDetails.product_code == product_code,
+                DealerWiseStockDetails.status == 'confirmed',
+                DealerWiseStockDetails.dealer_unique_id.in_([d.unique_id for d in dealers_in_area]),
+                DealerWiseStockDetails.available_for_sale > 0
             ).filter(
                 db.or_(
-                    Product.expiry_date >= today,
-                    Product.expiry_date.is_(None)
+                    DealerWiseStockDetails.expiry_date >= today,
+                    DealerWiseStockDetails.expiry_date.is_(None)
                 )
             ).all()
             
             # Sort by expiry date (earliest first) for FEFO
-            available_batches = sorted(
-                available_batches,
-                key=lambda b: (b.expiry_date is None, b.expiry_date or date.max)
+            available_stock = sorted(
+                available_stock,
+                key=lambda s: (s.expiry_date is None, s.expiry_date or date.max)
             )
             
             # Calculate total available
-            total_available = sum(batch.available_for_sale for batch in available_batches if batch.available_for_sale > 0)
+            total_available = sum(stock.available_for_sale for stock in available_stock if stock.available_for_sale > 0)
             
             if total_available >= required_quantity:
                 self.logger.info(f"✅ Product {product_code} is available: {total_available} units (required: {required_quantity})")
                 return {
                     'available': True,
                     'total_available': total_available,
-                    'batches': available_batches
+                    'stock_details': available_stock
                 }
             else:
                 self.logger.info(f"⏳ Product {product_code} not yet available: {total_available} units (required: {required_quantity})")
                 return {
                     'available': False,
                     'total_available': total_available,
-                    'batches': available_batches
+                    'stock_details': available_stock
                 }
                 
         except Exception as e:
@@ -139,18 +164,9 @@ class StockCheckService:
                     'message': "User not found"
                 }
             
-            # Get warehouse
-            warehouse = self.db_service.get_warehouse_by_location(pending_product.warehouse_location)
-            if not warehouse:
-                return {
-                    'success': False,
-                    'message': "Warehouse not found"
-                }
-            
-            # Get product
+            # Get product by product_code
             product = Product.query.filter_by(
-                product_code=pending_product.product_code,
-                warehouse_id=warehouse.id
+                product_name=pending_product.product_name
             ).first()
             
             if not product:
@@ -159,20 +175,16 @@ class StockCheckService:
                     'message': "Product not found"
                 }
             
-            # Create order
+            # Create order (for MR users)
             order = Order(
-                user_id=user.id,
-                warehouse_id=warehouse.id,
-                warehouse_location=warehouse.location_name,
-                user_email=user.email,
-                placed_by=user.user_type,
-                placed_by_user_id=user.id,
-                status='in_transit',
-                order_stage='distributor_notified'
+                mr_id=user.id,
+                mr_unique_id=user.unique_id,
+                status='pending',
+                order_stage='placed'
             )
             order.generate_order_id()
             db.session.add(order)
-            db.session.commit()
+            db.session.flush()  # Get order.id
             
             # Calculate pricing
             pricing = self.pricing_service.calculate_product_pricing(
@@ -186,38 +198,25 @@ class StockCheckService:
                     'message': f"Pricing error: {pricing['error']}"
                 }
             
-            # Create order item
+            # Create order item with FOC
+            sales_price = pricing['pricing']['final_price']
+            total_price = pricing['pricing']['total_amount']
+            foc_info = pricing.get('scheme', {})  # FOC info is in 'scheme' key
+            free_quantity = foc_info.get('free_quantity', 0)
+            
             order_item = OrderItem(
                 order_id=order.id,
                 product_id=product.id,
                 product_code=pending_product.product_code,
-                product_quantity_ordered=pending_product.requested_quantity,
-                unit_price=product.price_of_product,
-                total_price=pricing['pricing']['total_amount'],
-                base_price=pricing['base_price'],
-                discount_amount=pricing['discount']['amount'],
-                scheme_discount_amount=0,
-                final_price=pricing['pricing']['final_price'],
-                scheme_applied=pricing['scheme']['name'],
-                free_quantity=pricing['scheme']['free_quantity'],
-                paid_quantity=pricing['scheme']['paid_quantity']
+                product_name=pending_product.product_name,
+                quantity=pending_product.requested_quantity,
+                free_quantity=free_quantity,
+                unit_price=sales_price,
+                total_price=total_price
             )
             db.session.add(order_item)
             
-            # Allocate quantity using FEFO
-            allocations, allocation_message = self.db_service.allocate_quantity_fefo(
-                product_code=pending_product.product_code,
-                warehouse_id=warehouse.id,
-                quantity_to_allocate=pending_product.requested_quantity
-            )
-            
-            if not allocations:
-                raise Exception(f"Failed to allocate products: {allocation_message}")
-            
-            # Update order totals
-            order.subtotal_amount = pricing['pricing']['total_amount']
-            order.discount_amount = pricing['base_price'] - pricing['pricing']['final_price']
-            order.scheme_discount_amount = 0
+            # Update order total
             order.total_amount = pricing['pricing']['total_amount']
             
             db.session.commit()
@@ -347,11 +346,20 @@ class StockCheckService:
     def _notify_distributor_fulfilled(self, pending_product, new_order, user):
         """Send email to distributor when a pending order is fulfilled"""
         try:
-            # Get distributor
-            distributor = self.db_service.get_distributor_for_warehouse(pending_product.warehouse_location)
+            # Get user to find area
+            user = User.query.get(pending_product.user_id)
+            if not user or not user.area:
+                self.logger.warning(f"User or area not found for pending product {pending_product.id}")
+                return
+            
+            # Get distributor from user's area
+            distributor = User.query.filter_by(
+                role='distributor',
+                area=user.area
+            ).first()
             
             if not distributor:
-                self.logger.warning(f"No distributor found for warehouse {pending_product.warehouse_location}")
+                self.logger.warning(f"No distributor found for area {user.area}")
                 return
             
             subject = f"Pending Order Fulfilled - Order {new_order.order_id}"
@@ -389,7 +397,7 @@ class StockCheckService:
             <p><strong>Original Order ID:</strong> {pending_product.original_order_id}</p>
             <p><strong>Customer:</strong> {user.name} ({user.email})</p>
             <p><strong>Phone:</strong> {user.phone}</p>
-            <p><strong>Warehouse:</strong> {pending_product.warehouse_location}</p>
+            <p><strong>Area:</strong> {user.area if user else 'N/A'}</p>
             
             <h3>Product Details:</h3>
             <table>

@@ -2,7 +2,7 @@ import logging
 from datetime import datetime
 from flask import current_app
 from app import db
-from app.models import Order, OrderItem, Product, User, CartItem
+from app.models import Order, OrderItem, Product, User, CartItem, DealerWiseStockDetails, Customer, FOC
 from app.database_service import DatabaseService
 from app.pricing_service import PricingService
 from app.llm_order_service import LLMOrderService
@@ -54,11 +54,6 @@ class EnhancedOrderService:
             errors = []
             stock_warnings = []  # Store stock availability issues for LLM to inform user
             
-            # Get user's warehouse
-            warehouse = None
-            if user.nearest_warehouse:
-                warehouse = self.db_service.get_warehouse_by_location(user.nearest_warehouse)
-            
             # Aggregate same product codes within this message to avoid repeated adds
             # IMPORTANT: Handle both positive (add) and negative (remove) quantities
             aggregate = {}
@@ -76,14 +71,27 @@ class EnhancedOrderService:
                 
                 self.logger.info(f"Processing product: {product_code}, quantity: {quantity}")
                 
-                # Find product - search in user's warehouse first, then globally
+                # Find product by product_code from dealer stock in user's area
                 product = None
-                if warehouse:
-                    product = self.db_service.get_product_by_code_and_warehouse(product_code, warehouse.id)
+                if user.area:
+                    # Find product from dealer stock in this area
+                    stock = DealerWiseStockDetails.query.join(
+                        User, DealerWiseStockDetails.dealer_id == User.id
+                    ).filter(
+                        User.area == user.area,
+                        User.role == 'distributor',
+                        DealerWiseStockDetails.product_code == product_code,
+                        DealerWiseStockDetails.status == 'confirmed'
+                    ).first()
+                    
+                    if stock and stock.product_id:
+                        product = Product.query.get(stock.product_id)
                 
                 if not product:
-                    # Fallback to global search
-                    product = self.db_service.get_product_by_code(product_code)
+                    # Try to find product by name match
+                    product = Product.query.filter(
+                        Product.product_name.ilike(f'%{product_code}%')
+                    ).first()
                 if not product:
                     errors.append(f"Product {product_code} not found")
                     continue
@@ -111,20 +119,25 @@ class EnhancedOrderService:
                 # Handle positive quantities (add operations)
                 # ONLY process if quantity is positive (not negative/remove)
                 self.logger.info(f"➕ ADD operation: Adding {quantity} units of {product_code} to cart")
-                # Check availability across all batches using FEFO logic
+                # Check availability from dealer stock in user's area
                 total_available = 0
-                if warehouse:
-                    # Get all batches for this product in the warehouse
-                    all_batches = Product.query.filter_by(
-                        product_code=product_code,
-                        warehouse_id=warehouse.id,
-                        is_active=True
-                    ).all()
+                if user.area:
+                    # Get total available from all dealers in this area
+                    stock_query = db.session.query(
+                        db.func.sum(DealerWiseStockDetails.available_for_sale)
+                    ).join(
+                        User, DealerWiseStockDetails.dealer_id == User.id
+                    ).filter(
+                        User.area == user.area,
+                        User.role == 'distributor',
+                        DealerWiseStockDetails.product_id == product.id,
+                        DealerWiseStockDetails.status == 'confirmed'
+                    )
                     
-                    total_available = sum(batch.available_for_sale for batch in all_batches if batch.available_for_sale > 0)
+                    result = stock_query.scalar()
+                    total_available = int(result) if result else 0
                 else:
-                    # Fallback to single product check
-                    total_available = product.available_for_sale
+                    total_available = 0
                 
                 # Store stock info for LLM to generate message later (don't skip, just inform)
                 stock_info = {
@@ -153,19 +166,14 @@ class EnhancedOrderService:
                 
                 # Add to cart
                 self.logger.info(f"Attempting to add to cart: {product_code}, qty={quantity}, product_id={product.id}")
+                unit_price = pricing.get('pricing', {}).get('final_price', 0)
                 cart_item, message = self.db_service.add_to_cart(
                     user_id, 
                     product.id, 
+                    product_code,
+                    product.product_name,
                     quantity, 
-                    {
-                        'base_price': pricing['base_price'],
-                        'discount_amount': pricing['discount']['amount'],
-                        'scheme_discount_amount': 0,  # Will be calculated by scheme
-                        'final_price': pricing['pricing']['final_price'],
-                        'scheme_name': pricing['scheme']['name'],
-                        'free_quantity': pricing['scheme']['free_quantity'],
-                        'paid_quantity': pricing['scheme']['paid_quantity']
-                    }
+                    unit_price
                 )
                 
                 if cart_item:
@@ -240,6 +248,9 @@ class EnhancedOrderService:
                         response_message += "\n\n"
                     response_message += f"Note: {len(errors)} items couldn't be processed.\n"
                 
+                # Initialize order_summary to avoid reference before assignment error
+                order_summary = {}
+                
                 # Generate order summary if cart has items
                 if cart_items:
                     order_summary = self.llm_service.generate_order_summary(cart_items, user)
@@ -271,11 +282,14 @@ class EnhancedOrderService:
                 'message': f"An error occurred while processing your order: {str(e)}"
             }
     
-    def place_order(self, user_id, placed_by_user_id=None):
+    def place_order(self, user_id, placed_by_user_id=None, customer_id=None):
         """
         Place order from cart with distributor notification workflow
+        Includes customer details for MR orders
         """
         try:
+            from app.models import Customer
+            
             # Get user and cart items
             user = User.query.get(user_id)
             if not user:
@@ -294,12 +308,21 @@ class EnhancedOrderService:
             # Determine who placed the order
             placed_by_user = User.query.get(placed_by_user_id) if placed_by_user_id else user
             
-            # Get warehouse
-            warehouse = self.db_service.get_warehouse_by_location(user.nearest_warehouse)
-            if not warehouse:
+            # Get customer details if MR and customer_id is provided
+            customer = None
+            if user.role == 'mr' and customer_id:
+                customer = Customer.query.get(customer_id)
+                if not customer or customer.mr_unique_id != user.unique_id:
+                    return {
+                        'success': False,
+                        'message': "Customer not found or not assigned to you"
+                    }
+            
+            # Check if user has area assigned
+            if not user.area:
                 return {
                     'success': False,
-                    'message': "Warehouse not found for your location"
+                    'message': "No area assigned to your account. Please contact support."
                 }
             
             # Separate cart items into expired and non-expired products FIRST
@@ -316,29 +339,55 @@ class EnhancedOrderService:
                 
                 # Check availability WITHOUT allocating (to avoid double allocation)
                 from datetime import date
+                from sqlalchemy import func
                 today = date.today()
                 
-                # Get all batches of this product in the warehouse
-                all_batches = Product.query.filter_by(
-                    product_code=cart_item.product_code,
-                    warehouse_id=warehouse.id,
-                    is_active=True
-                ).all()
-                
-                # Check if any non-expired batches exist
-                non_expired_batches = [b for b in all_batches if not b.expiry_date or b.expiry_date >= today]
-                expired_batches = [b for b in all_batches if b.expiry_date and b.expiry_date < today]
-                
-                # Calculate available quantities
-                non_expired_qty = sum(b.available_for_sale for b in non_expired_batches)
-                expired_qty = sum(b.available_for_sale for b in expired_batches)
+                # For MRs, check stock from dealer_wise_stock_details
+                # For other users, check Product table
+                if user.role == 'mr' and user.area:
+                    # Find dealers in the MR's area
+                    dealers_in_area = User.query.filter_by(
+                        role='distributor',
+                        area=user.area
+                    ).all()
+                    
+                    if dealers_in_area:
+                        dealer_unique_ids = [d.unique_id for d in dealers_in_area]
+                        
+                        # Get stock from dealer_wise_stock_details
+                        stock_details = DealerWiseStockDetails.query.filter(
+                            DealerWiseStockDetails.product_code == cart_item.product_code,
+                            DealerWiseStockDetails.status == 'confirmed',
+                            DealerWiseStockDetails.dealer_unique_id.in_(dealer_unique_ids)
+                        ).all()
+                        
+                        # Check if any non-expired batches exist
+                        non_expired_batches = [s for s in stock_details if not s.expiry_date or s.expiry_date >= today]
+                        expired_batches = [s for s in stock_details if s.expiry_date and s.expiry_date < today]
+                        
+                        # Calculate available quantities from dealer stock
+                        non_expired_qty = sum(s.available_for_sale for s in non_expired_batches if s.available_for_sale > 0)
+                        expired_qty = sum(s.available_for_sale for s in expired_batches if s.available_for_sale > 0)
+                    else:
+                        # No dealers found - treat as no stock
+                        non_expired_qty = 0
+                        expired_qty = 0
+                        non_expired_batches = []
+                        expired_batches = []
+                else:
+                    # For non-MRs (distributors), stock info not applicable
+                    # Distributors don't place orders through this system
+                    non_expired_qty = 0
+                    expired_qty = 0
+                    non_expired_batches = []
+                    expired_batches = []
                 
                 # Check three scenarios:
                 # 1. Has both expired and non-expired but not enough total - treat as expired
                 # 2. Has only non-expired but insufficient quantity - treat as expired (insufficient stock)
                 # 3. Has enough non-expired stock - add to valid
                 
-                if non_expired_qty < cart_item.product_quantity:
+                if non_expired_qty < cart_item.quantity:
                     # Not enough non-expired stock - treat as expired/insufficient
                     expired_cart_items.append(cart_item)
                     
@@ -350,19 +399,22 @@ class EnhancedOrderService:
                         'product_name': product_name,
                         'expired_batches': [],
                         'available_qty': non_expired_qty,
-                        'requested_qty': cart_item.product_quantity,
+                        'requested_qty': cart_item.quantity,
                         'reason': 'expired' if expired_batches else 'insufficient_stock'
                     }
                     
                     # Track expired batches if any
                     for batch in expired_batches:
-                        if batch.available_for_sale > 0:
-                            days_expired = (today - batch.expiry_date).days if batch.expiry_date else 0
+                        available_qty = batch.available_for_sale if hasattr(batch, 'available_for_sale') else 0
+                        if available_qty > 0:
+                            # Handle both Product and DealerWiseStockDetails
+                            expiry_date = batch.expiry_date if hasattr(batch, 'expiry_date') else (batch.expiry_date if hasattr(batch, 'expiration_date') else None)
+                            days_expired = (today - expiry_date).days if expiry_date else 0
                             
                             expired_info['expired_batches'].append({
-                                'batch_number': batch.batch_number or 'N/A',
-                                'quantity': batch.available_for_sale,
-                                'expiry_date': batch.expiry_date.isoformat() if batch.expiry_date else None,
+                                'batch_number': (batch.batch_number if hasattr(batch, 'batch_number') else (batch.lot_number if hasattr(batch, 'lot_number') else 'N/A')) or 'N/A',
+                                'quantity': available_qty,
+                                'expiry_date': expiry_date.isoformat() if expiry_date else None,
                                 'days_expired': days_expired
                             })
                     
@@ -371,9 +423,9 @@ class EnhancedOrderService:
                     
                     # Log the issue
                     if expired_batches:
-                        self.logger.warning(f"⚠️ EXPIRED/INSUFFICIENT PRODUCT: {cart_item.product_code} - Requested: {cart_item.product_quantity}, Non-expired available: {non_expired_qty}, Expired available: {expired_qty}, creating pending order")
+                        self.logger.warning(f"⚠️ EXPIRED/INSUFFICIENT PRODUCT: {cart_item.product_code} - Requested: {cart_item.quantity}, Non-expired available: {non_expired_qty}, Expired available: {expired_qty}, creating pending order")
                     else:
-                        self.logger.warning(f"⚠️ INSUFFICIENT STOCK: {cart_item.product_code} - Requested: {cart_item.product_quantity}, Available: {non_expired_qty}, creating pending order")
+                        self.logger.warning(f"⚠️ INSUFFICIENT STOCK: {cart_item.product_code} - Requested: {cart_item.quantity}, Available: {non_expired_qty}, creating pending order")
                 else:
                     # Has enough non-expired stock - add to valid list
                     valid_cart_items.append(cart_item)
@@ -382,12 +434,16 @@ class EnhancedOrderService:
                     if expired_batches:
                         expired_batches_info = []
                         for batch in expired_batches:
-                            if batch.available_for_sale > 0:
+                            available_qty = batch.available_for_sale if hasattr(batch, 'available_for_sale') else 0
+                            if available_qty > 0:
+                                # Handle both Product and DealerWiseStockDetails
+                                expiry_date = batch.expiry_date if hasattr(batch, 'expiry_date') else (batch.expiry_date if hasattr(batch, 'expiration_date') else None)
+                                
                                 expired_batches_info.append({
-                                    'batch_number': batch.batch_number or 'N/A',
-                                    'quantity': batch.available_for_sale,
-                                    'expiry_date': batch.expiry_date.isoformat() if batch.expiry_date else None,
-                                    'days_expired': (today - batch.expiry_date).days if batch.expiry_date else 0
+                                    'batch_number': (batch.batch_number if hasattr(batch, 'batch_number') else (batch.lot_number if hasattr(batch, 'lot_number') else 'N/A')) or 'N/A',
+                                    'quantity': available_qty,
+                                    'expiry_date': expiry_date.isoformat() if expiry_date else None,
+                                    'days_expired': (today - expiry_date).days if expiry_date else 0
                                 })
                         
                         if expired_batches_info:
@@ -425,7 +481,7 @@ class EnhancedOrderService:
                             'product_id': expired_item.product_id,
                             'product_code': expired_item.product_code,
                             'product_name': product.product_name,
-                            'quantity': expired_item.product_quantity,
+                            'quantity': expired_item.quantity,
                             'available_qty': expired_info.get('available_qty', 0) if expired_info else 0,
                             'reason': expired_info.get('reason', 'expired') if expired_info else 'expired'
                         })
@@ -440,11 +496,9 @@ class EnhancedOrderService:
                             original_order_id=None,  # No order created yet
                             product_code=expired_item.product_code,
                             product_name=product.product_name,
-                            requested_quantity=expired_item.product_quantity,
+                            requested_quantity=expired_item.quantity,
                             user_id=user.id,
-                            user_email=user.email,
-                            warehouse_id=warehouse.id,
-                            warehouse_location=warehouse.location_name
+                            user_email=user.email
                         )
                         if pending_order:
                             pending_products_created.append(pending_order)
@@ -483,95 +537,92 @@ You'll receive an email when any of these products become available."""
             
             # Now create the order since we have valid items
             order = Order(
-                user_id=user_id,
-                warehouse_id=warehouse.id,
-                warehouse_location=user.nearest_warehouse,
-                user_email=user.email,
-                placed_by=placed_by_user.user_type,
-                placed_by_user_id=placed_by_user.id,
+                mr_id=user_id,
+                mr_unique_id=user.unique_id,
                 status='pending',
                 order_stage='placed'
             )
+            
+            # Add customer details if MR order
+            if customer:
+                order.customer_id = customer.id
+                order.customer_unique_id = customer.unique_id
+            
             order.generate_order_id()
             db.session.add(order)
             db.session.commit()
             
             # Add order items and calculate totals only for valid cart items
             subtotal = 0
-            discount_total = 0
-            scheme_discount_total = 0
             
             for cart_item in valid_cart_items:
                 # Calculate final pricing
                 pricing = self.pricing_service.calculate_product_pricing(
                     cart_item.product_id, 
-                    cart_item.product_quantity
+                    cart_item.quantity
                 )
                 
                 if 'error' not in pricing:
-                    # Create order item
+                    # Get sales price (unit price)
+                    sales_price = pricing['pricing']['final_price']
+                    total_price = pricing['pricing']['total_amount']
+                    
+                    # Get FOC information from 'scheme' key
+                    foc_info = pricing.get('scheme', {})
+                    free_quantity = foc_info.get('free_quantity', 0)
+                    
+                    # Create order item with FOC information
                     order_item = OrderItem(
-                    order_id=order.id,
+                        order_id=order.id,
                         product_id=cart_item.product_id,
                         product_code=cart_item.product_code,
-                        product_quantity_ordered=cart_item.product_quantity,
-                        unit_price=cart_item.unit_price,
-                        total_price=pricing['pricing']['total_amount'],
-                        base_price=pricing['base_price'],
-                        discount_amount=pricing['discount']['amount'],
-                        scheme_discount_amount=0,  # Will be calculated
-                        final_price=pricing['pricing']['final_price'],
-                        scheme_applied=pricing['scheme']['name'],
-                        free_quantity=pricing['scheme']['free_quantity'],
-                        paid_quantity=pricing['scheme']['paid_quantity']
+                        product_name=cart_item.product_name,
+                        quantity=cart_item.quantity,  # Paid quantity
+                        free_quantity=free_quantity,  # FOC quantity
+                        unit_price=sales_price,
+                        total_price=total_price
                     )
                     db.session.add(order_item)
                     
-                    subtotal += pricing['pricing']['total_amount']
-                    discount_total += (pricing['base_price'] * pricing['scheme']['paid_quantity']) - pricing['pricing']['total_amount']
+                    subtotal += total_price
                     
-                    # Allocate quantity using FEFO (First Expiry, First Out) logic
-                    product = Product.query.get(cart_item.product_id)
-                    if product:
-                        # First try user's warehouse
-                        allocations, allocation_message = self.db_service.allocate_quantity_fefo(
+                    # Block quantity in dealer stock using FEFO (First Expiry, First Out)
+                    if user.role == 'mr' and user.area:
+                        # Block quantity in dealer_wise_stock_details
+                        success = self._block_quantity_for_mr_order(
+                            user=user,
                             product_code=cart_item.product_code,
-                            warehouse_id=warehouse.id,
-                            quantity_to_allocate=cart_item.product_quantity
+                            quantity=cart_item.quantity
                         )
                         
-                        # If not found in user's warehouse, try the product's actual warehouse
-                        if not allocations and product.warehouse_id != warehouse.id:
-                            self.logger.warning(f"Product {cart_item.product_code} not in user's warehouse ({warehouse.id}), trying product's warehouse ({product.warehouse_id})")
-                            allocations, allocation_message = self.db_service.allocate_quantity_fefo(
-                                product_code=cart_item.product_code,
-                                warehouse_id=product.warehouse_id,
-                                quantity_to_allocate=cart_item.product_quantity
-                            )
-                            
-                            if allocations:
-                                self.logger.info(f"✓ Successfully allocated from product's warehouse ({product.warehouse_id}) instead of user's warehouse ({warehouse.id})")
+                        if not success:
+                            self.logger.error(f"Failed to block quantity for {cart_item.product_code}")
+                            raise Exception(f"Failed to block quantity for {cart_item.product_code}")
                         
-                        if not allocations:
-                            self.logger.error(f"FEFO allocation failed for {cart_item.product_code}: {allocation_message}")
-                            raise Exception(f"Failed to allocate products: {allocation_message}")
-                        
-                        # Log allocation details
-                        batch_info = ", ".join([
-                            f"Batch {alloc['batch_number']} ({alloc['quantity']} units, expires: {alloc['expiry_date']})"
-                            for alloc in allocations
-                        ])
-                        self.logger.info(f"FEFO allocation for {cart_item.product_code}: {batch_info}")
+                        self.logger.info(f"Successfully blocked {cart_item.quantity} units of {cart_item.product_code} in dealer stock")
             
-            # Update order totals
-            # Note: subtotal already contains the final pricing (with discounts applied)
-            order.subtotal_amount = subtotal
-            order.discount_amount = discount_total
-            order.scheme_discount_amount = scheme_discount_total
-            # Total amount is just the subtotal (discounts already applied in pricing calculation)
-            order.total_amount = subtotal
-            order.status = 'in_transit'  # First stage: in transit
-            order.order_stage = 'distributor_notified'
+            # Calculate tax (5%) and update order totals
+            tax_rate = 0.05  # 5% tax
+            tax_amount = subtotal * tax_rate
+            grand_total = subtotal + tax_amount
+            
+            # Store subtotal, tax, and grand total
+            order.subtotal = subtotal
+            order.tax_amount = tax_amount
+            order.tax_rate = tax_rate
+            order.total_amount = grand_total  # Grand total includes tax
+            
+            # For MR orders, status should be 'pending' until dealer confirms
+            # For other users, status can be 'in_transit' after distributor notification
+            if user.role == 'mr':
+                order.status = 'pending'  # MR orders start as pending until dealer confirms
+                order.order_stage = 'placed'  # Order is placed, waiting for dealer confirmation
+            else:
+                order.status = 'in_transit'  # First stage: in transit
+                order.order_stage = 'distributor_notified'
+            
+            # NOTE: Stock is now BLOCKED (not sold yet)
+            # It will move from blocked to sold when dealer confirms the order
             
             db.session.commit()
             
@@ -586,7 +637,7 @@ You'll receive an email when any of these products become available."""
                         'product_id': expired_item.product_id,
                         'product_code': expired_item.product_code,
                         'product_name': product.product_name,
-                        'quantity': expired_item.product_quantity,
+                        'quantity': expired_item.quantity,
                         'available_qty': expired_info.get('available_qty', 0) if expired_info else 0,
                         'reason': expired_info.get('reason', 'expired') if expired_info else 'expired'
                     })
@@ -598,17 +649,22 @@ You'll receive an email when any of these products become available."""
                 if product:
                     pricing = self.pricing_service.calculate_product_pricing(
                         cart_item.product_id, 
-                        cart_item.product_quantity
+                        cart_item.quantity
                     )
                     if 'error' not in pricing:
+                        # Get total quantity including FOC
+                        foc_info = pricing.get('scheme', {})  # FOC info is in 'scheme' key
+                        free_quantity = foc_info.get('free_quantity', 0)
+                        total_quantity = cart_item.quantity + free_quantity
+                        
                         valid_items_details.append({
                             'name': product.product_name,
                             'code': cart_item.product_code,
-                            'quantity': cart_item.product_quantity,
-                            'free': pricing['scheme']['free_quantity'],
+                            'quantity': cart_item.quantity,  # Paid quantity
+                            'total_quantity': total_quantity,  # Total including FOC
+                            'free_quantity': free_quantity,  # Free quantity
                             'unit_price': pricing['pricing']['final_price'],
-                            'total': pricing['pricing']['total_amount'],
-                            'scheme': pricing['scheme']['name']
+                            'total': pricing['pricing']['total_amount']
                         })
             
             # Create pending orders for expired products
@@ -620,11 +676,9 @@ You'll receive an email when any of these products become available."""
                         original_order_id=order.order_id,
                         product_code=expired_item.product_code,
                         product_name=product.product_name,
-                        requested_quantity=expired_item.product_quantity,
+                        requested_quantity=expired_item.quantity,
                         user_id=user.id,
-                        user_email=user.email,
-                        warehouse_id=warehouse.id,
-                        warehouse_location=warehouse.location_name
+                        user_email=user.email
                     )
                     if pending_order:
                         pending_products_created.append(pending_order)
@@ -643,44 +697,54 @@ You'll receive an email when any of these products become available."""
             
             # Get order items details from stored valid_items_details (already calculated)
             order_items_details = valid_items_details
-            # Total items should include both paid and free quantities
-            total_items = sum(item['quantity'] + item.get('free', 0) for item in valid_items_details)
+            # Total items (including FOC)
+            total_items = sum(item['total_quantity'] for item in valid_items_details)
             
             # Format order date
-            order_date_str = order.order_date.strftime('%B %d, %Y at %I:%M %p') if order.order_date else datetime.now().strftime('%B %d, %Y at %I:%M %p')
+            order_date_str = order.created_at.strftime('%B %d, %Y at %I:%M %p') if order.created_at else datetime.now().strftime('%B %d, %Y at %I:%M %p')
             
             # Build enhanced confirmation message
+            status_display = order.status.replace('_', ' ').title()
+            stage_display = order.order_stage.replace('_', ' ').title()
+            
+            # Determine status message based on user type
+            if user.role == 'mr':
+                status_message = f"Your order has been placed successfully and is currently **Pending** confirmation from the distributor. The distributor will review and confirm your order shortly."
+            else:
+                status_message = f"Your order is currently in the **{stage_display}** stage with status **{status_display}**. The distributor has been notified and will process your order shortly."
+            
             confirmation_message = f"""🎉 **Order Placed Successfully!**
 
 **📋 Order Details:**
 • **Order ID:** {order.order_id}
 • **Order Date:** {order_date_str}
-• **Total Amount:** ${order.total_amount:,.2f}
-• **Subtotal:** ${order.subtotal_amount:,.2f}
-• **Total Discounts:** ${order.discount_amount + order.scheme_discount_amount:,.2f}
-• **Status:** {order.status.replace('_', ' ').title()}
-• **Order Stage:** {order.order_stage.replace('_', ' ').title()}
-• **Warehouse:** {order.warehouse_location}
+• **Status:** {status_display}
+• **Area:** {order.mr.area if order.mr else 'N/A'}
 • **Total Items:** {total_items} units
 
 **🛍️ Order Items:**
+
+| Product | Code | Quantity | FOC | Total Qty | Unit Price | Total |
+|---------|------|----------|-----|-----------|------------|-------|
 """
             for item in order_items_details:
-                qty_display = f"{item['quantity']} + {item['free']} free" if item['free'] > 0 else str(item['quantity'])
-                confirmation_message += f"• **{item['name']} ({item['code']})**: {qty_display} units @ ${item['unit_price']:,.2f} each\n"
-                confirmation_message += f"  Scheme: {item['scheme']} | Item Total: ${item['total']:,.2f}\n\n"
+                # Show FOC in separate column
+                paid_qty = item['quantity']
+                free_qty = item['free_quantity']
+                total_qty = item['total_quantity']
+                confirmation_message += f"| {item['name']} | {item['code']} | {paid_qty} | +{free_qty} | **{total_qty}** | ${item['unit_price']:,.2f} | ${item['total']:,.2f} |\n"
             
-            confirmation_message += f"""**💰 Financial Summary:**
-• Subtotal: ${order.subtotal_amount:,.2f}
-• Discounts: ${order.discount_amount:,.2f}
-• Scheme Savings: ${order.scheme_discount_amount:,.2f}
-• **Final Total: ${order.total_amount:,.2f}**
+            confirmation_message += f"""
+**💰 Payment Summary:**
+• **Subtotal:** ${order.subtotal:,.2f}
+• **Tax (5%):** ${order.tax_amount:,.2f}
+• **Grand Total:** ${order.total_amount:,.2f}
 
-**📊 Current Status:**
-Your order is currently in the **"{order.order_stage.replace('_', ' ').title()}"** stage with status **"{order.status.replace('_', ' ').title()}"**. The distributor has been notified and will confirm your order shortly.
+**📊 Status:**
+• {status_message}
 
-**📧 Email Confirmation:**
-A detailed order confirmation has been sent to {user.email}. Please check your inbox for complete order information and tracking details.
+**📧 Email:**
+• Confirmation sent to {user.email}
 """
             
             # Add expired/insufficient products notification if any
@@ -697,19 +761,8 @@ Some products in your order are currently not available:
                 
                 confirmation_message += f"""
 **📦 Auto-Order System:**
-These products will be automatically ordered when new stock arrives, and you'll receive an email notification. Your order ID for tracking is: **{order.order_id}**.
-
+These products will be automatically ordered when new stock arrives. Track with Order ID: **{order.order_id}**.
 """
-            
-            confirmation_message += """**🚀 What's Next?**
-• You'll receive email updates as your order progresses through each stage
-• Use Order ID **{order.order_id}** to track your order anytime
-• Our team will process your order within 24 hours
-• Expected delivery: 3-5 business days from confirmation
-• For any questions, please contact support with your Order ID
-
-**💎 Thank you for choosing Quantum Blue!**
-We're excited to deliver cutting-edge technology to you."""
             
             # Order is now in transit and distributor has been notified
             return {
@@ -740,69 +793,126 @@ We're excited to deliver cutting-edge technology to you."""
                     'message': "Order not found"
                 }
             distributor = User.query.get(distributor_user_id)
-            if not distributor or distributor.user_type != 'distributor':
+            if not distributor or distributor.role != 'distributor':
                 return {
                     'success': False,
                     'message': "Invalid distributor"
                 }
-            if order.warehouse_location != distributor.nearest_warehouse:
+            if order.mr.area != distributor.area:
                 return {
                     'success': False,
-                    'message': "This order doesn't belong to your warehouse."
+                    'message': "This order doesn't belong to your area."
                 }
             # Update order status
-            order.distributor_confirmed = True
             order.distributor_confirmed_at = datetime.utcnow()
             order.distributor_confirmed_by = distributor_user_id
             order.status = 'confirmed'
-            order.order_stage = 'distributor_confirmed'
-            # Move blocked quantities to confirmed
-            order_items = OrderItem.query.filter_by(order_id=order.id).all()
-            for item in order_items:
-                product = Product.query.get(item.product_id)
-                if product:
-                    product.confirmed_quantity += item.product_quantity_ordered
-                    product.blocked_quantity -= item.product_quantity_ordered
-                    product.available_for_sale = product.product_quantity - product.blocked_quantity - product.confirmed_quantity
+            order.order_stage = 'confirmed'
+            
+            # Move blocked quantities to sold when dealer confirms
+            # This is where stock transitions from blocked -> sold
+            if order.mr and order.mr.area:
+                # Get order items to move blocked to sold
+                order_items = OrderItem.query.filter_by(order_id=order.id).all()
+                # Convert to cart-like items for the method
+                cart_like_items = []
+                for item in order_items:
+                    # Create a simple object with the needed attributes
+                    class CartLikeItem:
+                        def __init__(self, product_code, quantity):
+                            self.product_code = product_code
+                            self.quantity = quantity
+                    cart_like_items.append(CartLikeItem(item.product_code, item.quantity))
+                
+                self._move_blocked_to_sold_for_mr_order(order.mr, cart_like_items)
+            
             db.session.commit()
-            # Generate invoice
+            
+            # Generate invoice (for records only - not stored in Order model)
             invoice_number = self._generate_invoice(order)
-            order.invoice_generated = True
-            order.invoice_generated_at = datetime.utcnow()
-            order.invoice_number = invoice_number
-            order.order_stage = 'invoice_generated'
-            db.session.commit()
 
             # Send enhanced confirmation email to MR or customer
-            mr = User.query.get(order.user_id)
+            mr = User.query.get(order.mr_id)
             admin_email = current_app.config.get('ADMIN_EMAIL') if current_app else None
             order_items_list = OrderItem.query.filter_by(order_id=order.id).all()
-            table = """<table style='border-collapse:collapse; width:100%;'><tr style='background:#f2f2f2;'><th>Product</th><th>Quantity</th><th>Unit Price</th><th>Discount</th><th>Scheme</th><th>Total</th></tr>"""
+            
+            # Build items table with FOC
+            table = """<table style='border-collapse:collapse; width:100%; margin:20px 0;'>
+                <thead><tr style='background:#3b82f6; color:white;'>
+                    <th style='padding:12px; text-align:left;'>Product</th>
+                    <th style='padding:12px; text-align:center;'>Qty</th>
+                    <th style='padding:12px; text-align:center;'>FOC</th>
+                    <th style='padding:12px; text-align:right;'>Unit Price</th>
+                    <th style='padding:12px; text-align:right;'>Total</th>
+                </tr></thead><tbody>"""
             for item in order_items_list:
-                paid = item.paid_quantity or (item.product_quantity_ordered or 0)
-                free = item.free_quantity or 0
-                q_s = f"{paid} + {free} = {paid + free}" if free else str(paid)
-                table += f"<tr><td>{item.product.product_name} ({item.product_code})</td><td>{q_s}</td><td>${item.unit_price}</td><td>${item.discount_amount}</td><td>{item.scheme_applied}</td><td>${item.total_price}</td></tr>"
-            table += "</table>"
-            email_body = f"""
-                <h2 style='color:#175DDC;'>Order Confirmed by Distributor</h2>
-                <p>Dear {mr.name},</p>
-                <p>Your order <b>{order.order_id}</b> has been <b>confirmed</b> by distributor <b>{distributor.name}</b> ({distributor.email}, {distributor.phone}).</p>
-                <p><b>Order Details:</b><br>
-                   Date: {order.order_date.strftime('%Y-%m-%d %H:%M:%S')}<br>
-                   Warehouse: {order.warehouse_location}<br>
-                   Status: <b>Confirmed</b>
-                </p>
+                quantity = item.quantity or 0
+                foc_qty = item.free_quantity or 0
+                foc_display = f"<strong>+{foc_qty}</strong>" if foc_qty > 0 else "-"
+                table += f"""<tr style='border-bottom:1px solid #e5e7eb;'>
+                    <td style='padding:10px;'>{item.product.product_name} ({item.product_code})</td>
+                    <td style='padding:10px; text-align:center;'>{quantity}</td>
+                    <td style='padding:10px; text-align:center; color:#10b981;'>{foc_display}</td>
+                    <td style='padding:10px; text-align:right;'>${item.unit_price:,.2f}</td>
+                    <td style='padding:10px; text-align:right;'>${item.total_price:,.2f}</td>
+                </tr>"""
+            table += "</tbody></table>"
+            
+            # Tax information
+            tax_html = ""
+            if hasattr(order, 'subtotal') and order.subtotal:
+                tax_html = f"""
+                    <div class='success-box'>
+                        <h3 style='margin-top: 0; color: #059669;'>💰 Payment Summary</h3>
+                        <p style='margin: 5px 0;'><strong>Subtotal:</strong> ${order.subtotal:,.2f}</p>
+                        <p style='margin: 5px 0;'><strong>Tax (5%):</strong> ${order.tax_amount:,.2f}</p>
+                        <p style='margin: 5px 0; font-size: 1.2em;'><strong>Grand Total:</strong> ${order.total_amount:,.2f}</p>
+                    </div>
+                """
+            else:
+                tax_html = f"<p style='font-size:1.2em;'><strong>Total Amount:</strong> ${order.total_amount:,.2f}</p>"
+            
+            content = f"""
+                <h2 style='color:#059669; margin-top:0;'>✅ Order Confirmed!</h2>
+                <p>Dear <strong>{mr.name}</strong>,</p>
+                <p>Great news! Your order <strong>{order.order_id}</strong> has been confirmed by distributor <strong>{distributor.name}</strong>.</p>
+                
+                <div class='info-box'>
+                    <h3 style='margin-top: 0;'>📋 Order Information</h3>
+                    <p style='margin: 5px 0;'><strong>Order ID:</strong> {order.order_id}</p>
+                    <p style='margin: 5px 0;'><strong>Date:</strong> {order.created_at.strftime('%B %d, %Y at %I:%M %p')}</p>
+                    <p style='margin: 5px 0;'><strong>Area:</strong> {order.mr.area if order.mr else 'N/A'}</p>
+                    <p style='margin: 5px 0;'><strong>Status:</strong> <span style='color:#059669; font-weight:bold;'>Confirmed</span></p>
+                    <p style='margin: 5px 0;'><strong>Invoice:</strong> {invoice_number}</p>
+                </div>
+                
+                <h3>🛍️ Order Items</h3>
                 {table}
-                <p><b>Total Amount:</b> ${order.total_amount}</p>
-                <p>If you have questions, reply to this email or contact your distributor above directly.</p>
-                <p style='color:#686262;font-size:13px;'>Thank you for choosing Quantum Blue!</p>
+                
+                {tax_html}
+                
+                <div class='info-box'>
+                    <h3 style='margin-top: 0;'>Distributor Contact</h3>
+                    <p style='margin: 5px 0;'><strong>Name:</strong> {distributor.name}</p>
+                    <p style='margin: 5px 0;'><strong>Email:</strong> {distributor.email}</p>
+                    <p style='margin: 5px 0;'><strong>Phone:</strong> {distributor.phone}</p>
+                </div>
+                
+                <p style='margin-top: 20px;'>If you have any questions, please contact your distributor directly or reply to this email.</p>
             """
+            
+            from app.email_utils import create_email_template
+            email_html = create_email_template(
+                title="Order Confirmed",
+                content=content,
+                footer_text="Thank you for choosing Quantum Blue!"
+            )
+            
             if mr:
-                send_email(mr.email, f"Your order {order.order_id} has been confirmed!", email_body, 'order_confirmed_customer')
-            send_email(distributor.email, f"Order {order.order_id} confirmed for fulfillment", email_body, 'order_confirmed_distributor')
+                send_email(mr.email, f"✅ Your order {order.order_id} has been confirmed!", email_html, 'order_confirmed_customer')
+            send_email(distributor.email, f"Order {order.order_id} confirmed for fulfillment", email_html, 'order_confirmed_distributor')
             if admin_email:
-                send_email(admin_email, f"Order {order.order_id} confirmed (system copy)", email_body, 'order_confirmed_admin')
+                send_email(admin_email, f"[Admin] Order {order.order_id} confirmed", email_html, 'order_confirmed_admin')
 
             return {
                 'success': True,
@@ -815,6 +925,138 @@ We're excited to deliver cutting-edge technology to you."""
             return {
                 'success': False,
                 'message': f"Error confirming order: {str(e)}"
+            }
+    
+    def reject_order_by_distributor(self, order_id, distributor_user_id, rejection_reason=None):
+        """
+        Reject order by distributor and unblock stock
+        """
+        try:
+            order = Order.query.filter_by(order_id=order_id).first()
+            if not order:
+                return {
+                    'success': False,
+                    'message': "Order not found"
+                }
+            
+            distributor = User.query.get(distributor_user_id)
+            if not distributor or distributor.role != 'distributor':
+                return {
+                    'success': False,
+                    'message': "Invalid distributor"
+                }
+            
+            if order.mr.area != distributor.area:
+                return {
+                    'success': False,
+                    'message': "This order doesn't belong to your area."
+                }
+            
+            # Update order status
+            order.status = 'rejected'
+            order.order_stage = 'rejected'
+            
+            # Unblock quantities - move blocked back to available
+            if order.mr and order.mr.area:
+                # Get order items to unblock
+                order_items = OrderItem.query.filter_by(order_id=order.id).all()
+                
+                # Find dealers in MR's area
+                dealers_in_area = User.query.filter_by(
+                    role='distributor',
+                    area=order.mr.area
+                ).all()
+                
+                dealer_unique_ids = [d.unique_id for d in dealers_in_area]
+                
+                for item in order_items:
+                    # Get stock details with blocked quantity
+                    from sqlalchemy import case
+                    stock_details = DealerWiseStockDetails.query.filter(
+                        DealerWiseStockDetails.product_code == item.product_code,
+                        DealerWiseStockDetails.dealer_unique_id.in_(dealer_unique_ids),
+                        DealerWiseStockDetails.blocked_quantity > 0
+                    ).order_by(
+                        case(
+                            (DealerWiseStockDetails.expiry_date.is_(None), 1),
+                            else_=0
+                        ),
+                        DealerWiseStockDetails.expiry_date.asc()
+                    ).all()
+                    
+                    remaining_to_unblock = item.quantity
+                    
+                    for stock_detail in stock_details:
+                        if remaining_to_unblock <= 0:
+                            break
+                        
+                        blocked_in_this_stock = stock_detail.blocked_quantity
+                        if blocked_in_this_stock <= 0:
+                            continue
+                        
+                        # Unblock quantity
+                        quantity_to_unblock = min(remaining_to_unblock, blocked_in_this_stock)
+                        stock_detail.blocked_quantity -= quantity_to_unblock
+                        stock_detail.update_available_quantity()
+                        
+                        self.logger.info(
+                            f"Unblocked {quantity_to_unblock} units of {item.product_code} "
+                            f"(Stock ID: {stock_detail.id}, Blocked now: {stock_detail.blocked_quantity}, "
+                            f"Available now: {stock_detail.available_for_sale})"
+                        )
+                        
+                        remaining_to_unblock -= quantity_to_unblock
+            
+            db.session.commit()
+            
+            # Send rejection notification to MR with enhanced template
+            mr = User.query.get(order.mr_id)
+            if mr:
+                reason_text = f"<strong>Reason:</strong> {rejection_reason}" if rejection_reason else "No specific reason was provided."
+                
+                content = f"""
+                    <h2 style='color:#dc3545; margin-top:0;'>❌ Order Rejected</h2>
+                    <p>Dear <strong>{mr.name}</strong>,</p>
+                    <p>We regret to inform you that your order <strong>{order.order_id}</strong> has been rejected by distributor <strong>{distributor.name}</strong>.</p>
+                    
+                    <div class='warning-box'>
+                        <h3 style='margin-top: 0;'>Rejection Details</h3>
+                        <p style='margin: 5px 0;'>{reason_text}</p>
+                        <p style='margin: 5px 0;'><strong>Order ID:</strong> {order.order_id}</p>
+                        <p style='margin: 5px 0;'><strong>Date:</strong> {order.created_at.strftime('%B %d, %Y at %I:%M %p')}</p>
+                    </div>
+                    
+                    <div class='info-box'>
+                        <h3 style='margin-top: 0;'>Distributor Contact</h3>
+                        <p style='margin: 5px 0;'>For more information about this rejection, please contact your distributor:</p>
+                        <p style='margin: 5px 0;'><strong>Name:</strong> {distributor.name}</p>
+                        <p style='margin: 5px 0;'><strong>Email:</strong> <a href='mailto:{distributor.email}'>{distributor.email}</a></p>
+                        <p style='margin: 5px 0;'><strong>Phone:</strong> {distributor.phone}</p>
+                    </div>
+                    
+                    <p style='margin-top: 20px;'>You can place a new order anytime through the chatbot.</p>
+                """
+                
+                from app.email_utils import create_email_template
+                email_html = create_email_template(
+                    title="Order Rejected",
+                    content=content,
+                    footer_text="If you have any questions, please contact your distributor or reply to this email."
+                )
+                
+                send_email(mr.email, f"❌ Order {order.order_id} - Rejected", email_html, 'order_rejected')
+            
+            return {
+                'success': True,
+                'message': f"Order {order_id} has been rejected and stock unblocked"
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error rejecting order: {str(e)}")
+            db.session.rollback()
+            return {
+                'success': False,
+                'message': f"Error rejecting order: {str(e)}"
             }
     
     def get_order_status(self, order_id, user_id=None):
@@ -830,7 +1072,7 @@ We're excited to deliver cutting-edge technology to you."""
                 }
             
             # Check if user has access to this order
-            if user_id and order.user_id != user_id:
+            if user_id and order.mr_id != user_id:
                 return {
                     'success': False,
                     'message': "Access denied"
@@ -842,13 +1084,9 @@ We're excited to deliver cutting-edge technology to you."""
                 order_items.append({
                     'product_code': item.product_code,
                     'product_name': item.product.product_name,
-                    'quantity': item.product_quantity_ordered,
+                    'quantity': item.quantity,
                     'unit_price': item.unit_price,
-                    'total_price': item.total_price,
-                    'discount_amount': item.discount_amount,
-                    'scheme_applied': item.scheme_applied,
-                    'free_quantity': item.free_quantity,
-                    'paid_quantity': item.paid_quantity
+                    'total_price': item.total_price
                 })
             
             # Get distributor info
@@ -863,6 +1101,9 @@ We're excited to deliver cutting-edge technology to you."""
                         'company': distributor.company_name
                     }
             
+            # Get MR info
+            mr = order.mr if order.mr else None
+            
             return {
                 'success': True,
                 'order': {
@@ -870,16 +1111,9 @@ We're excited to deliver cutting-edge technology to you."""
                     'status': order.status,
                     'order_stage': order.order_stage,
                     'total_amount': order.total_amount,
-                    'subtotal_amount': order.subtotal_amount,
-                    'discount_amount': order.discount_amount,
-                    'scheme_discount_amount': order.scheme_discount_amount,
-                    'order_date': order.order_date.isoformat(),
-                    'warehouse_location': order.warehouse_location,
-                    'placed_by': order.placed_by,
-                    'distributor_confirmed': order.distributor_confirmed,
+                    'order_date': order.created_at.isoformat() if order.created_at else None,
+                    'area': mr.area if mr else None,
                     'distributor_confirmed_at': order.distributor_confirmed_at.isoformat() if order.distributor_confirmed_at else None,
-                    'invoice_generated': order.invoice_generated,
-                    'invoice_number': order.invoice_number,
                     'items': order_items,
                     'distributor_info': distributor_info
                 }
@@ -895,7 +1129,7 @@ We're excited to deliver cutting-edge technology to you."""
     def get_order_status_for_distributor(self, order_id, distributor_id):
         """Get order status for a distributor based on warehouse/location"""
         distributor = User.query.get(distributor_id)
-        if not distributor or distributor.user_type != "distributor":
+        if not distributor or distributor.role != "distributor":
             return {
                 'success': False,
                 'message': "Only distributors can track/confirm via warehouse."
@@ -906,31 +1140,28 @@ We're excited to deliver cutting-edge technology to you."""
                 'success': False,
                 'message': "Order not found"
             }
-        if order.warehouse_location != distributor.nearest_warehouse:
+        if order.mr.area != distributor.area:
             return {
                 'success': False,
-                'message': "This order doesn't belong to your warehouse."
+                'message': "This order doesn't belong to your area."
             }
         # Compose table
         items = []
         for item in order.order_items:
-            paid = item.paid_quantity or (item.product_quantity_ordered or 0)
-            free = item.free_quantity or 0
+            quantity = item.quantity or 0
             items.append({
                 'product_code': item.product_code,
                 'product_name': item.product.product_name,
-                'quantity': f"{paid} + {free} = {paid + free}",
+                'quantity': quantity,
                 'unit_price': item.unit_price,
-                'total_price': item.total_price,
-                'scheme_applied': item.scheme_applied,
-                'discount_amount': item.discount_amount,
+                'total_price': item.total_price
             })
-        table = "| Product | Quantity | Unit Price | Discount | Scheme | Total |\n|--------|---------|-----------|----------|--------|-------|\n"
+        table = "| Product | Quantity | Unit Price | Total |\n|--------|---------|-----------|-------|\n"
         for row in items:
-            table += f"| {row['product_name']} ({row['product_code']}) | {row['quantity']} | ${row['unit_price']} | ${row['discount_amount']} | {row['scheme_applied']} | ${row['total_price']} |\n"
+            table += f"| {row['product_name']} ({row['product_code']}) | {row['quantity']} | ${row['unit_price']} | ${row['total_price']} |\n"
         status = order.status
         
-        summary = f"**Order ID:** {order.order_id}\n**Status:** {status}\n**Placed By:** {order.user.name} ({order.user.user_type})\n\n" + table
+        summary = f"**Order ID:** {order.order_id}\n**Status:** {status}\n**Placed By:** {order.mr.name} ({order.mr.role})\n\n" + table
         return {
             'success': True,
             'message': summary,
@@ -952,30 +1183,28 @@ We're excited to deliver cutting-edge technology to you."""
             distributors = self.db_service.get_distributors()
             distributor = None
             for dist in distributors:
-                if dist.nearest_warehouse == order.warehouse_location:
+                if dist.area == order.mr.area:
                     distributor = dist
                     break
             if not distributor:
-                self.logger.warning(f"No distributor found for warehouse {order.warehouse_location}")
+                self.logger.warning(f"No distributor found for area {order.mr.area if order.mr else 'N/A'}")
                 return
             order_items = OrderItem.query.filter_by(order_id=order.id).all()
             # --- Table ---
             table = """
             <table style='width:100%;border-collapse:collapse;margin-bottom:16px;'>
-                <tr style='background:#175DDC;color:white;'><th>PRODUCT</th><th>QUANTITY</th><th>UNIT PRICE</th><th>DISCOUNT</th><th>SCHEME</th><th>TOTAL</th></tr>
+                <tr style='background:#175DDC;color:white;'><th>PRODUCT</th><th>QUANTITY</th><th>UNIT PRICE</th><th>TOTAL</th></tr>
             """
             for item in order_items:
-                paid = item.paid_quantity or item.product_quantity_ordered or 0
-                free = item.free_quantity or 0
-                q_s = f"{paid} + {free} = {paid + free}" if free else str(paid)
-                table += f"<tr style='background:#f7f8fa;'><td>{item.product.product_name} ({item.product_code})</td><td>{q_s}</td><td>${item.unit_price}</td><td>${item.discount_amount}</td><td>{item.scheme_applied}</td><td>${item.total_price}</td></tr>"
+                quantity = item.quantity or 0
+                table += f"<tr style='background:#f7f8fa;'><td>{item.product.product_name} ({item.product_code})</td><td>{quantity}</td><td>${item.unit_price}</td><td>${item.total_price}</td></tr>"
             table += "</table>"
             # --- LLM summary ---
             llm = self.llm_service.groq_service.client if hasattr(self.llm_service, 'groq_service') else None
-            user_block = f"<b>Order Placed By:</b> {placed_by_user.name} ({placed_by_user.user_type}) — {placed_by_user.email}<br>Phone: {placed_by_user.phone}" if placed_by_user else ''
+            user_block = f"<b>Order Placed By:</b> {placed_by_user.name} ({placed_by_user.role}) — {placed_by_user.email}<br>Phone: {placed_by_user.phone}" if placed_by_user else ''
             summary = ""
             if llm:
-                prompt = f"You are an AI assistant at Quantum Blue. Summarize the following order for a distributor, focusing on clarity, shipment urgency, and next steps.\nOrder ID: {order.order_id}\nCustomer: {placed_by_user.name}\nTotal: ${order.total_amount}\nWarehouse: {order.warehouse_location}.\nSay: 'Please confirm or discuss changes/next steps.'\nKeep it one concise, friendly paragraph."
+                prompt = f"You are an AI assistant at Quantum Blue. Summarize the following order for a distributor, focusing on clarity, shipment urgency, and next steps.\nOrder ID: {order.order_id}\nCustomer: {placed_by_user.name}\nTotal: ${order.total_amount}\nArea: {order.mr.area if order.mr else 'N/A'}.\nSay: 'Please confirm or discuss changes/next steps.'\nKeep it one concise, friendly paragraph."
                 response = llm.chat.completions.create(
                     model=current_app.config.get('GROQ_MODEL', 'llama-3.3-70b-versatile'),
                     messages=[{"role": "user", "content": prompt}],
@@ -1078,21 +1307,56 @@ We're excited to deliver cutting-edge technology to you."""
                     elif has_insufficient_stock:
                         summary = f"{summary} IMPORTANT: This order includes products with insufficient stock: {expired_products_list}. These will be auto-ordered when stock arrives."
             
-            # --- Email body ---
-            html = f"""
-                <div style='background:#f2f3f5;padding:24px;border-radius:12px;'>
-                    <div style='text-align:center;'><img src='https://i.ibb.co/mG6qYxw/quantum-blue-logo.png' alt='Quantum Blue Logo' height='60'/></div>
-                    <h2 style='color:#175DDC;'>New Order Notification</h2>
-                    <div style='font-size:1.08em;margin-bottom:18px;color:#222;'>Order ID: <b>{order.order_id}</b><br>
-                    Date: {order.order_date.strftime('%Y-%m-%d %H:%M:%S')}<br>
-                    Warehouse: {order.warehouse_location}<br>
-                    Status: <b style='color:#ff9500;'>{order.status or order.order_stage}</b><br>{user_block}</div>
-                    <div style='margin-bottom:15px;color:#222;'>{summary}</div>
-                    {expired_warning_html}
-                    {table}
-                    <div style='margin-top:10px;'><b>Order Total:</b> ${order.total_amount}</div>
-                    <div style='font-size:13px;margin-top:20px;color:#444;'>This notification was sent by Quantum Blue AI Assistant (Powered by Quantum Blue AI). For questions, reply to this email or contact Quantum Blue support.</div>
-                </div>"""
+            # --- Build email content with tax information ---
+            tax_html = ""
+            if hasattr(order, 'subtotal') and order.subtotal:
+                tax_html = f"""
+                    <div class='success-box' style='margin-top: 20px;'>
+                        <h3 style='margin-top: 0; color: #059669;'>💰 Payment Summary</h3>
+                        <p style='margin: 5px 0;'><strong>Subtotal:</strong> ${order.subtotal:,.2f}</p>
+                        <p style='margin: 5px 0;'><strong>Tax (5%):</strong> ${order.tax_amount:,.2f}</p>
+                        <p style='margin: 5px 0; font-size: 1.2em;'><strong>Grand Total:</strong> ${order.total_amount:,.2f}</p>
+                    </div>
+                """
+            else:
+                tax_html = f"<div style='margin-top:10px; font-size:1.2em;'><b>Order Total:</b> ${order.total_amount:,.2f}</div>"
+            
+            content = f"""
+                <h2 style='color:#1e40af; margin-top: 0;'>New Order Notification 📦</h2>
+                
+                <div class='info-box'>
+                    <p style='margin: 5px 0;'><strong>Order ID:</strong> {order.order_id}</p>
+                    <p style='margin: 5px 0;'><strong>Date:</strong> {order.created_at.strftime('%B %d, %Y at %I:%M %p')}</p>
+                    <p style='margin: 5px 0;'><strong>Area:</strong> {order.mr.area if order.mr else 'N/A'}</p>
+                    <p style='margin: 5px 0;'><strong>Status:</strong> <span style='color:#f59e0b; font-weight: bold;'>{order.status or order.order_stage}</span></p>
+                    {user_block}
+                </div>
+                
+                <p style='margin: 20px 0;'>{summary}</p>
+                
+                {expired_warning_html}
+                
+                {table}
+                
+                {tax_html}
+                
+                <div class='info-box' style='margin-top: 25px;'>
+                    <h3 style='margin-top: 0;'>Next Steps</h3>
+                    <p>• Review the order details above</p>
+                    <p>• Check stock availability</p>
+                    <p>• Confirm or reject the order via the chatbot</p>
+                    <p>• Contact the MR if you have any questions</p>
+                </div>
+            """
+            
+            # Import and use the enhanced template
+            from app.email_utils import create_email_template
+            html = create_email_template(
+                title="New Order Notification",
+                content=content,
+                footer_text="This notification was sent by Quantum Blue AI. Please respond via the chatbot or reply to this email."
+            )
+            
             subject = f"New Order Notification - {order.order_id}"
             send_email(
                 distributor.email,
@@ -1118,13 +1382,13 @@ We're excited to deliver cutting-edge technology to you."""
                 order_items.append({
                     'product_code': item.product_code,
                     'product_name': item.product.product_name,
-                    'quantity': item.product_quantity_ordered,
+                    'quantity': item.quantity,
                     'unit_price': item.unit_price,
                     'total_price': item.total_price
                 })
             
             # Email to customer
-            customer = User.query.get(order.user_id)
+            customer = User.query.get(order.mr_id)
             if customer:
                 subject = f"Invoice Generated - Order {order.order_id}"
                 html_content = self._generate_invoice_html(order, order_items, customer, distributor)
@@ -1189,13 +1453,13 @@ We're excited to deliver cutting-edge technology to you."""
                 </div>
                 
                 <div class="content">
-                    <h2>Invoice Details</h2>
+                    <h2>Order Confirmation</h2>
                     <div class="invoice-details">
-                        <p><strong>Invoice Number:</strong> {order.invoice_number}</p>
+                        <p><strong>Invoice Number:</strong> {invoice_number}</p>
                         <p><strong>Order ID:</strong> {order.order_id}</p>
-                        <p><strong>Date:</strong> {order.invoice_generated_at.strftime('%Y-%m-%d %H:%M:%S')}</p>
+                        <p><strong>Date:</strong> {order.created_at.strftime('%Y-%m-%d %H:%M:%S')}</p>
                         <p><strong>Status:</strong> {order.status.title()}</p>
-                        <p><strong>Warehouse:</strong> {order.warehouse_location}</p>
+                        <p><strong>Area:</strong> {order.mr.area if order.mr else 'N/A'}</p>
                         <p><strong>Customer:</strong> {customer.name if customer else 'N/A'}</p>
                         <p><strong>Distributor:</strong> {distributor.name if distributor else 'N/A'}</p>
                     </div>
@@ -1217,9 +1481,6 @@ We're excited to deliver cutting-edge technology to you."""
                     </table>
                     
                     <div class="total">
-                        <p><strong>Subtotal: ${order.subtotal_amount:.2f}</strong></p>
-                        <p><strong>Discount: -${order.discount_amount:.2f}</strong></p>
-                        <p><strong>Scheme Discount: -${order.scheme_discount_amount:.2f}</strong></p>
                         <p><strong>Total Amount: ${order.total_amount:.2f}</strong></p>
                     </div>
                     
@@ -1234,3 +1495,245 @@ We're excited to deliver cutting-edge technology to you."""
         """
         
         return html_content
+    
+    def _block_quantity_for_mr_order(self, user, product_code, quantity):
+        """
+        Block quantity in dealer_wise_stock_details when MR places an order
+        Uses FEFO (First Expiry First Out) to block from earliest expiring stock
+        """
+        try:
+            from datetime import date
+            today = date.today()
+            
+            # Find dealers in the MR's area
+            dealers_in_area = User.query.filter_by(
+                role='distributor',
+                area=user.area
+            ).all()
+            
+            if not dealers_in_area:
+                self.logger.warning(f"No dealers found in area {user.area} for MR {user.name}")
+                return False
+            
+            remaining_quantity = quantity
+            
+            # Get all confirmed stock details for this product from dealers in MR's area
+            # Ordered by expiration date (earliest first) for FEFO
+            # SQL Server doesn't support NULLS LAST, so we use a different approach
+            from sqlalchemy import case
+            all_stock_details = DealerWiseStockDetails.query.filter(
+                DealerWiseStockDetails.product_code == product_code,
+                DealerWiseStockDetails.status == 'confirmed',
+                DealerWiseStockDetails.dealer_unique_id.in_([d.unique_id for d in dealers_in_area])
+            ).order_by(
+                case(
+                    (DealerWiseStockDetails.expiry_date.is_(None), 1),
+                    else_=0
+                ),
+                DealerWiseStockDetails.expiry_date.asc()
+            ).all()
+            
+            # Filter to only stock with available_for_sale > 0
+            available_stock = [s for s in all_stock_details if s.available_for_sale > 0]
+            
+            if not available_stock:
+                self.logger.warning(f"No available stock found for {product_code} from dealers in area {user.area}")
+                return False
+            
+            # Block quantity using FEFO (earliest expiry first)
+            for stock_detail in available_stock:
+                if remaining_quantity <= 0:
+                    break
+                
+                available_in_this_stock = stock_detail.available_for_sale
+                if available_in_this_stock <= 0:
+                    continue
+                
+                # Calculate how much to block from this stock detail
+                quantity_to_block = min(remaining_quantity, available_in_this_stock)
+                
+                # Block the quantity
+                stock_detail.blocked_quantity += quantity_to_block
+                stock_detail.update_available_quantity()
+                
+                self.logger.info(
+                    f"Blocked {quantity_to_block} units of {product_code} from dealer {stock_detail.dealer_name} "
+                    f"(Stock ID: {stock_detail.id}, Expiry: {stock_detail.expiry_date}, "
+                    f"Available now: {stock_detail.available_for_sale})"
+                )
+                
+                remaining_quantity -= quantity_to_block
+            
+            if remaining_quantity > 0:
+                self.logger.warning(
+                    f"Could only block {quantity - remaining_quantity} out of {quantity} units "
+                    f"for {product_code} (insufficient stock in dealer_wise_stock_details)"
+                )
+                return False  # Failed to block all requested quantity
+            
+            db.session.flush()  # Flush changes but don't commit yet (will be committed with order)
+            return True  # Successfully blocked all requested quantity
+            
+        except Exception as e:
+            self.logger.error(f"Error blocking quantity for MR order: {str(e)}")
+            return False  # Return False on exception
+    
+    def _move_blocked_to_sold_for_mr_order(self, user, cart_items):
+        """
+        Move blocked quantities to sold when MR confirms order
+        Updates available_for_sale accordingly
+        """
+        try:
+            from app.models import DealerWiseStockDetails
+            
+            # Find dealers in the MR's area
+            dealers_in_area = User.query.filter_by(
+                role='distributor',
+                area=user.area
+            ).all()
+            
+            if not dealers_in_area:
+                self.logger.warning(f"No dealers found in area {user.area} for MR {user.name}")
+                return
+            
+            dealer_unique_ids = [d.unique_id for d in dealers_in_area]
+            
+            # Process each cart item
+            for cart_item in cart_items:
+                product_code = cart_item.product_code
+                quantity_to_move = cart_item.quantity
+                
+                # Get all stock details with blocked quantity for this product
+                # SQL Server doesn't support NULLS LAST, so we use CASE
+                from sqlalchemy import case
+                stock_details = DealerWiseStockDetails.query.filter(
+                    DealerWiseStockDetails.product_code == product_code,
+                    DealerWiseStockDetails.status == 'confirmed',
+                    DealerWiseStockDetails.dealer_unique_id.in_(dealer_unique_ids),
+                    DealerWiseStockDetails.blocked_quantity > 0
+                ).order_by(
+                    case(
+                        (DealerWiseStockDetails.expiry_date.is_(None), 1),
+                        else_=0
+                    ),
+                    DealerWiseStockDetails.expiry_date.asc()
+                ).all()
+                
+                remaining_quantity = quantity_to_move
+                
+                # Move blocked to sold using FEFO (earliest expiry first)
+                for stock_detail in stock_details:
+                    if remaining_quantity <= 0:
+                        break
+                    
+                    blocked_in_this_stock = stock_detail.blocked_quantity
+                    if blocked_in_this_stock <= 0:
+                        continue
+                    
+                    # Calculate how much to move from this stock detail
+                    quantity_to_move_from_stock = min(remaining_quantity, blocked_in_this_stock)
+                    
+                    # Move from blocked to sold
+                    stock_detail.blocked_quantity -= quantity_to_move_from_stock
+                    stock_detail.sold_quantity += quantity_to_move_from_stock
+                    stock_detail.update_available_quantity()
+                    
+                    self.logger.info(
+                        f"Moved {quantity_to_move_from_stock} units of {product_code} from blocked to sold "
+                        f"(Stock ID: {stock_detail.id}, Dealer: {stock_detail.dealer_name}, "
+                        f"Blocked now: {stock_detail.blocked_quantity}, Sold now: {stock_detail.sold_quantity}, "
+                        f"Available now: {stock_detail.available_for_sale})"
+                    )
+                    
+                    remaining_quantity -= quantity_to_move_from_stock
+                
+                if remaining_quantity > 0:
+                    self.logger.warning(
+                        f"Could only move {quantity_to_move - remaining_quantity} out of {quantity_to_move} units "
+                        f"from blocked to sold for {product_code} (insufficient blocked quantity)"
+                    )
+            
+            db.session.flush()  # Flush changes
+            
+        except Exception as e:
+            self.logger.error(f"Error moving blocked to sold for MR order: {str(e)}")
+            # Don't raise - allow order to proceed even if this fails
+    
+    def _unblock_quantity_for_mr_order(self, user, product_code, quantity):
+        """
+        Unblock quantity in dealer_wise_stock_details when MR removes item from cart
+        Uses FEFO (First Expiry First Out) to unblock from earliest expiring stock
+        """
+        try:
+            from app.models import DealerWiseStockDetails
+            
+            # Find dealers in the MR's area
+            dealers_in_area = User.query.filter_by(
+                role='distributor',
+                area=user.area
+            ).all()
+            
+            if not dealers_in_area:
+                self.logger.warning(f"No dealers found in area {user.area} for MR {user.name}")
+                return
+            
+            dealer_unique_ids = [d.unique_id for d in dealers_in_area]
+            remaining_quantity = quantity
+            
+            # Get all stock details with blocked quantity for this product
+            # Ordered by expiration date (earliest first) for FEFO
+            # SQL Server doesn't support NULLS LAST, so we use CASE
+            from sqlalchemy import case
+            stock_details = DealerWiseStockDetails.query.filter(
+                DealerWiseStockDetails.product_code == product_code,
+                DealerWiseStockDetails.status == 'confirmed',
+                DealerWiseStockDetails.dealer_unique_id.in_(dealer_unique_ids),
+                DealerWiseStockDetails.blocked_quantity > 0
+            ).order_by(
+                case(
+                    (DealerWiseStockDetails.expiry_date.is_(None), 1),
+                    else_=0
+                ),
+                DealerWiseStockDetails.expiry_date.asc()
+            ).all()
+            
+            if not stock_details:
+                self.logger.warning(f"No blocked stock found for {product_code} from dealers in area {user.area}")
+                return
+            
+            # Unblock quantity using FEFO (earliest expiry first)
+            for stock_detail in stock_details:
+                if remaining_quantity <= 0:
+                    break
+                
+                blocked_in_this_stock = stock_detail.blocked_quantity
+                if blocked_in_this_stock <= 0:
+                    continue
+                
+                # Calculate how much to unblock from this stock detail
+                quantity_to_unblock = min(remaining_quantity, blocked_in_this_stock)
+                
+                # Unblock the quantity
+                stock_detail.blocked_quantity -= quantity_to_unblock
+                stock_detail.update_available_quantity()
+                
+                self.logger.info(
+                    f"Unblocked {quantity_to_unblock} units of {product_code} from dealer {stock_detail.dealer_name} "
+                    f"(Stock ID: {stock_detail.id}, Expiry: {stock_detail.expiry_date}, "
+                    f"Blocked now: {stock_detail.blocked_quantity}, Available now: {stock_detail.available_for_sale})"
+                )
+                
+                remaining_quantity -= quantity_to_unblock
+            
+            if remaining_quantity > 0:
+                self.logger.warning(
+                    f"Could only unblock {quantity - remaining_quantity} out of {quantity} units "
+                    f"for {product_code} (insufficient blocked quantity in dealer_wise_stock_details)"
+                )
+            
+            db.session.flush()  # Flush changes
+            db.session.commit()  # Commit unblocking
+            
+        except Exception as e:
+            self.logger.error(f"Error unblocking quantity for MR order: {str(e)}")
+            # Don't raise - allow removal to proceed even if unblocking fails

@@ -1,4 +1,6 @@
 import logging
+import os
+import base64
 from flask import current_app, render_template_string
 from flask_mail import Message
 from app import mail, db
@@ -6,6 +8,125 @@ from app.models import EmailLog
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+def get_logo_base64():
+    """Get Quantum Blue logo as base64 for email embedding"""
+    try:
+        logo_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'static', 'Images', 'Q_logo_quantum_blue-removebg-preview.png')
+        with open(logo_path, 'rb') as img_file:
+            logo_data = base64.b64encode(img_file.read()).decode('utf-8')
+            return f"data:image/png;base64,{logo_data}"
+    except Exception as e:
+        logger.warning(f"Could not load logo: {str(e)}")
+        return ""
+
+def create_email_template(title, content, footer_text="This is an automated email from Quantum Blue AI."):
+    """Create standardized email template with logo"""
+    logo_base64 = get_logo_base64()
+    logo_html = f'<img src="{logo_base64}" alt="Quantum Blue" style="height: 60px; margin-bottom: 20px;" />' if logo_base64 else '<h1 style="color: #2563eb; margin: 0;">Quantum Blue</h1>'
+    
+    return f'''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            body {{
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+                line-height: 1.6;
+                color: #1f2937;
+                margin: 0;
+                padding: 0;
+                background-color: #f3f4f6;
+            }}
+            .email-wrapper {{
+                max-width: 600px;
+                margin: 0 auto;
+                background-color: #ffffff;
+            }}
+            .header {{
+                background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+                padding: 30px 20px;
+                text-align: center;
+            }}
+            .content {{
+                padding: 30px 20px;
+            }}
+            .footer {{
+                background-color: #f9fafb;
+                padding: 20px;
+                text-align: center;
+                color: #6b7280;
+                font-size: 14px;
+                border-top: 1px solid #e5e7eb;
+            }}
+            .button {{
+                display: inline-block;
+                padding: 12px 24px;
+                background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+                color: white;
+                text-decoration: none;
+                border-radius: 8px;
+                font-weight: 600;
+                margin: 10px 0;
+            }}
+            .info-box {{
+                background-color: #eff6ff;
+                border-left: 4px solid #3b82f6;
+                padding: 15px;
+                margin: 20px 0;
+                border-radius: 4px;
+            }}
+            .success-box {{
+                background-color: #d1fae5;
+                border-left: 4px solid #10b981;
+                padding: 15px;
+                margin: 20px 0;
+                border-radius: 4px;
+            }}
+            .warning-box {{
+                background-color: #fef3c7;
+                border-left: 4px solid #f59e0b;
+                padding: 15px;
+                margin: 20px 0;
+                border-radius: 4px;
+            }}
+            h1, h2, h3 {{
+                color: #1e40af;
+            }}
+            .title {{
+                color: white;
+                font-size: 24px;
+                font-weight: 700;
+                margin: 15px 0 5px 0;
+            }}
+            .subtitle {{
+                color: rgba(255, 255, 255, 0.9);
+                font-size: 14px;
+                margin: 0;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="email-wrapper">
+            <div class="header">
+                {logo_html}
+                <div class="title">{title}</div>
+                <div class="subtitle">Powered by Quantum Blue AI</div>
+            </div>
+            <div class="content">
+                {content}
+            </div>
+            <div class="footer">
+                <p>{footer_text}</p>
+                <p style="margin: 5px 0;">&copy; 2025 Quantum Blue. All rights reserved.</p>
+                <p style="margin: 5px 0; font-size: 12px;">RB (Powered by Quantum Blue AI)</p>
+            </div>
+        </div>
+    </body>
+    </html>
+    '''
 
 def send_email(to_email, subject, html_content, email_type='general'):
     """Send email via SMTP"""
@@ -388,3 +509,157 @@ def send_conversation_email(user_email, admin_email, conversation_data):
     
     # Send to admin with [Admin] prefix
     send_email(admin_email, f'[Admin] {subject}', html_content, 'conversation_admin')
+
+def send_stock_arrival_notification(dealer_email, dealer_name, product_code, product_name, quantity, dispatch_date, lot_number=None, expiration_date=None):
+    """Send stock arrival notification to dealer"""
+    subject = f'New Stock Arrival: {product_name} ({product_code})'
+    
+    expiration_str = f'<p><strong>Expiration Date:</strong> {expiration_date.strftime("%Y-%m-%d") if expiration_date else "N/A"}</p>' if expiration_date else ''
+    lot_str = f'<p><strong>Lot Number:</strong> {lot_number}</p>' if lot_number else ''
+    
+    html_content = f'''
+    <html>
+    <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+        <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+            <h2 style="color: #007bff;">📦 New Stock Arrival Notification</h2>
+            
+            <p>Dear {dealer_name},</p>
+            
+            <p>New stock has arrived and is waiting for your confirmation:</p>
+            
+            <div style="background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0;">
+                <h3 style="margin-top: 0;">Stock Details:</h3>
+                <p><strong>Product Code:</strong> {product_code}</p>
+                <p><strong>Product Name:</strong> {product_name}</p>
+                <p><strong>Quantity:</strong> {quantity} units</p>
+                <p><strong>Dispatch Date:</strong> {dispatch_date.strftime("%Y-%m-%d") if dispatch_date else "N/A"}</p>
+                {lot_str}
+                {expiration_str}
+            </div>
+            
+            <p><strong>⚠️ Important:</strong> Please confirm this stock arrival through the chatbot. The stock is currently in "blocked" status and will not be available for sale until you confirm it.</p>
+            
+            <p>If the received quantity differs from the dispatched quantity, you can adjust it during confirmation.</p>
+            
+            <p style="margin-top: 30px;">
+                Best regards,<br>
+                <strong>Quantum Blue AI</strong>
+            </p>
+        </div>
+    </body>
+    </html>
+    '''
+    
+    send_email(dealer_email, subject, html_content, 'stock_arrival')
+
+def send_quantity_discrepancy_email(dealer_name, dealer_email, product_code, product_name, sent_quantity, received_quantity, dispatch_date, reason=None):
+    """Send quantity discrepancy notification to company"""
+    company_email = current_app.config.get('COMPANY_EMAIL', 'mahendra@highvolt.tech')
+    
+    subject = f'Stock Quantity Discrepancy: {product_name} ({product_code})'
+    
+    reason_str = f'<p><strong>Reason:</strong> {reason}</p>' if reason else ''
+    
+    html_content = f'''
+    <html>
+    <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+        <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+            <h2 style="color: #dc3545;">⚠️ Stock Quantity Discrepancy Report</h2>
+            
+            <p>A quantity discrepancy has been reported for the following stock:</p>
+            
+            <div style="background-color: #fff3cd; padding: 15px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #ffc107;">
+                <h3 style="margin-top: 0;">Stock Details:</h3>
+                <p><strong>Product Code:</strong> {product_code}</p>
+                <p><strong>Product Name:</strong> {product_name}</p>
+                <p><strong>Dealer:</strong> {dealer_name}</p>
+                <p><strong>Dealer Email:</strong> {dealer_email}</p>
+                <p><strong>Dispatch Date:</strong> {dispatch_date.strftime("%Y-%m-%d") if dispatch_date else "N/A"}</p>
+                
+                <hr style="margin: 15px 0;">
+                
+                <p><strong style="color: #dc3545;">Quantity Sent:</strong> {sent_quantity} units</p>
+                <p><strong style="color: #dc3545;">Quantity Received:</strong> {received_quantity} units</p>
+                <p><strong style="color: #dc3545;">Difference:</strong> {sent_quantity - received_quantity} units</p>
+                
+                {reason_str}
+            </div>
+            
+            <p>Please review this discrepancy and take appropriate action.</p>
+            
+            <p style="margin-top: 30px;">
+                Best regards,<br>
+                <strong>Quantum Blue AI System</strong>
+            </p>
+        </div>
+    </body>
+    </html>
+    '''
+    
+    send_email(company_email, subject, html_content, 'quantity_discrepancy')
+
+def send_email_with_attachment(to_email, subject, html_content, csv_data=None, filename='report.csv', email_type='report'):
+    """Send email with CSV attachment"""
+    try:
+        msg = Message(
+            subject=subject,
+            recipients=[to_email],
+            html=html_content,
+            sender=current_app.config['MAIL_DEFAULT_SENDER']
+        )
+        
+        # Attach CSV if provided
+        if csv_data:
+            if isinstance(csv_data, str):
+                csv_data = csv_data.encode('utf-8')
+            msg.attach(
+                filename,
+                'text/csv',
+                csv_data,
+                'attachment'
+            )
+        
+        mail.send(msg)
+        
+        # Log successful email
+        try:
+            db.session.rollback()
+            email_log = EmailLog(
+                recipient=to_email,
+                email_type=email_type,
+                status='sent'
+            )
+            db.session.add(email_log)
+            db.session.commit()
+        except Exception as log_e:
+            logger.warning(f'Failed to log email success: {str(log_e)}')
+            try:
+                db.session.rollback()
+            except:
+                pass
+        
+        logger.info(f'Email with attachment sent to {to_email}')
+        return True
+        
+    except Exception as e:
+        logger.error(f'Email sending failed: {str(e)}')
+        
+        # Log failure
+        try:
+            db.session.rollback()
+            email_log = EmailLog(
+                recipient=to_email,
+                email_type=email_type,
+                status='failed',
+                error_message=str(e)
+            )
+            db.session.add(email_log)
+            db.session.commit()
+        except Exception as log_e:
+            logger.warning(f'Failed to log email failure: {str(log_e)}')
+            try:
+                db.session.rollback()
+            except:
+                pass
+        
+        return False
