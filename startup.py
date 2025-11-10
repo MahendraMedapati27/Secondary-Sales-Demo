@@ -1,4 +1,5 @@
 ﻿#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Startup script for RB (Powered by Quantum Blue AI) Chatbot
 Initializes database and sample data, then starts the Flask server
@@ -8,6 +9,12 @@ This is used for Azure App Service deployment
 import os
 import sys
 from pathlib import Path
+
+# Set UTF-8 encoding for Windows console compatibility
+if sys.platform == 'win32':
+    import codecs
+    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
+    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
 
 # Add the project root to Python path
 project_root = Path(__file__).resolve().parent
@@ -56,19 +63,33 @@ if __name__ == '__main__':
                 print("✅ Database already initialized!")
             
             # Display sample user IDs for testing
-            print("\n👥 Sample User IDs for Testing:")
-            print("-" * 40)
+            try:
+                print("\n👥 Sample User IDs for Testing:")
+                print("-" * 40)
+                
+                sample_users = User.query.limit(5).all()
+                if sample_users:
+                    for user in sample_users:
+                        role_display = user.role if user.role else 'N/A'
+                        print(f"   {user.unique_id} - {user.name} ({role_display})")
+                else:
+                    print("   No users found")
+            except Exception as e:
+                print(f"   ⚠️ Could not display users: {e}")
             
-            sample_users = User.query.limit(5).all()
-            for user in sample_users:
-                print(f"   {user.unique_id} - {user.name} ({user.user_type})")
-            
-            print("\n📦 Sample Products Available:")
-            print("-" * 40)
-            
-            sample_products = Product.query.limit(5).all()
-            for product in sample_products:
-                print(f"   {product.product_code} - {product.product_name} - ${product.price_of_product}")
+            try:
+                print("\n📦 Sample Products Available:")
+                print("-" * 40)
+                
+                sample_products = Product.query.limit(5).all()
+                if sample_products:
+                    for product in sample_products:
+                        price_display = f"${product.price:.2f}" if product.price else "$0.00"
+                        print(f"   ID:{product.id} - {product.product_name} - {price_display}")
+                else:
+                    print("   No products found")
+            except Exception as e:
+                print(f"   ⚠️ Could not display products: {e}")
             
             print("\n" + "=" * 60)
             print("🎉 RB (Powered by Quantum Blue AI) is ready!")
