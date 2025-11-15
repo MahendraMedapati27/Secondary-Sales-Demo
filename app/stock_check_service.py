@@ -337,7 +337,14 @@ class StockCheckService:
 </html>
 """
             
-            send_email(user.email, subject, html_content, 'pending_order_fulfilled')
+            send_email(
+                user.email, 
+                subject, 
+                html_content, 
+                'pending_order_fulfilled',
+                order_id=new_order.order_id,
+                receiver_name=user.name
+            )
             self.logger.info(f"User notification sent for fulfilled pending order {new_order.order_id}")
             
         except Exception as e:
@@ -430,7 +437,14 @@ class StockCheckService:
 </html>
 """
             
-            send_email(distributor.email, subject, html_content, 'pending_order_distributor')
+            send_email(
+                distributor.email, 
+                subject, 
+                html_content, 
+                'pending_order_distributor',
+                order_id=new_order.order_id,
+                receiver_name=distributor.name
+            )
             self.logger.info(f"Distributor notification sent for fulfilled pending order {new_order.order_id}")
             
         except Exception as e:

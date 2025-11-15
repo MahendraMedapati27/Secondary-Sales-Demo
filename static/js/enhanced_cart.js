@@ -197,7 +197,7 @@ class EnhancedCartManager {
         if (text.includes('Order Placed Successfully') || text.includes('Order ID:')) {
             text = text.replace(/Order Placed Successfully!/g, '<div class="alert alert-success mb-2"><h5><i class="fas fa-check-circle"></i> Order Placed Successfully!</h5></div>');
             text = text.replace(/Order ID: ([A-Z0-9]+)/g, '<div class="alert alert-info mb-2"><strong><i class="fas fa-receipt"></i> Order ID:</strong> <code>$1</code></div>');
-            text = text.replace(/Total Amount: \$([0-9,]+\.?\d*)/g, '<div class="alert alert-warning mb-2"><strong><i class="fas fa-dollar-sign"></i> Total Amount:</strong> <span class="h5 text-success">$$1</span></div>');
+            text = text.replace(/Total Amount: ([0-9,]+\.?\d*)\s*MMK/g, '<div class="alert alert-warning mb-2"><strong><i class="fas fa-coins"></i> Total Amount:</strong> <span class="h5 text-success">$1 MMK</span></div>');
             text = text.replace(/Status: ([A-Za-z]+)/g, '<div class="alert alert-primary mb-2"><strong><i class="fas fa-info-circle"></i> Status:</strong> <span class="badge bg-success">$1</span></div>');
         }
         

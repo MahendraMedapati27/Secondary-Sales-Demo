@@ -229,10 +229,10 @@
 
 ### Step 1: Clone the Repository
 
-```bash
-git clone https://github.com/MahendraMedapati27/Data_Management_Chatbot.git
-cd Data_Management_Chatbot
-```
+   ```bash
+   git clone https://github.com/MahendraMedapati27/Data_Management_Chatbot.git
+   cd Data_Management_Chatbot
+   ```
 
 ### Step 2: Create Virtual Environment
 
@@ -248,9 +248,9 @@ source venv/bin/activate
 
 ### Step 3: Install Dependencies
 
-```bash
-pip install -r requirements.txt
-```
+   ```bash
+   pip install -r requirements.txt
+   ```
 
 ### Step 4: Configure Environment
 
@@ -290,15 +290,15 @@ DEBUG = False  # Set to True for development
 
 ### Step 5: Initialize Database
 
-```bash
+   ```bash
 python -c "from app.database_service import init_db; init_db()"
-```
+   ```
 
 ### Step 6: Run the Application
 
-```bash
+   ```bash
 # Development
-python run.py
+   python run.py
 
 # Production (use Gunicorn)
 gunicorn -w 4 -b 0.0.0.0:5000 app:app

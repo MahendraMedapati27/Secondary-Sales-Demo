@@ -214,6 +214,7 @@ class DealerWiseStockDetails(db.Model):
     
     def to_dict(self):
         """Convert to dictionary"""
+        expiry_date_iso = self.expiry_date.isoformat() if self.expiry_date else None
         return {
             'id': self.id,
             'dispatch_date': self.dispatch_date.isoformat() if self.dispatch_date else None,
@@ -223,7 +224,8 @@ class DealerWiseStockDetails(db.Model):
             'product_code': self.product_code,
             'product_name': self.product_name,
             'lot_number': self.lot_number,
-            'expiry_date': self.expiry_date.isoformat() if self.expiry_date else None,
+            'expiry_date': expiry_date_iso,  # Primary field name
+            'expiration_date': expiry_date_iso,  # Alias for frontend compatibility
             'quantity': self.quantity,
             'sales_price': self.sales_price,
             'blocked_quantity': self.blocked_quantity,
@@ -305,7 +307,16 @@ class OrderItem(db.Model):
     free_quantity = db.Column(db.Integer, default=0)  # FOC quantity
     unit_price = db.Column(db.Float, default=0.0)
     total_price = db.Column(db.Float, default=0.0)
+    
+    # Editable fields for dealer confirmation
+    adjusted_quantity = db.Column(db.Integer, nullable=True)  # Actual quantity dispatched (if different from ordered)
+    adjusted_expiry_date = db.Column(db.Date, nullable=True)  # Adjusted expiry date
+    adjusted_lot_number = db.Column(db.String(100), nullable=True)  # Adjusted lot number
+    adjustment_reason = db.Column(db.Text, nullable=True)  # Reason for adjustment
+    pending_quantity = db.Column(db.Integer, default=0)  # Quantity moved to pending orders
+    
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     def __repr__(self):
         total_qty = self.quantity + (self.free_quantity or 0)
@@ -412,16 +423,44 @@ class ChatSession(db.Model):
         return f'<ChatSession {self.session_id}>'
 
 class EmailLog(db.Model):
-    """Email sending log (kept for compatibility)"""
+    """Email sending log with detailed tracking"""
     __tablename__ = 'email_logs'
     
     id = db.Column(db.Integer, primary_key=True)
-    recipient = db.Column(db.String(120), nullable=False)
+    recipient = db.Column(db.String(120), nullable=False)  # Kept for backward compatibility
     email_type = db.Column(db.String(50), nullable=False)
     status = db.Column(db.String(20), nullable=False)
     error_message = db.Column(db.Text)
+    
+    # New detailed columns
+    order_id = db.Column(db.String(50), nullable=True, index=True)
+    sender_email = db.Column(db.String(120), nullable=True)
+    sender_name = db.Column(db.String(200), nullable=True)
+    receiver_email = db.Column(db.String(120), nullable=True)
+    receiver_name = db.Column(db.String(200), nullable=True)
+    subject = db.Column(db.String(500), nullable=True)
+    body_preview = db.Column(db.Text, nullable=True)
+    
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
     def __repr__(self):
-        return f'<EmailLog {self.id} - {self.email_type}>'
+        return f'<EmailLog {self.id} - {self.email_type} - Order: {self.order_id}>'
+    
+    def to_dict(self):
+        """Convert to dictionary"""
+        return {
+            'id': self.id,
+            'recipient': self.recipient,
+            'email_type': self.email_type,
+            'status': self.status,
+            'error_message': self.error_message,
+            'order_id': self.order_id,
+            'sender_email': self.sender_email,
+            'sender_name': self.sender_name,
+            'receiver_email': self.receiver_email or self.recipient,
+            'receiver_name': self.receiver_name,
+            'subject': self.subject,
+            'body_preview': self.body_preview[:200] if self.body_preview else None,
+            'created_at': self.created_at.isoformat() if self.created_at else None
+        }
 

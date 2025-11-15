@@ -25,9 +25,11 @@ class Config:
     # AZURE_OPENAI_API_VERSION = os.getenv('AZURE_OPENAI_API_VERSION', '2024-08-01-preview')
     
     # ------------------------------------------------------------------------
-    ## AZURE AI SEARCH CONFIGURATION - REMOVED
+    ## AZURE AI SEARCH CONFIGURATION
     # ------------------------------------------------------------------------
-    # Azure AI Search has been removed from this implementation
+    AZURE_SEARCH_ENDPOINT = os.getenv('AZURE_SEARCH_ENDPOINT')
+    AZURE_SEARCH_API_KEY = os.getenv('AZURE_SEARCH_API_KEY')
+    AZURE_SEARCH_INDEX_NAME = os.getenv('AZURE_SEARCH_INDEX_NAME', 'products-index')
     
     # ------------------------------------------------------------------------
     ## AZURE BLOB STORAGE CONFIGURATION

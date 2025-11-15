@@ -130,9 +130,8 @@ function showProductRecommendations(products) {
                 <div class="d-flex justify-content-between align-items-center">
                     <div>
                         <strong>${product.product_name}</strong>
-                        <small class="text-muted d-block">${product.product_code}</small>
                     </div>
-                    <small class="text-primary">$${product.price_of_product?.toFixed(2) || '0.00'}</small>
+                    <small class="text-primary">${(product.price_of_product || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK</small>
                 </div>
             </div>
         `;
@@ -155,10 +154,10 @@ function selectProductRecommendation(productCode, productName) {
     
     // If input is empty or just contains the search query, replace it
     // Otherwise, append to the current value
-    if (currentValue.length < 3 || currentValue.toLowerCase().includes(productName.toLowerCase()) || currentValue.toLowerCase().includes(productCode.toLowerCase())) {
-        input.value = `Order ${productCode} - ${productName}`;
+    if (currentValue.length < 3 || currentValue.toLowerCase().includes(productName.toLowerCase())) {
+        input.value = `Order ${productName}`;
     } else {
-        input.value = `${currentValue}, ${productCode} - ${productName}`;
+        input.value = `${currentValue}, ${productName}`;
     }
     
     input.focus();
@@ -319,13 +318,23 @@ async function sendMessage(messageText = null) {
                 if (data.show_orders_table) {
                     showOrdersTable(data.orders);
                 }
+                // Add a small delay to ensure message is fully rendered before adding form
+                setTimeout(() => {
                 addOrderSelectionForm(data.orders, data.filters || null);
+                }, 200);
+            }
+            
+            // Handle product search interface
+            if (data.interactive_product_search && data.products) {
+                setTimeout(() => {
+                    showProductSearchInterface(data.products);
+                }, 200);
             }
             
             // Handle action buttons (skip if add customer form is shown, product selection is shown, customer selection is shown, order selection is shown, or report selection is shown)
             // For animated order details, delay showing action buttons until animation completes
             // Show action buttons if they exist and are not empty, and no interactive UI is active
-            if (data.action_buttons && Array.isArray(data.action_buttons) && data.action_buttons.length > 0 && !data.interactive_add_customer && !data.interactive_product_selection && !data.interactive_customer_selection && !data.interactive_order_selection && !data.interactive_stock_confirmation && !data.interactive_report_selection && !data.show_column_selection) {
+            if (data.action_buttons && Array.isArray(data.action_buttons) && data.action_buttons.length > 0 && !data.interactive_add_customer && !data.interactive_product_selection && !data.interactive_customer_selection && !data.interactive_order_selection && !data.interactive_stock_confirmation && !data.interactive_report_selection && !data.show_column_selection && !data.interactive_product_search) {
                 if (data.animate_order_details && animationDelay > 0) {
                     // Delay action buttons to appear after animation completes
                     setTimeout(() => {
@@ -793,9 +802,19 @@ function displayUserInfo(userInfo) {
     
     document.getElementById('userName').textContent = userInfo.name || '-';
     document.getElementById('userType').textContent = userInfo.user_type || '-';
-    document.getElementById('userRole').textContent = userInfo.role || '-';
-    document.getElementById('userWarehouse').textContent = userInfo.warehouse || '-';
+    document.getElementById('userArea').textContent = userInfo.warehouse || userInfo.area || '-';
     document.getElementById('userInfoPanel').style.display = 'block';
+    
+    // Update toggle icon and button to show up arrow when panel is visible
+    const icon = document.getElementById('userInfoToggleIcon');
+    const btn = document.getElementById('userInfoToggleBtn');
+    if (icon) {
+        icon.classList.remove('fa-chevron-down');
+        icon.classList.add('fa-chevron-up');
+    }
+    if (btn) {
+        btn.classList.add('active');
+    }
     
     // Show cart button for logged in users
     document.getElementById('cartButton').style.display = 'inline-block';
@@ -804,6 +823,10 @@ function displayUserInfo(userInfo) {
 // Enhanced action buttons with better UX
 function showActionButtons(buttons) {
     const messagesDiv = document.getElementById('chatMessages');
+    
+    // Remove any existing action buttons to prevent duplicates
+    const existingButtons = messagesDiv.querySelectorAll('.action-buttons-container');
+    existingButtons.forEach(btn => btn.remove());
     
     // Find the last bot message
     const botMessages = messagesDiv.querySelectorAll('.message.bot');
@@ -825,7 +848,16 @@ function showActionButtons(buttons) {
     if (!lastBotMessage) return; // Still no message, exit
     
     // Find the inner message bubble div (the one with bg-light class)
-    const messageBubble = lastBotMessage.querySelector('.message-bubble .bg-light');
+    // Also check for product details container
+    let messageBubble = lastBotMessage.querySelector('.message-bubble .bg-light');
+    if (!messageBubble) {
+        // Try to find product details container
+        messageBubble = lastBotMessage.querySelector('.product-details');
+        if (!messageBubble) {
+            // Try to find any content div in the message bubble
+            messageBubble = lastBotMessage.querySelector('.message-bubble > div > div');
+        }
+    }
     if (!messageBubble) return; // Exit if bubble not found
     
     const buttonContainer = document.createElement('div');
@@ -850,7 +882,9 @@ function showActionButtons(buttons) {
     const actionIcons = {
         'place_order': 'fas fa-shopping-cart',
         'track_order': 'fas fa-truck',
+        'open_order': 'fas fa-folder-open',
         'company_info': 'fas fa-building',
+        'product_info': 'fas fa-info-circle',
         'pending_stocks': 'fas fa-clipboard-check'
     };
     
@@ -972,6 +1006,14 @@ function handleAction(action, orderId = null) {
         case 'track_order':
             sendMessage('I want to track an order');
             break;
+        case 'open_order':
+            // View Open Order button - same functionality as track order
+            sendMessage('I want to track an order');
+            break;
+        case 'product_info':
+            // Send message to backend to get proper response with action buttons
+            sendMessage('Product Info');
+            break;
         case 'view_cart':
             if (typeof viewCart === 'function') {
                 viewCart();
@@ -1013,6 +1055,12 @@ function handleAction(action, orderId = null) {
                 rejectOrderAction(orderId);
             }
             break;
+        case 'cancel_order':
+            // MR canceling their own order
+            if (orderId) {
+                cancelOrderAction(orderId);
+            }
+            break;
         case 'home':
             sendMessage('Hi');
             break;
@@ -1032,7 +1080,13 @@ function handleAction(action, orderId = null) {
             sendMessage('generate report');
             break;
         case 'cancel':
-            sendMessage('Cancel');
+            // Show action buttons when cancel is clicked
+            showActionButtons([
+                {'text': 'Place Order', 'action': 'place_order'},
+                {'text': 'View Open Order', 'action': 'open_order'},
+                {'text': 'Product Info', 'action': 'product_info'},
+                {'text': 'Company Info', 'action': 'company_info'}
+            ]);
             break;
         default:
             console.log('Unknown action:', action);
@@ -1072,6 +1126,22 @@ function displayCartModal(cartItems, subtotal, taxAmount, grandTotal) {
     const cartContent = document.getElementById('cartContent');
     const cartModalElement = document.getElementById('cartModal');
     
+    // Calculate totals if not provided
+    if (subtotal === undefined || taxAmount === undefined || grandTotal === undefined) {
+        subtotal = 0;
+        cartItems.forEach(item => {
+            const itemTotal = item.total_price || (item.unit_price || item.final_price || 0) * (item.quantity || item.paid_quantity || 0);
+            subtotal += itemTotal || 0;
+        });
+        taxAmount = subtotal * 0.05; // 5% tax
+        grandTotal = subtotal + taxAmount;
+    }
+    
+    // Ensure values are numbers
+    subtotal = Number(subtotal) || 0;
+    taxAmount = Number(taxAmount) || 0;
+    grandTotal = Number(grandTotal) || 0;
+    
     if (cartItems.length === 0) {
         cartContent.innerHTML = '<p class="text-muted">Your cart is empty.</p>';
     } else {
@@ -1086,8 +1156,7 @@ function displayCartModal(cartItems, subtotal, taxAmount, grandTotal) {
             html += `
                 <tr>
                     <td>
-                        <strong>${item.product_name || item.product_code}</strong><br>
-                        <small class="text-muted">${item.product_code}</small>
+                        <strong>${item.product_name || item.product_code}</strong>
                         ${item.free_quantity > 0 ? `<br><small class="text-success">Free: ${item.free_quantity}</small>` : ''}
                     </td>
                     <td>
@@ -1106,8 +1175,8 @@ function displayCartModal(cartItems, subtotal, taxAmount, grandTotal) {
                             </button>
                         </div>
                     </td>
-                    <td>$${unitPrice.toFixed(2)}</td>
-                    <td>$${itemTotal.toFixed(2)}</td>
+                    <td>${unitPrice.toLocaleString('en-US')} MMK</td>
+                    <td>${itemTotal.toLocaleString('en-US')} MMK</td>
                     <td>
                         <button class="btn btn-sm btn-outline-danger" onclick="removeFromCart(${item.id})" title="Remove Item">
                             <i class="fas fa-trash"></i>
@@ -1127,7 +1196,7 @@ function displayCartModal(cartItems, subtotal, taxAmount, grandTotal) {
                         <strong style="font-size: 1rem; color: #4b5563;">Subtotal:</strong>
                     </div>
                     <div class="col-4 text-end">
-                        <span style="font-size: 1rem; color: #4b5563; font-weight: 600;">$${subtotal.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span>
+                        <span style="font-size: 1rem; color: #4b5563; font-weight: 600;">${subtotal.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK</span>
                     </div>
                 </div>
                 <div class="row mb-3">
@@ -1135,7 +1204,7 @@ function displayCartModal(cartItems, subtotal, taxAmount, grandTotal) {
                         <strong style="font-size: 1rem; color: #4b5563;">Tax (5%):</strong>
                     </div>
                     <div class="col-4 text-end">
-                        <span style="font-size: 1rem; color: #4b5563; font-weight: 600;">$${taxAmount.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span>
+                        <span style="font-size: 1rem; color: #4b5563; font-weight: 600;">${taxAmount.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK</span>
                     </div>
                 </div>
                 <div class="row" style="background: linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%); padding: 15px; border-radius: 10px; margin: 0 -8px;">
@@ -1143,7 +1212,7 @@ function displayCartModal(cartItems, subtotal, taxAmount, grandTotal) {
                         <strong style="font-size: 1.25rem; color: #1e40af;">Grand Total:</strong>
                     </div>
                     <div class="col-4 text-end">
-                        <span style="font-size: 1.35rem; color: #1e40af; font-weight: 700;">$${grandTotal.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span>
+                        <span style="font-size: 1.35rem; color: #1e40af; font-weight: 700;">${grandTotal.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK</span>
                     </div>
                 </div>
             </div>
@@ -1217,11 +1286,18 @@ async function updateCartQuantity(itemId, change) {
         
         if (updateResponse.ok) {
             const updateData = await updateResponse.json();
-            // Reload cart display with updated data
-            if (updateData.cart_items) {
-                displayCartModal(updateData.cart_items);
+            // Update cart display immediately with response data
+            if (updateData.cart_items && updateData.cart_items.length > 0) {
+                displayCartModal(updateData.cart_items, updateData.subtotal, updateData.tax_amount, updateData.grand_total);
+                updateCartDisplay(updateData.cart_items);
             } else {
-            await viewCart();
+                // Cart is empty
+                const cartModalElement = document.getElementById('cartModal');
+                const cartModal = bootstrap.Modal.getInstance(cartModalElement);
+                if (cartModal) {
+                    cartModal.hide();
+                }
+                updateCartDisplay([]);
             }
         } else {
             const error = await updateResponse.json();
@@ -1253,11 +1329,18 @@ async function updateCartQuantityDirect(itemId, newQuantity) {
         
         if (updateResponse.ok) {
             const updateData = await updateResponse.json();
-            // Reload cart display with updated data
-            if (updateData.cart_items) {
-                displayCartModal(updateData.cart_items);
+            // Update cart display immediately with response data
+            if (updateData.cart_items && updateData.cart_items.length > 0) {
+                displayCartModal(updateData.cart_items, updateData.subtotal, updateData.tax_amount, updateData.grand_total);
+                updateCartDisplay(updateData.cart_items);
             } else {
-                await viewCart();
+                // Cart is empty
+                const cartModalElement = document.getElementById('cartModal');
+                const cartModal = bootstrap.Modal.getInstance(cartModalElement);
+                if (cartModal) {
+                    cartModal.hide();
+                }
+                updateCartDisplay([]);
             }
         } else {
             const error = await updateResponse.json();
@@ -1283,8 +1366,19 @@ async function removeFromCart(itemId) {
             const data = await response.json();
             
             if (data.cart_items && data.cart_items.length > 0) {
-                // Reload cart display with updated data
-                displayCartModal(data.cart_items);
+                // Calculate totals if not provided
+                let subtotal = data.subtotal;
+                let taxAmount = data.tax_amount;
+                let grandTotal = data.grand_total;
+                
+                if (subtotal === undefined) {
+                    subtotal = data.cart_items.reduce((sum, item) => sum + (item.total_price || 0), 0);
+                    taxAmount = subtotal * 0.05;
+                    grandTotal = subtotal + taxAmount;
+                }
+                
+                // Update cart display immediately with response data
+                displayCartModal(data.cart_items, subtotal, taxAmount, grandTotal);
                 // Update cart button count
                 updateCartDisplay(data.cart_items);
             } else {
@@ -1303,7 +1397,13 @@ async function removeFromCart(itemId) {
             }
         } else {
             const error = await response.json();
+            // Don't show error message if cart is empty - just reload cart
+            if (error.error && !error.error.includes('empty')) {
             addMessage(error.error || 'Error removing item from cart.', 'bot', 'error');
+            } else {
+                // Reload cart to show updated state
+                await viewCart();
+            }
         }
     } catch (error) {
         console.error('Error removing from cart:', error);
@@ -1324,9 +1424,10 @@ async function placeOrder() {
         
         if (data.success) {
             addMessage(data.message, 'bot');
-            if (data.order_id) {
-                addMessage(`Order ID: ${data.order_id}`, 'bot');
-            }
+            // Don't display order ID separately - it's already in the order summary message
+            // if (data.order_id) {
+            //     addMessage(`Order ID: ${data.order_id}`, 'bot');
+            // }
             // Hide cart modal if it exists (legacy support)
             const cartModalElement = document.getElementById('cartModal');
             if (cartModalElement) {
@@ -1347,16 +1448,16 @@ async function placeOrder() {
 function displayRecentOrders(orders) {
     let message = 'Here are your recent orders:\n\n';
     orders.forEach(order => {
-        message += `• ${order.order_id} - ${order.status} - $${order.total_amount} (${order.order_date})\n`;
+        message += `• ${order.order_id} - ${order.status} - ${order.total_amount.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK (${order.order_date})\n`;
     });
     addMessage(message, 'bot');
 }
 
 function displayOrderDetails(orderDetails) {
-    let message = `Order Details for ${orderDetails.order_id}:\n\n`;
+    let message = `**📦 Order Details - ${orderDetails.order_id}**\n\n`;
     message += `Status: ${orderDetails.status}\n`;
     message += `Stage: ${orderDetails.order_stage}\n`;
-    message += `Total Amount: $${orderDetails.total_amount}\n`;
+    message += `Total Amount: ${orderDetails.total_amount.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK\n`;
     message += `Order Date: ${orderDetails.order_date}\n`;
     message += `Warehouse: ${orderDetails.warehouse_location}\n\n`;
     
@@ -1370,7 +1471,7 @@ function displayOrderDetails(orderDetails) {
     addMessage(message, 'bot');
 }
 
-function clearChat() {
+function resetChat() {
     const messagesDiv = document.getElementById('chatMessages');
     messagesDiv.innerHTML = `
         <div class="text-center text-muted py-5">
@@ -1388,8 +1489,15 @@ function clearChat() {
     
     // Hide panels
     document.getElementById('userInfoPanel').style.display = 'none';
-    // document.getElementById('actionButtons').style.display = 'none'; // REMOVED: actionButtons no longer exists
     document.getElementById('cartButton').style.display = 'none';
+    
+    // Show action buttons to start new conversation
+    showActionButtons([
+        {'text': 'Place Order', 'action': 'place_order'},
+        {'text': 'View Open Order', 'action': 'open_order'},
+        {'text': 'Product Info', 'action': 'product_info'},
+        {'text': 'Company Info', 'action': 'company_info'}
+    ]);
     
     // Reset input placeholder
     document.getElementById('messageInput').placeholder = 'Enter your unique ID to start...';
@@ -1398,9 +1506,9 @@ function clearChat() {
 // Utility functions
 function formatCurrency(amount) {
     return new Intl.NumberFormat('en-US', {
-        style: 'currency',
-        currency: 'USD'
-    }).format(amount);
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+    }).format(amount) + ' MMK';
 }
 
 function formatDate(dateString) {
@@ -1413,7 +1521,7 @@ function formatDate(dateString) {
     });
 }
 
-function addStockConfirmationForm(stocks, invoiceIds = null, dispatchDates = null, showTable = false) {
+function addStockConfirmationForm(stocks, invoiceIds = null, invoiceDates = null, showTable = false) {
     const messagesDiv = document.getElementById('chatMessages');
     const formDiv = document.createElement('div');
     formDiv.className = 'message bot mb-3';
@@ -1444,12 +1552,12 @@ function addStockConfirmationForm(stocks, invoiceIds = null, dispatchDates = nul
                             </div>
                             <div class="col-md-6">
                                 <label for="dateFilter" class="form-label" style="font-weight: 600; font-size: 0.85rem; color: #2563eb;">
-                                    <i class="fas fa-calendar me-2"></i>Filter by Dispatch Date
+                                    <i class="fas fa-calendar me-2"></i>Filter by Invoice Date
                                 </label>
                                 <select class="form-select form-select-sm" id="dateFilter" 
                                     style="border-radius: 8px; border: 1.5px solid #e5e7eb; padding: 8px 12px; font-size: 0.875rem;">
                                     <option value="">-- All Dates --</option>
-                                    ${(dispatchDates && dispatchDates.length > 0) ? dispatchDates.map(date => `
+                                    ${((invoiceDates || dispatchDates) && (invoiceDates || dispatchDates).length > 0) ? (invoiceDates || dispatchDates).map(date => `
                                         <option value="${date}">${date}</option>
                                     `).join('') : ''}
                                 </select>
@@ -1469,8 +1577,7 @@ function addStockConfirmationForm(stocks, invoiceIds = null, dispatchDates = nul
                                     <tr>
                                         <th style="padding: 8px; white-space: nowrap;">#</th>
                                         <th style="padding: 8px; white-space: nowrap;">Product Name</th>
-                                        <th style="padding: 8px; white-space: nowrap;">Product Code</th>
-                                        <th style="padding: 8px; white-space: nowrap;">Dispatch Date</th>
+                                        <th style="padding: 8px; white-space: nowrap;">Invoice Date</th>
                                         <th style="padding: 8px; white-space: nowrap;">Quantity Sent</th>
                                         <th style="padding: 8px; white-space: nowrap;">Invoice ID</th>
                                         <th style="padding: 8px; white-space: nowrap;">Lot Number</th>
@@ -1487,37 +1594,39 @@ function addStockConfirmationForm(stocks, invoiceIds = null, dispatchDates = nul
             const lotNumber = stock.lot_number || 'N/A';
             
             // Format dates (handle ISO format dates)
+            // Check both expiry_date (from database) and expiration_date (legacy)
             let expirationDate = 'N/A';
-            if (stock.expiration_date) {
-                const expDate = new Date(stock.expiration_date);
+            const expiryDateValue = stock.expiry_date || stock.expiration_date;
+            if (expiryDateValue) {
+                const expDate = new Date(expiryDateValue);
                 if (!isNaN(expDate.getTime())) {
                     expirationDate = expDate.toISOString().split('T')[0];
                 } else {
-                    expirationDate = stock.expiration_date;
+                    expirationDate = expiryDateValue;
                 }
             }
             
-            let dispatchDate = 'N/A';
-            let dispatchDateFilter = '';
-            if (stock.dispatch_date) {
-                const dispDate = new Date(stock.dispatch_date);
-                if (!isNaN(dispDate.getTime())) {
-                    dispatchDate = dispDate.toISOString().split('T')[0];
-                    dispatchDateFilter = dispatchDate;
+            let invoiceDate = 'N/A';
+            let invoiceDateFilter = '';
+            if (stock.dispatch_date || stock.invoice_date) {
+                const dateValue = stock.invoice_date || stock.dispatch_date;
+                const invDate = new Date(dateValue);
+                if (!isNaN(invDate.getTime())) {
+                    invoiceDate = invDate.toISOString().split('T')[0];
+                    invoiceDateFilter = invoiceDate;
                 } else {
-                    dispatchDate = stock.dispatch_date;
-                    dispatchDateFilter = stock.dispatch_date;
+                    invoiceDate = dateValue;
+                    invoiceDateFilter = dateValue;
                 }
             }
             
-            const salesPrice = stock.sales_price ? `$${parseFloat(stock.sales_price).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}` : 'N/A';
+            const salesPrice = stock.sales_price ? `${parseFloat(stock.sales_price).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK` : 'N/A';
             
             formHTML += `
-                                    <tr data-stock-id="${stock.id}" data-invoice-id="${stock.invoice_id || ''}" data-dispatch-date="${dispatchDateFilter}" style="cursor: pointer;" onclick="selectStockFromTable(${stock.id}, ${stock.quantity})">
+                                    <tr data-stock-id="${stock.id}" data-invoice-id="${stock.invoice_id || ''}" data-invoice-date="${invoiceDateFilter}" style="cursor: pointer;" onclick="selectStockFromTable(${stock.id}, ${stock.quantity})">
                                         <td style="padding: 8px;">${index + 1}</td>
                                         <td style="padding: 8px;">${stock.product_name || 'N/A'}</td>
-                                        <td style="padding: 8px;">${stock.product_code || 'N/A'}</td>
-                                        <td style="padding: 8px;">${dispatchDate}</td>
+                                        <td style="padding: 8px;">${invoiceDate}</td>
                                         <td style="padding: 8px;">${stock.quantity || 0} units</td>
                                         <td style="padding: 8px;">${invoiceId}</td>
                                         <td style="padding: 8px;">${lotNumber}</td>
@@ -1544,20 +1653,21 @@ function addStockConfirmationForm(stocks, invoiceIds = null, dispatchDates = nul
     `;
     
     stocks.forEach((stock, index) => {
-        // Include invoice_id and dispatch_date in data attribute for filtering
+        // Include invoice_id and invoice_date in data attribute for filtering
         const invoiceId = stock.invoice_id || '';
-        let dispatchDate = '';
-        if (stock.dispatch_date) {
-            const dispDate = new Date(stock.dispatch_date);
-            if (!isNaN(dispDate.getTime())) {
-                dispatchDate = dispDate.toISOString().split('T')[0];
+        let invoiceDate = '';
+        if (stock.dispatch_date || stock.invoice_date) {
+            const dateValue = stock.invoice_date || stock.dispatch_date;
+            const invDate = new Date(dateValue);
+            if (!isNaN(invDate.getTime())) {
+                invoiceDate = invDate.toISOString().split('T')[0];
             } else {
-                dispatchDate = stock.dispatch_date;
+                invoiceDate = dateValue;
             }
         }
         formHTML += `
-            <option value="${stock.id}" data-quantity="${stock.quantity}" data-invoice-id="${invoiceId}" data-dispatch-date="${dispatchDate}">
-                ${index + 1}. ${stock.product_name} (${stock.product_code}) - Qty Sent: ${stock.quantity} units${invoiceId ? ` - Invoice: ${invoiceId}` : ''}
+            <option value="${stock.id}" data-quantity="${stock.quantity}" data-invoice-id="${invoiceId}" data-invoice-date="${invoiceDate}">
+                ${index + 1}. ${stock.product_name} - Qty Sent: ${stock.quantity} units${invoiceId ? ` - Invoice: ${invoiceId}` : ''}
             </option>
         `;
     });
@@ -1650,7 +1760,7 @@ function addStockConfirmationForm(stocks, invoiceIds = null, dispatchDates = nul
                 option.setAttribute('data-quantity', stock.quantity);
                 option.setAttribute('data-invoice-id', invoiceIdValue);
                 option.setAttribute('data-dispatch-date', stock.dispatch_date || '');
-                option.textContent = `${index + 1}. ${stock.product_name} (${stock.product_code}) - Qty Sent: ${stock.quantity} units${invoiceIdValue ? ` - Invoice: ${invoiceIdValue}` : ''}`;
+                option.textContent = `${index + 1}. ${stock.product_name} - Qty Sent: ${stock.quantity} units${invoiceIdValue ? ` - Invoice: ${invoiceIdValue}` : ''}`;
                 stockSelect.appendChild(option);
             });
             
@@ -1901,7 +2011,7 @@ function addProductSelectionForm(products, showChangeCustomer = false) {
                             <input type="text" 
                                    class="form-control" 
                                    id="productSearchInput" 
-                                   placeholder="Search products by name or code..." 
+                                   placeholder="Search products by name..." 
                                    onkeyup="filterProductTable()"
                                    style="background: #eff6ff; color: #1e40af; border-radius: 0 8px 8px 0; border: 2px solid #bfdbfe; border-left: none; padding: 12px; font-size: 0.95rem;"
                                    onfocus="this.style.background='#dbeafe'"
@@ -1940,29 +2050,30 @@ function addProductSelectionForm(products, showChangeCustomer = false) {
                                         <div style="font-weight: 600; color: #1f2937;">
                                             ${product.product_name}
                                         </div>
-                                        <div style="font-size: 0.75rem; color: #6b7280; margin-top: 2px;">
-                                            <i class="fas fa-barcode me-1"></i>${product.product_code}
-                                        </div>
                                     </td>
-                                    <td style="padding: 12px; color: #059669; font-weight: 600;">$${product.sales_price.toLocaleString()}</td>
+                                    <td style="padding: 12px; color: #059669; font-weight: 600;">${product.sales_price.toLocaleString()} MMK</td>
                                     <td style="padding: 12px;">
                                         <span class="badge ${product.available_for_sale > 10 ? 'bg-success' : (product.available_for_sale > 0 ? 'bg-warning text-dark' : 'bg-danger')}" style="font-size: 0.8rem; padding: 5px 10px;">${product.available_for_sale}</span>
                                         <small class="text-muted ms-1" style="font-size: 0.7rem;">units</small>
                                     </td>
                                     <td style="padding: 12px;">
+                                        <div>
                                         <input type="number" 
                                                class="form-control form-control-sm product-quantity-input" 
                                                id="qty_${product.product_code}"
                                                data-product-foc="${product.foc || ''}"
                                                data-product-name="${product.product_name.replace(/"/g, '&quot;')}"
                                                data-foc-schemes='${focSchemesJson.replace(/'/g, "&apos;")}'
+                                                   data-product-code="${product.product_code}"
                                                min="0" 
                                                max="${product.available_for_sale}" 
                                                value="0"
                                                placeholder="0"
-                                               onchange="updateSelectedProductsCount()"
-                                               oninput="updateSelectedProductsCount()"
+                                                   onchange="updateSelectedProductsCount(); checkFOCNotification(this)"
+                                                   oninput="updateSelectedProductsCount(); checkFOCNotification(this)"
                                                style="width: 100%; min-width: 80px; max-width: 120px; text-align: center; border-radius: 8px; border: 2px solid #e5e7eb; padding: 8px 12px; font-weight: 600; font-size: 0.95rem;">
+                                            <div id="foc-notification-${product.product_code}" class="foc-notification" style="display: none; margin-top: 4px; font-size: 0.75rem; color: #059669; font-weight: 600;"></div>
+                                        </div>
                                     </td>
                                 </tr>
         `;
@@ -2818,10 +2929,9 @@ function showProductTable(products) {
                 ${products.map(product => `
                     <tr>
                         <td style="padding: 10px; border: 1px solid #dee2e6; white-space: nowrap;">
-                            <strong>${product.product_name}</strong><br>
-                            <small class="text-muted">${product.product_code}</small>
+                            <strong>${product.product_name}</strong>
                         </td>
-                        <td style="padding: 10px; border: 1px solid #dee2e6; white-space: nowrap;">$${(product.sales_price || 0).toFixed(2)}</td>
+                        <td style="padding: 10px; border: 1px solid #dee2e6; white-space: nowrap;">${(product.sales_price || 0).toLocaleString('en-US')} MMK</td>
                         <td style="padding: 10px; border: 1px solid #dee2e6; white-space: nowrap;">${product.available_for_sale || 0} units</td>
                     </tr>
                 `).join('')}
@@ -2860,14 +2970,14 @@ function showOrdersTable(orders) {
     // Create table container with rounded edges and proper overflow handling
     const tableContainer = document.createElement('div');
     tableContainer.className = 'orders-table-container mt-3 mb-3';
-    tableContainer.style.cssText = 'animation: slideInFromBottom 0.3s ease-out; width: 100%; max-width: 100%; overflow-x: auto; box-sizing: border-box;';
+    tableContainer.style.cssText = 'animation: slideInFromBottom 0.3s ease-out; width: 100%; max-width: 100%; box-sizing: border-box;';
     
     let tableHTML = `
-        <div style="overflow-x: auto; width: 100%; border-radius: 12px; overflow: hidden;">
+        <div style="width: 100%; border-radius: 12px; overflow: hidden; max-height: 400px; overflow-y: auto; overflow-x: auto; border: 1px solid #dee2e6;">
             <table class="table table-bordered table-hover mb-0" style="font-size: 0.875rem; margin-bottom: 0; width: 100%; min-width: 300px; white-space: nowrap;">
-                <thead style="background-color: #f8f9fa;">
+                <thead style="background-color: #f8f9fa; position: sticky; top: 0; z-index: 10;">
                     <tr>
-                        <th style="padding: 10px; border: 1px solid #dee2e6; font-weight: 600; white-space: nowrap;">Order ID</th>
+                        <th style="padding: 10px; border: 1px solid #dee2e6; font-weight: 600; white-space: nowrap; background-color: #f8f9fa;">Order ID</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -2895,6 +3005,11 @@ function showOrdersTable(orders) {
 function addOrderSelectionForm(orders, filters = null) {
     const messagesDiv = document.getElementById('chatMessages');
     
+    if (!messagesDiv) {
+        console.error('addOrderSelectionForm: Chat messages container not found');
+        return;
+    }
+    
     // Find the last bot message
     const botMessages = messagesDiv.querySelectorAll('.message.bot');
     let lastBotMessage = null;
@@ -2903,11 +3018,50 @@ function addOrderSelectionForm(orders, filters = null) {
         lastBotMessage = botMessages[botMessages.length - 1];
     }
     
-    if (!lastBotMessage) return; // Exit if no bot message found
+    if (!lastBotMessage) {
+        console.error('addOrderSelectionForm: No bot message found');
+        return; // Exit if no bot message found
+    }
     
     // Find the inner message bubble div (the one with bg-light class)
-    const messageBubble = lastBotMessage.querySelector('.message-bubble .bg-light');
-    if (!messageBubble) return; // Exit if bubble not found
+    // Try multiple selectors to find the message content area
+    let messageBubble = lastBotMessage.querySelector('.message-bubble .bg-light');
+    if (!messageBubble) {
+        messageBubble = lastBotMessage.querySelector('.message-bubble .d-flex .bg-light');
+    }
+    if (!messageBubble) {
+        messageBubble = lastBotMessage.querySelector('.bg-light');
+    }
+    if (!messageBubble) {
+        // Try to find the message-bubble itself and append directly
+        const bubbleDiv = lastBotMessage.querySelector('.message-bubble');
+        if (bubbleDiv) {
+            // Find or create a wrapper div inside the bubble
+            let wrapper = bubbleDiv.querySelector('.d-flex');
+            if (!wrapper) {
+                wrapper = document.createElement('div');
+                wrapper.className = 'd-flex justify-content-start align-items-center';
+                wrapper.style.cssText = 'gap: 8px; width: 100%;';
+                bubbleDiv.appendChild(wrapper);
+            }
+            // Create content div if it doesn't exist
+            let contentDiv = wrapper.querySelector('.bg-light');
+            if (!contentDiv) {
+                contentDiv = document.createElement('div');
+                contentDiv.className = 'bg-light border rounded-3 px-3 py-2';
+                contentDiv.style.cssText = 'max-width: 75%; font-size: 0.875rem; width: auto;';
+                wrapper.appendChild(contentDiv);
+            }
+            messageBubble = contentDiv;
+        }
+    }
+    
+    if (!messageBubble) {
+        console.error('addOrderSelectionForm: Could not find message bubble element');
+        console.log('Last bot message:', lastBotMessage);
+        console.log('Last bot message HTML:', lastBotMessage.innerHTML.substring(0, 500));
+        return; // Exit if bubble not found
+    }
     
     const formContainer = document.createElement('div');
     formContainer.className = 'order-selection-container mt-3';
@@ -2927,13 +3081,16 @@ function addOrderSelectionForm(orders, filters = null) {
     // Store original orders for filtering
     formContainer._originalOrders = orders;
     
-    // Check if we have filters (for distributor view)
-    const isDistributorView = filters && (filters.mr_names || filters.statuses || filters.dates);
+    // Check if we have filters (for distributor view or MR view)
+    // Distributor view has mr_names filter, MR view has customers filter
+    const isDistributorView = filters && filters.mr_names && filters.mr_names.length > 0;
+    const isMRView = filters && filters.customers && filters.customers.length > 0; // MR view has customer filter
     
     // Get unique values for filters
     const uniqueDates = filters?.dates || [...new Set(orders.map(o => o.order_date))].sort().reverse();
     const uniqueStatuses = filters?.statuses || [...new Set(orders.map(o => o.status || o.status_raw))].sort();
     const uniqueMRs = filters?.mr_names || [];
+    const uniqueCustomers = filters?.customers || [];
     
     formCard.innerHTML = `
         <h6 class="mb-3" style="color: #2563eb; font-weight: 600;">
@@ -2947,10 +3104,25 @@ function addOrderSelectionForm(orders, filters = null) {
                 </label>
                 <select class="form-select form-select-sm" id="mrFilter" 
                     style="border-radius: 8px; border: 1.5px solid #e5e7eb; padding: 8px 12px; font-size: 0.875rem;"
-                    onchange="filterOrdersByAll()">
+                    onchange="if(typeof filterOrdersByAll === 'function') filterOrdersByAll(); else console.error('filterOrdersByAll not found');">
                     <option value="">-- All MRs --</option>
                     ${uniqueMRs.map(mr => `
                         <option value="${mr}">${mr}</option>
+                    `).join('')}
+                </select>
+            </div>
+            ` : ''}
+            ${isMRView && uniqueCustomers.length > 0 ? `
+            <div class="mb-3">
+                <label for="customerFilter" class="form-label" style="font-weight: 500;">
+                    <i class="fas fa-users me-2"></i>Filter by Customer:
+                </label>
+                <select class="form-select form-select-sm" id="customerFilter" 
+                    style="border-radius: 8px; border: 1.5px solid #e5e7eb; padding: 8px 12px; font-size: 0.875rem;"
+                    onchange="if(typeof filterOrdersByDateAndStatus === 'function') filterOrdersByDateAndStatus(); else console.error('filterOrdersByDateAndStatus not found');">
+                    <option value="">-- All Customers --</option>
+                    ${uniqueCustomers.map(customer => `
+                        <option value="${customer}">${customer}</option>
                     `).join('')}
                 </select>
             </div>
@@ -2961,7 +3133,7 @@ function addOrderSelectionForm(orders, filters = null) {
                 </label>
                 <select class="form-select form-select-sm" id="dateFilter" 
                     style="border-radius: 8px; border: 1.5px solid #e5e7eb; padding: 8px 12px; font-size: 0.875rem;"
-                    onchange="${isDistributorView ? 'filterOrdersByAll()' : 'filterOrdersByDateAndStatus()'}">
+                    onchange="${isDistributorView ? 'if(typeof filterOrdersByAll === \'function\') filterOrdersByAll(); else console.error(\'filterOrdersByAll not found\');' : 'if(typeof filterOrdersByDateAndStatus === \'function\') filterOrdersByDateAndStatus(); else console.error(\'filterOrdersByDateAndStatus not found\');'}">
                     <option value="">-- All Dates --</option>
                     ${uniqueDates.map(date => `
                         <option value="${date}">${date}</option>
@@ -2974,7 +3146,7 @@ function addOrderSelectionForm(orders, filters = null) {
                 </label>
                 <select class="form-select form-select-sm" id="statusFilter" 
                     style="border-radius: 8px; border: 1.5px solid #e5e7eb; padding: 8px 12px; font-size: 0.875rem;"
-                    onchange="${isDistributorView ? 'filterOrdersByAll()' : 'filterOrdersByDateAndStatus()'}">
+                    onchange="${isDistributorView ? 'if(typeof filterOrdersByAll === \'function\') filterOrdersByAll(); else console.error(\'filterOrdersByAll not found\');' : 'if(typeof filterOrdersByDateAndStatus === \'function\') filterOrdersByDateAndStatus(); else console.error(\'filterOrdersByDateAndStatus not found\');'}">
                     <option value="">-- All Statuses --</option>
                     ${uniqueStatuses.map(status => `
                         <option value="${status}">${status.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase())}</option>
@@ -2986,15 +3158,17 @@ function addOrderSelectionForm(orders, filters = null) {
                     <i class="fas fa-box me-2"></i>Choose an order:
                 </label>
                 <select class="form-select form-select-lg" id="orderSelect" name="order_id" required 
-                    style="border-radius: 10px; border: 2px solid #e5e7eb; padding: 12px; font-size: 0.95rem;">
+                    style="border-radius: 10px; border: 2px solid #e5e7eb; padding: 12px; font-size: 0.95rem; max-height: 400px; overflow-y: auto; overflow-x: hidden;">
                     <option value="">-- Select Order --</option>
                     ${orders.map(order => `
                         <option value="${order.order_id}" 
                             data-status="${order.status || order.status_raw}"
                             data-total="${order.total_amount}"
                             data-date="${order.order_date}"
-                            data-mr="${order.mr_name || ''}">
-                            ${order.order_id} - ${order.mr_name || 'N/A'} - ${order.status_display} - $${order.total_amount ? order.total_amount.toLocaleString() : '0'} - ${order.order_datetime || order.order_date}
+                            data-mr="${order.mr_name || ''}"
+                            data-customer="${order.customer_name || ''}"
+                            data-customer-id="${order.customer_id || ''}">
+                            ${order.order_id}${order.customer_name ? ' | ' + order.customer_name : ''} | ${order.status_display || (order.status || order.status_raw)} | ${order.total_amount ? (order.total_amount.toLocaleString('en-US', {minimumFractionDigits: 0, maximumFractionDigits: 0}) + ' MMK') : '0 MMK'} | ${order.order_date}
                         </option>
                     `).join('')}
                 </select>
@@ -3018,19 +3192,113 @@ function addOrderSelectionForm(orders, filters = null) {
     
     formContainer.appendChild(formCard);
     messageBubble.appendChild(formContainer); // Append to the message bubble instead of messagesDiv
+    
+    // Ensure form is visible
+    formContainer.style.display = 'block';
+    formContainer.style.visibility = 'visible';
+    formContainer.style.opacity = '1';
+    
+    // Add event listeners directly to filter elements (more reliable than inline handlers)
+    setTimeout(() => {
+        const mrFilter = formContainer.querySelector('#mrFilter');
+        const customerFilter = formContainer.querySelector('#customerFilter');
+        const dateFilter = formContainer.querySelector('#dateFilter');
+        const statusFilter = formContainer.querySelector('#statusFilter');
+        
+        if (mrFilter) {
+            mrFilter.addEventListener('change', () => {
+                if (typeof filterOrdersByAll === 'function') {
+                    filterOrdersByAll();
+                } else {
+                    console.error('filterOrdersByAll function not found');
+                }
+            });
+        }
+        
+        if (customerFilter) {
+            customerFilter.addEventListener('change', () => {
+                if (typeof filterOrdersByDateAndStatus === 'function') {
+                    filterOrdersByDateAndStatus();
+                } else {
+                    console.error('filterOrdersByDateAndStatus function not found');
+                }
+            });
+        }
+        
+        if (dateFilter) {
+            dateFilter.addEventListener('change', () => {
+                if (isDistributorView) {
+                    if (typeof filterOrdersByAll === 'function') {
+                        filterOrdersByAll();
+                    } else {
+                        console.error('filterOrdersByAll function not found');
+                    }
+                } else {
+                    if (typeof filterOrdersByDateAndStatus === 'function') {
+                        filterOrdersByDateAndStatus();
+                    } else {
+                        console.error('filterOrdersByDateAndStatus function not found');
+                    }
+                }
+            });
+        }
+        
+        if (statusFilter) {
+            statusFilter.addEventListener('change', () => {
+                if (isDistributorView) {
+                    if (typeof filterOrdersByAll === 'function') {
+                        filterOrdersByAll();
+                    } else {
+                        console.error('filterOrdersByAll function not found');
+                    }
+                } else {
+                    if (typeof filterOrdersByDateAndStatus === 'function') {
+                        filterOrdersByDateAndStatus();
+                    } else {
+                        console.error('filterOrdersByDateAndStatus function not found');
+                    }
+                }
+            });
+        }
+        
+        console.log('addOrderSelectionForm: Event listeners attached', {
+            mrFilter: !!mrFilter,
+            customerFilter: !!customerFilter,
+            dateFilter: !!dateFilter,
+            statusFilter: !!statusFilter
+        });
+    }, 100);
+    
+    // Scroll to show the form
+    setTimeout(() => {
+        formContainer.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }, 200);
+    
+    console.log('addOrderSelectionForm: Form added successfully', {
+        ordersCount: orders.length,
+        hasFilters: !!filters,
+        formContainer: formContainer
+    });
 }
 
 // Filter orders by all filters (MR name, date, status) - for distributors
 function filterOrdersByAll() {
+    try {
     const formContainer = document.querySelector('.order-selection-container');
-    if (!formContainer || !formContainer._originalOrders) return;
+        if (!formContainer || !formContainer._originalOrders) {
+            console.warn('filterOrdersByAll: Form container or orders not found');
+            return;
+        }
     
     const orderSelect = document.getElementById('orderSelect');
     const mrFilter = document.getElementById('mrFilter');
     const dateFilter = document.getElementById('dateFilter');
     const statusFilter = document.getElementById('statusFilter');
     
-    if (!orderSelect) return;
+        if (!orderSelect) {
+            console.warn('filterOrdersByAll: Order select element not found');
+            return;
+        }
     
     const orders = formContainer._originalOrders;
     const selectedMR = mrFilter?.value || '';
@@ -3046,7 +3314,13 @@ function filterOrdersByAll() {
         filteredOrders = filteredOrders.filter(order => order.order_date === selectedDate);
     }
     if (selectedStatus) {
-        filteredOrders = filteredOrders.filter(order => order.status === selectedStatus);
+        // Normalize status for comparison (handle both raw status and display status)
+        filteredOrders = filteredOrders.filter(order => {
+            const orderStatus = order.status || order.status_raw || '';
+            const normalizedOrderStatus = orderStatus.toLowerCase().replace(/\s+/g, '_');
+            const normalizedSelectedStatus = selectedStatus.toLowerCase().replace(/\s+/g, '_');
+            return normalizedOrderStatus === normalizedSelectedStatus || orderStatus === selectedStatus;
+        });
     }
     
     // Update order dropdown options
@@ -3058,38 +3332,71 @@ function filterOrdersByAll() {
                 data-total="${order.total_amount}"
                 data-date="${order.order_date}"
                 data-mr="${order.mr_name || ''}">
-                ${order.order_id} - ${order.mr_name || 'N/A'} - ${order.status_display} - $${order.total_amount ? order.total_amount.toLocaleString() : '0'} - ${order.order_datetime || order.order_date}
+                ${order.order_id} - ${order.mr_name || 'N/A'} - ${order.status_display} - ${order.total_amount ? (order.total_amount.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}) + ' MMK') : '0 MMK'} - ${order.order_datetime || order.order_date}
             </option>
         `).join('');
     
     // Restore selection if still valid
     if (currentValue && filteredOrders.some(o => o.order_id === currentValue)) {
         orderSelect.value = currentValue;
+        }
+        
+        console.log('filterOrdersByAll: Filtered orders', {
+            total: orders.length,
+            filtered: filteredOrders.length,
+            selectedMR: selectedMR,
+            selectedDate: selectedDate,
+            selectedStatus: selectedStatus
+        });
+    } catch (error) {
+        console.error('filterOrdersByAll error:', error);
     }
 }
 
-// Filter orders by date and status (for MRs)
+// Filter orders by date, status, and customer (for MRs)
 function filterOrdersByDateAndStatus() {
+    try {
     const formContainer = document.querySelector('.order-selection-container');
-    if (!formContainer || !formContainer._originalOrders) return;
+        if (!formContainer || !formContainer._originalOrders) {
+            console.warn('filterOrdersByDateAndStatus: Form container or orders not found');
+            return;
+        }
     
     const orderSelect = document.getElementById('orderSelect');
     const dateFilter = document.getElementById('dateFilter');
     const statusFilter = document.getElementById('statusFilter');
-    
-    if (!orderSelect || !dateFilter || !statusFilter) return;
+        const customerFilter = document.getElementById('customerFilter');
+        
+        if (!orderSelect || !dateFilter || !statusFilter) {
+            console.warn('filterOrdersByDateAndStatus: Required elements not found', {
+                orderSelect: !!orderSelect,
+                dateFilter: !!dateFilter,
+                statusFilter: !!statusFilter
+            });
+            return;
+        }
     
     const orders = formContainer._originalOrders;
     const selectedDate = dateFilter.value;
     const selectedStatus = statusFilter.value;
+    const selectedCustomer = customerFilter?.value || '';
     
-    // Filter orders by date and status
+    // Filter orders by date, status, and customer
     let filteredOrders = orders;
     if (selectedDate) {
         filteredOrders = filteredOrders.filter(order => order.order_date === selectedDate);
     }
     if (selectedStatus) {
-        filteredOrders = filteredOrders.filter(order => (order.status || order.status_raw) === selectedStatus);
+        // Normalize status for comparison (handle both raw status and display status)
+        filteredOrders = filteredOrders.filter(order => {
+            const orderStatus = order.status || order.status_raw || '';
+            const normalizedOrderStatus = orderStatus.toLowerCase().replace(/\s+/g, '_');
+            const normalizedSelectedStatus = selectedStatus.toLowerCase().replace(/\s+/g, '_');
+            return normalizedOrderStatus === normalizedSelectedStatus || orderStatus === selectedStatus;
+        });
+    }
+    if (selectedCustomer) {
+        filteredOrders = filteredOrders.filter(order => order.customer_name === selectedCustomer);
     }
     
     // Clear and repopulate the select
@@ -3097,19 +3404,33 @@ function filterOrdersByDateAndStatus() {
     filteredOrders.forEach(order => {
         const option = document.createElement('option');
         option.value = order.order_id;
-        option.setAttribute('data-status', order.status_raw);
+        option.setAttribute('data-status', order.status || order.status_raw);
         option.setAttribute('data-total', order.total_amount);
         option.setAttribute('data-date', order.order_date);
-        option.textContent = order.order_id; // Show only Order ID
+        option.setAttribute('data-customer', order.customer_name || '');
+        option.setAttribute('data-customer-id', order.customer_id || '');
+        option.textContent = `${order.order_id}${order.customer_name ? ' - ' + order.customer_name : ''} - ${order.status_display || (order.status || order.status_raw)} - ${order.total_amount ? (order.total_amount.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}) + ' MMK') : '0 MMK'} - ${order.order_date}`;
         orderSelect.appendChild(option);
     });
     
     // Reset selection
     orderSelect.value = '';
+        
+        console.log('filterOrdersByDateAndStatus: Filtered orders', {
+            total: orders.length,
+            filtered: filteredOrders.length,
+            selectedDate: selectedDate,
+            selectedStatus: selectedStatus,
+            selectedCustomer: selectedCustomer
+        });
+    } catch (error) {
+        console.error('filterOrdersByDateAndStatus error:', error);
+    }
 }
 
-// Make function globally accessible
+// Make functions globally accessible (do this before form creation)
 window.filterOrdersByDateAndStatus = filterOrdersByDateAndStatus;
+window.filterOrdersByAll = filterOrdersByAll;
 
 // Handle order selection
 async function handleOrderSelection(event) {
@@ -3171,7 +3492,24 @@ async function handleOrderSelection(event) {
                 displayDistributorOrderDetails(data.order);
             }
         } else {
-            // For MRs, send message to track the order
+            // For MRs, call API to get order details
+            const response = await fetch('/enhanced-chat/select_order', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ order_id: orderId })
+            });
+            
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.error || 'Failed to fetch order details');
+            }
+            
+            const data = await response.json();
+            
+            if (data.success && data.order) {
+                // Remove the order selection form
             const orderSelectionForm = form.closest('.order-selection-container');
             if (orderSelectionForm) {
                 orderSelectionForm.style.opacity = '0';
@@ -3181,7 +3519,11 @@ async function handleOrderSelection(event) {
                 }, 300);
             }
             
-            await sendMessage(`track order ${orderId}`);
+                // Display order details for MR
+                displayMROrderDetails(data.order);
+            } else {
+                throw new Error(data.error || 'Failed to fetch order details');
+            }
         }
     } catch (error) {
         console.error('Error selecting order:', error);
@@ -3197,45 +3539,362 @@ async function handleOrderSelection(event) {
 
 // Make functions globally accessible
 window.handleOrderSelection = handleOrderSelection;
-window.filterOrdersByAll = filterOrdersByAll;
+// filterOrdersByAll and filterOrdersByDateAndStatus are already exposed above
 
-// Display distributor order details with confirm/reject buttons
-function displayDistributorOrderDetails(order) {
-    // Build detailed order message
-    let message = `**📦 Order Details - ${order.order_id}**\n\n`;
-    message += `**MR:** ${order.mr_name} | **Area:** ${order.area}\n`;
-    message += `**Contact:** ${order.mr_email} | ${order.mr_phone}\n`;
-    message += `**Status:** ${order.status_display} | **Date:** ${order.order_datetime}\n\n`;
-    message += `**Items Ordered:**\n`;
-    
-    order.items.forEach(item => {
-        if (item.free_quantity > 0) {
-            message += `• ${item.product_name} (${item.product_code}): **${item.total_quantity} units** (${item.quantity} paid + ${item.free_quantity} free) @ $${item.unit_price.toLocaleString()} = $${item.total_price.toLocaleString()}\n`;
-        } else {
-            message += `• ${item.product_name} (${item.product_code}): ${item.quantity} units @ $${item.unit_price.toLocaleString()} = $${item.total_price.toLocaleString()}\n`;
+// Display MR order details with enhanced tabular format
+function displayMROrderDetails(order) {
+    try {
+        if (!order) {
+            console.error('displayMROrderDetails: Order data is missing');
+            addMessage('Error: Order data is missing. Please try again.', 'bot', 'error');
+            return;
         }
-    });
-    
-    message += `\n**💰 Total:** $${order.total_amount.toLocaleString()} | **Items:** ${order.total_items} units\n`;
-    
-    // Add message
-    addMessage(message, 'bot');
-    
-    // Add confirm/reject buttons if order can be confirmed
-    if (order.can_confirm) {
-        const actionButtons = [
-            {
-                text: '✅ Confirm Order',
-                action: 'confirm_order',
-                style: 'success',
-                order_id: order.order_id
-            },
-            {
-                text: '❌ Reject Order',
-                action: 'reject_order',
+        
+        const messagesDiv = document.getElementById('chatMessages');
+        if (!messagesDiv) {
+            console.error('displayMROrderDetails: Chat messages container not found');
+            return;
+        }
+        
+        // Create main message container
+        let message = `**📦 Order Details - ${order.order_id || 'Unknown'}**\n\n`;
+        
+        // Order Information Section (first)
+        message += `**📋 Order Information:**\n`;
+        message += `• **Status:** ${order.status_display || (order.status ? order.status.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase()) : 'Unknown')}\n`;
+        message += `• **Date:** ${order.order_datetime || order.order_date || 'N/A'}\n`;
+        message += `• **Total Items:** ${order.total_items || 0} units\n`;
+        message += `• **Total Amount:** ${(order.total_amount || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK\n`;
+        message += `\n`;
+        
+        // Customer Information Section (second line)
+        message += `**👤 Customer Information:**\n`;
+        if (order.customer_name) {
+            message += `• **Customer:** ${order.customer_name}\n`;
+        } else {
+            message += `• **Customer:** Not specified\n`;
+        }
+        message += `\n`;
+        
+        // Add message first
+        addMessage(message, 'bot');
+        
+        // Find the last bot message to add table
+        const botMessages = messagesDiv.querySelectorAll('.message.bot');
+        const lastBotMessage = botMessages[botMessages.length - 1];
+        
+        if (!lastBotMessage) {
+            console.error('displayMROrderDetails: Could not find last bot message');
+            return;
+        }
+        
+        // Try multiple selectors to find the message bubble
+        let messageBubble = lastBotMessage.querySelector('.message-bubble .bg-light');
+        if (!messageBubble) {
+            messageBubble = lastBotMessage.querySelector('.message-bubble');
+        }
+        if (!messageBubble) {
+            messageBubble = lastBotMessage.querySelector('.bg-light');
+        }
+        if (!messageBubble) {
+            messageBubble = lastBotMessage;
+        }
+        
+        if (messageBubble) {
+            // Create table container
+            const tableContainer = document.createElement('div');
+            tableContainer.className = 'order-items-table mt-3 mb-3';
+            tableContainer.style.cssText = 'width: 100%; overflow-x: auto;';
+            
+            // Build items table
+            let tableHTML = `
+                <div style="overflow-x: auto; width: 100%; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+                    <table class="table table-bordered table-hover mb-0" style="font-size: 0.875rem; margin-bottom: 0; width: 100%; min-width: 500px;">
+                        <thead style="background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%); color: white;">
+                            <tr>
+                                <th style="padding: 12px; border: 1px solid #1e40af; font-weight: 600; text-align: left;">Product Name</th>
+                                <th style="padding: 12px; border: 1px solid #1e40af; font-weight: 600; text-align: center;">Quantity</th>
+                                <th style="padding: 12px; border: 1px solid #1e40af; font-weight: 600; text-align: center;">FOC</th>
+                                <th style="padding: 12px; border: 1px solid #1e40af; font-weight: 600; text-align: right;">Unit Price</th>
+                                <th style="padding: 12px; border: 1px solid #1e40af; font-weight: 600; text-align: right;">Total Price</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+            `;
+            
+            if (order.items && order.items.length > 0) {
+                order.items.forEach((item, index) => {
+                    const rowColor = index % 2 === 0 ? '#f8f9fa' : '#ffffff';
+                    const focDisplay = (item.free_quantity || 0) > 0 
+                        ? `<span style="color: #10b981; font-weight: 600;">+${item.free_quantity}</span>` 
+                        : '<span style="color: #6b7280;">-</span>';
+                    
+                    tableHTML += `
+                        <tr style="background-color: ${rowColor};">
+                            <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                <strong>${item.product_name || 'Unknown Product'}</strong>
+                            </td>
+                            <td style="padding: 12px; border: 1px solid #dee2e6; text-align: center;">
+                                ${item.quantity || 0} units
+                            </td>
+                            <td style="padding: 12px; border: 1px solid #dee2e6; text-align: center;">
+                                ${focDisplay}
+                            </td>
+                            <td style="padding: 12px; border: 1px solid #dee2e6; text-align: right;">
+                                ${(item.unit_price || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK
+                            </td>
+                            <td style="padding: 12px; border: 1px solid #dee2e6; text-align: right; font-weight: 600;">
+                                ${(item.total_price || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK
+                            </td>
+                        </tr>
+                    `;
+                });
+            } else {
+                tableHTML += `
+                    <tr>
+                        <td colspan="5" style="padding: 20px; text-align: center; color: #6b7280;">
+                            No items found in this order.
+                        </td>
+                    </tr>
+                `;
+            }
+            
+            // Add total row
+            tableHTML += `
+                        </tbody>
+                        <tfoot style="background-color: #f1f5f9; border-top: 2px solid #2563eb;">
+                            <tr>
+                                <td colspan="4" style="padding: 12px; border: 1px solid #dee2e6; text-align: right; font-weight: 700; font-size: 1rem;">
+                                    <strong>Grand Total:</strong>
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6; text-align: right; font-weight: 700; font-size: 1rem; color: #2563eb;">
+                                    <strong>${(order.total_amount || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK</strong>
+                                </td>
+                            </tr>
+                        </tfoot>
+                    </table>
+                </div>
+            `;
+            
+            tableContainer.innerHTML = tableHTML;
+            messageBubble.appendChild(tableContainer);
+        }
+        
+        // Add action buttons based on order status
+        const actionButtons = [];
+        if (order.status === 'pending' || order.status === 'draft') {
+            actionButtons.push({
+                text: '❌ Cancel Order',
+                action: 'cancel_order',
                 style: 'danger',
                 order_id: order.order_id
-            },
+            });
+        }
+        actionButtons.push(
+            { text: 'View All Orders', action: 'track_order' },
+            { text: 'Back to Home', action: 'home' }
+        );
+        showActionButtons(actionButtons);
+        
+        // Scroll to bottom
+        messagesDiv.scrollTo({
+            top: messagesDiv.scrollHeight,
+            behavior: 'smooth'
+        });
+    } catch (error) {
+        console.error('displayMROrderDetails error:', error);
+        addMessage('Error displaying order details. Please try again.', 'bot', 'error');
+    }
+}
+
+// Display distributor order details with confirm/reject buttons and edit options
+function displayDistributorOrderDetails(order) {
+    try {
+        const messagesDiv = document.getElementById('chatMessages');
+        if (!messagesDiv) {
+            console.error('displayDistributorOrderDetails: Chat messages container not found');
+            return;
+        }
+        
+        // Build detailed order message in bullet points
+    let message = `**📦 Order Details - ${order.order_id}**\n\n`;
+        message += `• **MR:** ${order.mr_name}\n`;
+        message += `• **Area:** ${order.area}\n`;
+        message += `• **Contact:** ${order.mr_email}\n`;
+        message += `• **Phone:** ${order.mr_phone}\n`;
+        message += `• **Status:** ${order.status_display}\n`;
+        message += `• **Date:** ${order.order_datetime}\n\n`;
+        
+        // Add message first
+        addMessage(message, 'bot');
+        
+        // Find the last bot message to add editable form
+        const botMessages = messagesDiv.querySelectorAll('.message.bot');
+        const lastBotMessage = botMessages[botMessages.length - 1];
+        
+        if (!lastBotMessage) {
+            console.error('displayDistributorOrderDetails: Could not find last bot message');
+            return;
+        }
+        
+        // Try multiple selectors to find the message bubble
+        let messageBubble = lastBotMessage.querySelector('.message-bubble .bg-light');
+        if (!messageBubble) {
+            messageBubble = lastBotMessage.querySelector('.message-bubble');
+        }
+        if (!messageBubble) {
+            messageBubble = lastBotMessage.querySelector('.bg-light');
+        }
+        if (!messageBubble) {
+            messageBubble = lastBotMessage;
+        }
+        
+        if (messageBubble && order.can_confirm) {
+            // Create editable form for order items
+            const editFormContainer = document.createElement('div');
+            editFormContainer.className = 'order-edit-form mt-3 mb-3';
+            editFormContainer.style.cssText = 'width: 100%; animation: slideInFromBottom 0.3s ease-out;';
+            
+            let formHTML = `
+                <div class="card border-0 shadow-sm" style="background: rgba(255, 255, 255, 0.98); border-radius: 12px; padding: 20px;">
+                    <h6 class="mb-3" style="color: #2563eb; font-weight: 600;">
+                        <i class="fas fa-edit me-2"></i>Edit Order Items (Optional)
+                    </h6>
+                    <p class="text-muted mb-3" style="font-size: 0.875rem;">
+                        <i class="fas fa-info-circle me-1"></i>
+                        You can adjust quantities, lot numbers, and expiry dates before confirming. If you reduce quantity, the remaining will be moved to pending orders. Leave unchanged to use original values.
+                    </p>
+                    <form id="orderEditForm_${order.order_id}">
+            `;
+            
+            // Add editable fields for each item
+            order.items.forEach((item, index) => {
+                const itemId = item.id || item.item_id || index; // Use item.id if available, fallback to index
+                const originalQty = item.quantity || 0;
+                const focQty = item.free_quantity || 0;
+                const totalQty = originalQty + focQty;
+                
+                // Get lot number from database if available
+                const lotNumber = item.lot_number || '';
+                
+                // Get expiry date from database if available, otherwise use today
+                const expiryDate = item.expiry_date || new Date().toISOString().split('T')[0];
+                
+                formHTML += `
+                    <div class="order-item-edit mb-4 p-3" style="background: #f8f9fa; border-radius: 8px; border-left: 4px solid #2563eb;">
+                        <h6 style="color: #1e40af; margin-bottom: 15px; font-weight: 600;">
+                            <i class="fas fa-pills me-2"></i>${item.product_name}
+                        </h6>
+                        <div class="d-flex flex-column gap-3">
+                            <div>
+                                <label class="form-label" style="font-weight: 500; font-size: 0.875rem;">
+                                    <i class="fas fa-box me-1"></i>Quantity (Ordered: ${totalQty}${focQty > 0 ? ` + ${focQty} FOC` : ''})
+                                </label>
+                                <input type="number" 
+                                    class="form-control form-control-sm" 
+                                    id="qty_${itemId}" 
+                                    name="quantity_${itemId}"
+                                    value="${originalQty}"
+                                    min="0"
+                                    style="border-radius: 6px; border: 1.5px solid #e5e7eb;"
+                                    placeholder="Enter quantity">
+                                <small class="text-muted" style="font-size: 0.75rem;">
+                                    Adjust if different from ordered quantity. If reduced, remaining will be moved to pending orders.
+                                </small>
+                            </div>
+                            <div>
+                                <label class="form-label" style="font-weight: 500; font-size: 0.875rem;">
+                                    <i class="fas fa-barcode me-1"></i>Lot Number (Optional)
+                                </label>
+                                <input type="text" 
+                                    class="form-control form-control-sm" 
+                                    id="lot_${itemId}" 
+                                    name="lot_number_${itemId}"
+                                    value="${lotNumber}"
+                                    style="border-radius: 6px; border: 1.5px solid #e5e7eb;"
+                                    placeholder="Enter lot number">
+                                <small class="text-muted" style="font-size: 0.75rem;">
+                                    Optional: Lot/Batch number for this item${lotNumber ? ' (from database)' : ''}
+                                </small>
+                            </div>
+                            <div>
+                                <label class="form-label" style="font-weight: 500; font-size: 0.875rem;">
+                                    <i class="fas fa-calendar-alt me-1"></i>Expiry Date
+                                </label>
+                                <input type="date" 
+                                    class="form-control form-control-sm" 
+                                    id="expiry_${itemId}" 
+                                    name="expiry_date_${itemId}"
+                                    value="${expiryDate}"
+                                    style="border-radius: 6px; border: 1.5px solid #e5e7eb;"
+                                    min="${new Date().toISOString().split('T')[0]}">
+                                <small class="text-muted" style="font-size: 0.75rem;">
+                                    Select expiry date for this item${item.expiry_date ? ' (from database)' : ''}
+                                </small>
+                            </div>
+                            <div>
+                                <label class="form-label" style="font-weight: 500; font-size: 0.875rem;">
+                                    <i class="fas fa-comment-alt me-1"></i>Reason (Optional)
+                                </label>
+                                <input type="text" 
+                                    class="form-control form-control-sm" 
+                                    id="reason_${itemId}" 
+                                    name="reason_${itemId}"
+                                    style="border-radius: 6px; border: 1.5px solid #e5e7eb;"
+                                    placeholder="Reason for adjustment">
+                                <small class="text-muted" style="font-size: 0.75rem;">
+                                    Optional: Reason for quantity/date/lot change. MR will be notified if quantity is changed and reason is provided.
+                                </small>
+                            </div>
+                        </div>
+                        <input type="hidden" name="item_id_${itemId}" value="${itemId}">
+                    </div>
+                `;
+            });
+            
+            formHTML += `
+                    </form>
+                    <div class="d-flex gap-2 mt-3">
+                        <button type="button" 
+                            class="btn btn-success flex-grow-1" 
+                            onclick="confirmOrderWithEdits('${order.order_id}')"
+                            style="border-radius: 8px; padding: 10px; font-weight: 600;">
+                            <i class="fas fa-check-circle me-2"></i>Confirm Order
+                        </button>
+                        <button type="button" 
+                            class="btn btn-outline-danger" 
+                            onclick="rejectOrderAction('${order.order_id}')"
+                            style="border-radius: 8px; padding: 10px; font-weight: 600;">
+                            <i class="fas fa-times-circle me-2"></i>Reject Order
+                        </button>
+                    </div>
+                </div>
+            `;
+            
+            editFormContainer.innerHTML = formHTML;
+            messageBubble.appendChild(editFormContainer);
+        } else if (messageBubble) {
+            // If order cannot be confirmed, show read-only items list
+            let itemsList = `**Items Ordered:**\n`;
+    order.items.forEach(item => {
+        if (item.free_quantity > 0) {
+                    itemsList += `• ${item.product_name}: **${item.total_quantity} units** (${item.quantity} paid + ${item.free_quantity} free) @ ${item.unit_price.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK = ${item.total_price.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK\n`;
+        } else {
+                    itemsList += `• ${item.product_name}: ${item.quantity} units @ ${item.unit_price.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK = ${item.total_price.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK\n`;
+                }
+            });
+            itemsList += `\n**💰 Total:** ${order.total_amount.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK | **Items:** ${order.total_items} units\n`;
+            
+            // Add items list to message
+            const itemsDiv = document.createElement('div');
+            itemsDiv.innerHTML = formatMessage(itemsList);
+            messageBubble.appendChild(itemsDiv);
+        }
+        
+        // Add action buttons
+    if (order.can_confirm) {
+            // Buttons are in the form, but add backup buttons
+        const actionButtons = [
             {
                 text: 'View All Orders',
                 action: 'track_order'
@@ -3254,10 +3913,145 @@ function displayDistributorOrderDetails(order) {
             }
         ];
         showActionButtons(actionButtons);
+        }
+        
+        // Scroll to bottom
+        messagesDiv.scrollTo({
+            top: messagesDiv.scrollHeight,
+            behavior: 'smooth'
+        });
+    } catch (error) {
+        console.error('displayDistributorOrderDetails error:', error);
+        addMessage('Error displaying order details. Please try again.', 'bot', 'error');
     }
 }
 
-// Confirm order by distributor
+// Confirm order by distributor with edits
+async function confirmOrderWithEdits(orderId) {
+    try {
+        // Collect item edits from the form
+        const form = document.getElementById(`orderEditForm_${orderId}`);
+        if (!form) {
+            // Fallback to simple confirmation if form not found
+            return confirmOrderAction(orderId);
+        }
+        
+        const itemEdits = {};
+        const formData = new FormData(form);
+        
+        // Get all item IDs from hidden inputs
+        const itemIds = [];
+        form.querySelectorAll('input[type="hidden"][name^="item_id_"]').forEach(input => {
+            const itemId = parseInt(input.value);
+            if (!isNaN(itemId)) {
+                itemIds.push(itemId);
+            }
+        });
+        
+        // Collect edits for each item
+        itemIds.forEach(itemId => {
+            const quantity = form.querySelector(`#qty_${itemId}`);
+            const lotNumber = form.querySelector(`#lot_${itemId}`);
+            const expiryDate = form.querySelector(`#expiry_${itemId}`);
+            const reason = form.querySelector(`#reason_${itemId}`);
+            
+            const edits = {};
+            let hasEdits = false;
+            
+            if (quantity && quantity.value) {
+                const qtyValue = parseInt(quantity.value);
+                if (!isNaN(qtyValue)) {
+                    edits.quantity = qtyValue;
+                    hasEdits = true;
+                }
+            }
+            
+            if (lotNumber && lotNumber.value && lotNumber.value.trim()) {
+                edits.lot_number = lotNumber.value.trim();
+                hasEdits = true;
+            }
+            
+            if (expiryDate && expiryDate.value) {
+                edits.expiry_date = expiryDate.value;
+                hasEdits = true;
+            }
+            
+            if (reason && reason.value && reason.value.trim()) {
+                edits.reason = reason.value.trim();
+                hasEdits = true;
+            }
+            
+            // Only include if there are actual edits
+            if (hasEdits) {
+                itemEdits[itemId] = edits;
+            }
+        });
+        
+        if (!confirm(`Are you sure you want to confirm order ${orderId}${Object.keys(itemEdits).length > 0 ? ' with the specified adjustments' : ''}?`)) {
+            return;
+        }
+        
+        // Disable form during submission
+        const submitBtn = form.closest('.card').querySelector('button[onclick*="confirmOrderWithEdits"]');
+        if (submitBtn) {
+            submitBtn.disabled = true;
+            submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Confirming...';
+        }
+        
+        const response = await fetch('/enhanced-chat/confirm_order_action', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ 
+                order_id: orderId,
+                item_edits: itemEdits
+            })
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            let successMessage = `✅ **Order Confirmed Successfully!**\n\n${data.message}\n\nThe stock has been moved from blocked to sold, and the MR has been notified via email.`;
+            
+            // Show notifications if any
+            if (data.notifications && data.notifications.length > 0) {
+                successMessage += `\n\n**📋 Notifications:**\n`;
+                data.notifications.forEach(notif => {
+                    successMessage += `• ${notif}\n`;
+                });
+            }
+            
+            addMessage(successMessage, 'bot');
+            
+            // Remove the edit form
+            const editForm = form.closest('.order-edit-form');
+            if (editForm) {
+                editForm.style.opacity = '0';
+                editForm.style.transition = 'opacity 0.3s ease-out';
+                setTimeout(() => {
+                    editForm.remove();
+                }, 300);
+            }
+            
+            showActionButtons([
+                { text: 'View All Orders', action: 'track_order' },
+                { text: 'Back to Home', action: 'home' }
+            ]);
+        } else {
+            addMessage(`❌ Error: ${data.message}`, 'bot', 'error');
+            if (submitBtn) {
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = '<i class="fas fa-check-circle me-2"></i>Confirm Order';
+            }
+        }
+    } catch (error) {
+        console.error('Error confirming order:', error);
+        addMessage(`❌ Error confirming order. Please try again.`, 'bot', 'error');
+    }
+}
+
+// Confirm order by distributor (simple version without edits)
 async function confirmOrderAction(orderId) {
     if (!confirm(`Are you sure you want to confirm order ${orderId}?`)) {
         return;
@@ -3275,7 +4069,17 @@ async function confirmOrderAction(orderId) {
         const data = await response.json();
         
         if (data.success) {
-            addMessage(`✅ **Order Confirmed Successfully!**\n\n${data.message}\n\nThe stock has been moved from blocked to sold, and the MR has been notified via email.`, 'bot');
+            let successMessage = `✅ **Order Confirmed Successfully!**\n\n${data.message}\n\nThe stock has been moved from blocked to sold, and the MR has been notified via email.`;
+            
+            // Show notifications if any
+            if (data.notifications && data.notifications.length > 0) {
+                successMessage += `\n\n**📋 Notifications:**\n`;
+                data.notifications.forEach(notif => {
+                    successMessage += `• ${notif}\n`;
+                });
+            }
+            
+            addMessage(successMessage, 'bot');
             showActionButtons([
                 { text: 'View All Orders', action: 'track_order' },
                 { text: 'Back to Home', action: 'home' }
@@ -3290,6 +4094,72 @@ async function confirmOrderAction(orderId) {
 }
 
 // Reject order by distributor
+async function rejectOrderAction(orderId) {
+    const reason = prompt('Please provide a reason for rejecting this order (optional):');
+    
+    try {
+        const response = await fetch('/enhanced-chat/reject_order_action', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ 
+                order_id: orderId,
+                rejection_reason: reason || null
+            })
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            addMessage(`✅ **Order Rejected Successfully!**\n\n${data.message}\n\nThe MR has been notified via email.`, 'bot');
+            showActionButtons([
+                { text: 'View All Orders', action: 'track_order' },
+                { text: 'Back to Home', action: 'home' }
+            ]);
+        } else {
+            addMessage(`❌ Error: ${data.message}`, 'bot', 'error');
+        }
+    } catch (error) {
+        console.error('Error rejecting order:', error);
+        addMessage(`❌ Error rejecting order. Please try again.`, 'bot', 'error');
+    }
+}
+
+// Make functions globally accessible
+window.confirmOrderWithEdits = confirmOrderWithEdits;
+window.rejectOrderAction = rejectOrderAction;
+
+// Reject order by distributor
+async function cancelOrderAction(orderId) {
+    try {
+        const response = await fetch('/enhanced-chat/cancel_order_action', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ order_id: orderId })
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            addMessage(data.message || `Order ${orderId} has been cancelled successfully.`, 'bot');
+        } else {
+            addMessage(data.message || data.error || 'Failed to cancel order.', 'bot', 'error');
+        }
+        
+        // Show action buttons if provided
+        if (data.action_buttons && data.action_buttons.length > 0) {
+            showActionButtons(data.action_buttons);
+        }
+        
+    } catch (error) {
+        console.error('Error cancelling order:', error);
+        addMessage('❌ Sorry, there was an error cancelling the order. Please try again.', 'bot', 'error');
+    }
+}
+
 async function rejectOrderAction(orderId) {
     const reason = prompt(`Please provide a reason for rejecting order ${orderId}:`, 'Stock unavailable');
     
@@ -4045,3 +4915,527 @@ window.selectAllColumns = selectAllColumns;
 window.deselectAllColumns = deselectAllColumns;
 window.cancelReportGeneration = cancelReportGeneration;
 window.applyInvoiceFilter = applyInvoiceFilter;
+
+// Check FOC notification when quantity is entered
+function checkFOCNotification(inputElement) {
+    const quantity = parseInt(inputElement.value) || 0;
+    const productCode = inputElement.getAttribute('data-product-code');
+    const notificationDiv = document.getElementById(`foc-notification-${productCode}`);
+    
+    if (!notificationDiv || quantity === 0) {
+        if (notificationDiv) notificationDiv.style.display = 'none';
+        return;
+    }
+    
+    // Get FOC schemes from data attribute
+    const focSchemesJson = inputElement.getAttribute('data-foc-schemes');
+    let focSchemes = [];
+    try {
+        focSchemes = JSON.parse(focSchemesJson || '[]');
+    } catch (e) {
+        console.warn('Error parsing FOC schemes:', e);
+    }
+    
+    // First, find the best/highest scheme that quantity qualifies for
+    let bestActiveScheme = null;
+    let bestThreshold = 0;
+    
+    // Also track closest upcoming scheme (next tier above current quantity)
+    let closestScheme = null;
+    let minDistance = Infinity;
+    let nextTierScheme = null; // The next higher tier scheme
+    
+    // Sort schemes by buy quantity (ascending) to check from lowest to highest
+    const sortedSchemes = focSchemes
+        .map(scheme => {
+            if (scheme) {
+                const buyQty = parseInt(scheme.buy_quantity || scheme.buy || 0);
+                const freeQty = parseInt(scheme.free_quantity || scheme.free || 0);
+                return { buyQty, freeQty, scheme };
+            }
+            return null;
+        })
+        .filter(s => s && s.buyQty > 0)
+        .sort((a, b) => a.buyQty - b.buyQty); // Sort ascending
+    
+    for (const { buyQty, freeQty } of sortedSchemes) {
+        // If quantity qualifies for this scheme, check if it's better than current best
+        if (quantity >= buyQty && buyQty > bestThreshold) {
+            bestThreshold = buyQty;
+            bestActiveScheme = { buyQty, freeQty };
+        }
+        
+        // Check if this is the next tier above current quantity
+        const distance = buyQty - quantity;
+        if (distance > 0) {
+            // If this is closer than previous closest, or if we haven't found next tier yet
+            if (distance < minDistance) {
+                minDistance = distance;
+                closestScheme = { buyQty, freeQty, distance };
+            }
+            // Track the next tier (first scheme above current quantity)
+            if (!nextTierScheme && distance > 0) {
+                nextTierScheme = { buyQty, freeQty, distance };
+            }
+        }
+    }
+    
+    // Show the best active scheme if quantity qualifies for any
+    if (bestActiveScheme) {
+        notificationDiv.innerHTML = `<i class="fas fa-gift me-1"></i>FOC Active: Buy ${bestActiveScheme.buyQty} Get ${bestActiveScheme.freeQty} Free!`;
+        notificationDiv.style.display = 'block';
+        notificationDiv.style.color = '#059669';
+    }
+    // Otherwise, show notification if close to an upcoming scheme (within 5 units) or show next tier
+    else if (closestScheme) {
+        if (closestScheme.distance <= 5) {
+            // Close to a scheme (within 5 units)
+            notificationDiv.innerHTML = `<i class="fas fa-info-circle me-1"></i>Add ${closestScheme.distance} more to get FOC: Buy ${closestScheme.buyQty} Get ${closestScheme.freeQty} Free!`;
+            notificationDiv.style.display = 'block';
+            notificationDiv.style.color = '#f59e0b';
+        } else if (nextTierScheme) {
+            // Show next tier even if further away (but limit to reasonable distance)
+            if (nextTierScheme.distance <= 20) {
+                notificationDiv.innerHTML = `<i class="fas fa-info-circle me-1"></i>Add ${nextTierScheme.distance} more for better FOC: Buy ${nextTierScheme.buyQty} Get ${nextTierScheme.freeQty} Free!`;
+                notificationDiv.style.display = 'block';
+                notificationDiv.style.color = '#3b82f6';
+            } else {
+                notificationDiv.style.display = 'none';
+            }
+        } else {
+            notificationDiv.style.display = 'none';
+        }
+    } else {
+        notificationDiv.style.display = 'none';
+    }
+}
+
+window.checkFOCNotification = checkFOCNotification;
+
+// Product Search Interface Functions
+function showProductSearchInterface(products) {
+    const messagesDiv = document.getElementById('chatMessages');
+    
+    if (!messagesDiv) {
+        console.error('showProductSearchInterface: Chat messages container not found');
+        return;
+    }
+    
+    // Find the last bot message
+    const botMessages = messagesDiv.querySelectorAll('.message.bot');
+    let lastBotMessage = null;
+    
+    if (botMessages.length > 0) {
+        lastBotMessage = botMessages[botMessages.length - 1];
+    }
+    
+    if (!lastBotMessage) {
+        console.error('showProductSearchInterface: No bot message found');
+        return;
+    }
+    
+    // Find the inner message bubble div
+    let messageBubble = lastBotMessage.querySelector('.message-bubble .bg-light');
+    if (!messageBubble) {
+        messageBubble = lastBotMessage.querySelector('.message-bubble .d-flex .bg-light');
+    }
+    if (!messageBubble) {
+        messageBubble = lastBotMessage.querySelector('.bg-light');
+    }
+    
+    if (!messageBubble) {
+        const bubbleDiv = lastBotMessage.querySelector('.message-bubble');
+        if (bubbleDiv) {
+            let wrapper = bubbleDiv.querySelector('.d-flex');
+            if (!wrapper) {
+                wrapper = document.createElement('div');
+                wrapper.className = 'd-flex justify-content-start align-items-center';
+                wrapper.style.cssText = 'gap: 8px; width: 100%;';
+                bubbleDiv.appendChild(wrapper);
+            }
+            let contentDiv = wrapper.querySelector('.bg-light');
+            if (!contentDiv) {
+                contentDiv = document.createElement('div');
+                contentDiv.className = 'bg-light border rounded-3 px-3 py-2';
+                contentDiv.style.cssText = 'max-width: 75%; font-size: 0.875rem; width: auto;';
+                wrapper.appendChild(contentDiv);
+            }
+            messageBubble = contentDiv;
+        }
+    }
+    
+    if (!messageBubble) {
+        console.error('showProductSearchInterface: Could not find message bubble element');
+        return;
+    }
+    
+    const searchContainer = document.createElement('div');
+    searchContainer.className = 'product-search-container mt-3';
+    searchContainer.style.cssText = 'animation: slideInFromBottom 0.3s ease-out; width: 100%; max-width: 100%;';
+    
+    const searchCard = document.createElement('div');
+    searchCard.className = 'card border-0 shadow-sm';
+    searchCard.style.cssText = `
+        background: rgba(255, 255, 255, 0.95);
+        backdrop-filter: blur(20px);
+        border-radius: 16px;
+        padding: 20px;
+        width: 100%;
+        box-sizing: border-box;
+    `;
+    
+    // Store original products for filtering
+    searchContainer._originalProducts = products;
+    
+    // Create search input and product list
+    searchCard.innerHTML = `
+        <h6 class="mb-3" style="color: #2563eb; font-weight: 600;">
+            <i class="fas fa-search me-2"></i>Product Information Search
+        </h6>
+        <div class="mb-3">
+            <label for="productSearchInput" class="form-label" style="font-weight: 500;">
+                <i class="fas fa-search me-2"></i>Search Products:
+            </label>
+            <input type="text" 
+                   class="form-control form-control-sm" 
+                   id="productSearchInput" 
+                   placeholder="Type product name to search..."
+                   style="border-radius: 8px; border: 1.5px solid #e5e7eb; padding: 10px 12px; font-size: 0.875rem;"
+                   oninput="filterProductList(this.value)">
+        </div>
+        <div class="mb-3">
+            <label class="form-label" style="font-weight: 500;">
+                <i class="fas fa-list me-2"></i>Available Products:
+            </label>
+            <div id="productListContainer" style="max-height: 300px; overflow-y: auto; border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px;">
+                ${renderProductList(products)}
+            </div>
+        </div>
+    `;
+    
+    searchContainer.appendChild(searchCard);
+    messageBubble.appendChild(searchContainer);
+    
+    // Scroll to bottom
+    messagesDiv.scrollTo({
+        top: messagesDiv.scrollHeight,
+        behavior: 'smooth'
+    });
+}
+
+function renderProductList(products) {
+    if (!products || products.length === 0) {
+        return '<p class="text-muted text-center mb-0">No products available</p>';
+    }
+    
+    return products.map((product, index) => {
+        const productName = product.name || 'Unknown Product';
+        const productDesc = product.description ? (product.description.substring(0, 100) + '...') : '';
+        return `
+            <div class="product-item mb-2 p-2 border rounded" 
+                 style="cursor: pointer; transition: all 0.2s; background: #f9fafb;"
+                 onmouseover="this.style.background='#f3f4f6'; this.style.borderColor='#2563eb';"
+                 onmouseout="this.style.background='#f9fafb'; this.style.borderColor='#e5e7eb';"
+                 onclick="selectProductForDetails('${productName.replace(/'/g, "\\'")}', '${(product.id || productName).replace(/'/g, "\\'")}')">
+                <div class="d-flex justify-content-between align-items-start">
+                    <div style="flex: 1;">
+                        <strong style="color: #2563eb; font-size: 0.9rem;">${productName}</strong>
+                        ${productDesc ? `<p class="text-muted mb-0 mt-1" style="font-size: 0.8rem;">${productDesc}</p>` : ''}
+                    </div>
+                    <i class="fas fa-chevron-right text-primary mt-1"></i>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+function filterProductList(searchQuery) {
+    const searchContainer = document.querySelector('.product-search-container');
+    if (!searchContainer || !searchContainer._originalProducts) return;
+    
+    const query = searchQuery.toLowerCase().trim();
+    const filteredProducts = query 
+        ? searchContainer._originalProducts.filter(p => 
+            (p.name && p.name.toLowerCase().includes(query)) ||
+            (p.description && p.description.toLowerCase().includes(query))
+          )
+        : searchContainer._originalProducts;
+    
+    const container = document.getElementById('productListContainer');
+    if (container) {
+        container.innerHTML = renderProductList(filteredProducts);
+    }
+}
+
+async function selectProductForDetails(productName, productId) {
+    try {
+        // Hide/remove the product search interface
+        const searchContainer = document.querySelector('.product-search-container');
+        if (searchContainer) {
+            searchContainer.style.transition = 'opacity 0.3s ease-out';
+            searchContainer.style.opacity = '0';
+            setTimeout(() => {
+                searchContainer.remove();
+            }, 300);
+        }
+        
+        // Show loading indicator
+        const messagesDiv = document.getElementById('chatMessages');
+        const loadingMsg = addMessage('Loading product information...', 'bot');
+        
+        // Call backend to get product details
+        const response = await fetch('/enhanced-chat/get_product_details', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                product_name: productName,
+                product_id: productId
+            })
+        });
+        
+        // Remove loading message
+        if (loadingMsg) {
+            loadingMsg.remove();
+        }
+        
+        if (!response.ok) {
+            // Try to parse error message
+            let errorMsg = 'Failed to load product details';
+            try {
+                const errorData = await response.json();
+                errorMsg = errorData.error || errorMsg;
+            } catch (e) {
+                errorMsg = `Server error: ${response.status} ${response.statusText}`;
+            }
+            addMessage(`Error: ${errorMsg}`, 'bot', 'error');
+            // Show action buttons even on error
+            setTimeout(() => {
+                showActionButtons([
+                    {'text': 'Place Order', 'action': 'place_order'},
+                    {'text': 'View Open Order', 'action': 'open_order'},
+                    {'text': 'Product Info', 'action': 'product_info'},
+                    {'text': 'Company Info', 'action': 'company_info'}
+                ]);
+            }, 500);
+            return;
+        }
+        
+        const data = await response.json();
+        
+        if (data.product) {
+            displayProductDetails(data.product);
+        } else {
+            addMessage('Error: Product details not found in response', 'bot', 'error');
+            // Show action buttons even on error
+            setTimeout(() => {
+                showActionButtons([
+                    {'text': 'Place Order', 'action': 'place_order'},
+                    {'text': 'View Open Order', 'action': 'open_order'},
+                    {'text': 'Product Info', 'action': 'product_info'},
+                    {'text': 'Company Info', 'action': 'company_info'}
+                ]);
+            }, 500);
+        }
+    } catch (error) {
+        console.error('Error fetching product details:', error);
+        // Remove loading message if still present
+        const messagesDiv = document.getElementById('chatMessages');
+        const loadingMessages = messagesDiv.querySelectorAll('.message.bot');
+        if (loadingMessages.length > 0) {
+            const lastMsg = loadingMessages[loadingMessages.length - 1];
+            if (lastMsg.textContent.includes('Loading product information')) {
+                lastMsg.remove();
+            }
+        }
+        addMessage('Sorry, I encountered an error loading product details. Please try again.', 'bot', 'error');
+        // Show action buttons even on error
+        setTimeout(() => {
+            showActionButtons([
+                {'text': 'Place Order', 'action': 'place_order'},
+                {'text': 'View Open Order', 'action': 'open_order'},
+                {'text': 'Product Info', 'action': 'product_info'},
+                {'text': 'Company Info', 'action': 'company_info'}
+            ]);
+        }, 500);
+    }
+}
+
+function displayProductDetails(product) {
+    const messagesDiv = document.getElementById('chatMessages');
+    
+    // Create a new message for product details
+    const messageDiv = document.createElement('div');
+    messageDiv.className = 'message bot mb-3';
+    
+    const bubbleDiv = document.createElement('div');
+    bubbleDiv.className = 'message-bubble bot';
+    
+    const wrapperDiv = document.createElement('div');
+    wrapperDiv.className = 'd-flex justify-content-start align-items-center';
+    wrapperDiv.style.cssText = 'gap: 8px; width: 100%;';
+    
+    const contentDiv = document.createElement('div');
+    contentDiv.className = 'bg-light border rounded-3 px-4 py-3';
+    contentDiv.style.cssText = 'max-width: 85%; font-size: 0.875rem; width: auto;';
+    
+    // Build structured product information
+    let productHTML = `
+        <div class="product-details" style="max-width: 100%;">
+            <h5 class="mb-3" style="color: #2563eb; font-weight: 600; border-bottom: 2px solid #2563eb; padding-bottom: 10px;">
+                <i class="fas fa-pills me-2"></i>${product.name || 'Product Information'}
+            </h5>
+    `;
+    
+    // Pack Size
+    if (product.pack_size) {
+        productHTML += `
+            <div class="mb-3">
+                <strong style="color: #1f2937;"><i class="fas fa-box me-2"></i>Pack Size:</strong>
+                <p class="mb-0 mt-1" style="color: #4b5563;">${product.pack_size}</p>
+            </div>
+        `;
+    }
+    
+    // Generic Name / Composition
+    if (product.generic_name) {
+        productHTML += `
+            <div class="mb-3">
+                <strong style="color: #1f2937;"><i class="fas fa-flask me-2"></i>Generic Name / Composition:</strong>
+                <p class="mb-0 mt-1" style="color: #4b5563;">${product.generic_name}</p>
+            </div>
+        `;
+    }
+    
+    // Therapeutic Class
+    if (product.therapeutic_class) {
+        productHTML += `
+            <div class="mb-3">
+                <strong style="color: #1f2937;"><i class="fas fa-layer-group me-2"></i>Therapeutic Class:</strong>
+                <p class="mb-0 mt-1" style="color: #4b5563;">${product.therapeutic_class}</p>
+            </div>
+        `;
+    }
+    
+    // Key Uses
+    if (product.key_uses) {
+        productHTML += `
+            <div class="mb-3">
+                <strong style="color: #1f2937;"><i class="fas fa-check-circle me-2"></i>Key Uses:</strong>
+                <div class="mt-1" style="color: #4b5563;">${formatProductText(product.key_uses)}</div>
+            </div>
+        `;
+    }
+    
+    // Mechanism of Action
+    if (product.mechanism_of_action) {
+        productHTML += `
+            <div class="mb-3">
+                <strong style="color: #1f2937;"><i class="fas fa-cogs me-2"></i>Mechanism of Action:</strong>
+                <p class="mb-0 mt-1" style="color: #4b5563;">${formatProductText(product.mechanism_of_action)}</p>
+            </div>
+        `;
+    }
+    
+    // Dosage & Administration
+    if (product.dosage) {
+        productHTML += `
+            <div class="mb-3">
+                <strong style="color: #1f2937;"><i class="fas fa-prescription-bottle-alt me-2"></i>Dosage & Administration:</strong>
+                <div class="mt-1" style="color: #4b5563;">${formatProductText(product.dosage)}</div>
+            </div>
+        `;
+    }
+    
+    // Safety Profile & Side Effects
+    if (product.safety_profile) {
+        productHTML += `
+            <div class="mb-3">
+                <strong style="color: #1f2937;"><i class="fas fa-shield-alt me-2"></i>Safety Profile & Common Side Effects:</strong>
+                <div class="mt-1" style="color: #4b5563;">${formatProductText(product.safety_profile)}</div>
+            </div>
+        `;
+    }
+    
+    // Description (fallback)
+    if (product.description && !product.generic_name && !product.key_uses) {
+        productHTML += `
+            <div class="mb-3">
+                <strong style="color: #1f2937;"><i class="fas fa-info-circle me-2"></i>Description:</strong>
+                <p class="mb-0 mt-1" style="color: #4b5563;">${formatProductText(product.description)}</p>
+            </div>
+        `;
+    }
+    
+    // Full Content (if available and other fields are empty)
+    if (product.full_content && !product.generic_name && !product.key_uses && !product.description) {
+        productHTML += `
+            <div class="mb-3">
+                <strong style="color: #1f2937;"><i class="fas fa-file-alt me-2"></i>Product Information:</strong>
+                <div class="mt-1" style="color: #4b5563; white-space: pre-wrap;">${formatProductText(product.full_content)}</div>
+            </div>
+        `;
+    }
+    
+    productHTML += `</div>`;
+    
+    contentDiv.innerHTML = productHTML;
+    
+    const avatarDiv = document.createElement('div');
+    avatarDiv.className = 'message-avatar bot-avatar';
+    avatarDiv.innerHTML = '<img src="/static/Images/Q_logo_quantum_blue-removebg-preview.png" alt="Quantum Blue Logo" style="width: 100%; height: 100%; object-fit: contain; border-radius: 50%;">';
+    
+    wrapperDiv.appendChild(avatarDiv);
+    wrapperDiv.appendChild(contentDiv);
+    bubbleDiv.appendChild(wrapperDiv);
+    messageDiv.appendChild(bubbleDiv);
+    
+    messagesDiv.appendChild(messageDiv);
+    
+    // Scroll to bottom
+    messagesDiv.scrollTo({
+        top: messagesDiv.scrollHeight,
+        behavior: 'smooth'
+    });
+    
+    // Show action buttons after displaying product details
+    setTimeout(() => {
+        showActionButtons([
+            {'text': 'Place Order', 'action': 'place_order'},
+            {'text': 'View Open Order', 'action': 'open_order'},
+            {'text': 'Product Info', 'action': 'product_info'},
+            {'text': 'Company Info', 'action': 'company_info'}
+        ]);
+    }, 500);
+}
+
+function formatProductText(text) {
+    if (!text) return '';
+    
+    // Replace newlines with <br> and format bullet points
+    let formatted = text
+        .replace(/\n/g, '<br>')
+        .replace(/\•/g, '•')
+        .replace(/^\s*[-*]\s*/gm, '• ');
+    
+    // Wrap in paragraphs if it contains multiple lines
+    if (formatted.includes('<br>')) {
+        const lines = formatted.split('<br>');
+        return lines.map(line => {
+            line = line.trim();
+            if (line.startsWith('•') || line.startsWith('-')) {
+                return `<div style="margin-left: 20px; margin-bottom: 5px;">${line}</div>`;
+            }
+            return line ? `<p class="mb-2">${line}</p>` : '';
+        }).join('');
+    }
+    
+    return `<p class="mb-0">${formatted}</p>`;
+}
+
+// Make functions globally available
+window.showProductSearchInterface = showProductSearchInterface;
+window.filterProductList = filterProductList;
+window.selectProductForDetails = selectProductForDetails;
+window.displayProductDetails = displayProductDetails;

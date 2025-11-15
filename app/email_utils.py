@@ -128,29 +128,45 @@ def create_email_template(title, content, footer_text="This is an automated emai
     </html>
     '''
 
-def send_email(to_email, subject, html_content, email_type='general'):
-    """Send email via SMTP"""
+def send_email(to_email, subject, html_content, email_type='general', order_id=None, sender_email=None, sender_name=None, receiver_name=None):
+    """Send email via SMTP with detailed logging"""
     try:
+        sender_config = current_app.config.get('MAIL_DEFAULT_SENDER', 'noreply@quantumblue.ai')
+        if isinstance(sender_config, tuple):
+            sender_email_config = sender_config[1] if len(sender_config) > 1 else sender_config[0]
+            sender_name_config = sender_config[0] if len(sender_config) > 1 else 'Quantum Blue AI'
+        else:
+            sender_email_config = sender_config
+            sender_name_config = 'Quantum Blue AI'
+        
         msg = Message(
             subject=subject,
             recipients=[to_email],
             html=html_content,
-            sender=current_app.config['MAIL_DEFAULT_SENDER']
+            sender=(sender_name or sender_name_config, sender_email or sender_email_config)
         )
         
         mail.send(msg)
         
-        # Log successful email in a separate transaction
+        # Log successful email with detailed information
         try:
-            # Ensure we have a clean transaction state
-            db.session.rollback()  # Clear any existing transaction
+            # Create new session for logging to avoid transaction conflicts
             email_log = EmailLog(
                 recipient=to_email,
                 email_type=email_type,
-                status='sent'
+                status='sent',
+                order_id=order_id,
+                sender_email=sender_email or sender_email_config,
+                sender_name=sender_name or sender_name_config,
+                receiver_email=to_email,
+                receiver_name=receiver_name,
+                subject=subject,
+                body_preview=html_content[:200] if html_content else None  # First 200 chars as preview
             )
             db.session.add(email_log)
+            db.session.flush()  # Flush to get any errors before commit
             db.session.commit()
+            logger.debug(f'Email logged successfully: {email_type} to {to_email}, Order: {order_id}')
         except Exception as log_e:
             logger.warning(f'Failed to log email success: {str(log_e)}')
             # Don't fail the email send if logging fails
@@ -159,24 +175,39 @@ def send_email(to_email, subject, html_content, email_type='general'):
             except:
                 pass
         
-        logger.info(f'Email sent to {to_email}')
+        logger.info(f'Email sent to {to_email} (Order: {order_id})')
         return True
         
     except Exception as e:
         logger.error(f'Email sending failed: {str(e)}')
         
-        # Log failure in a separate transaction
+        # Log failure with detailed information
         try:
-            # Ensure we have a clean transaction state
-            db.session.rollback()  # Clear any existing transaction
+            sender_config = current_app.config.get('MAIL_DEFAULT_SENDER', 'noreply@quantumblue.ai')
+            if isinstance(sender_config, tuple):
+                sender_email_config = sender_config[1] if len(sender_config) > 1 else sender_config[0]
+                sender_name_config = sender_config[0] if len(sender_config) > 1 else 'Quantum Blue AI'
+            else:
+                sender_email_config = sender_config
+                sender_name_config = 'Quantum Blue AI'
+            
             email_log = EmailLog(
                 recipient=to_email,
                 email_type=email_type,
                 status='failed',
-                error_message=str(e)
+                error_message=str(e),
+                order_id=order_id,
+                sender_email=sender_email or sender_email_config,
+                sender_name=sender_name or sender_name_config,
+                receiver_email=to_email,
+                receiver_name=receiver_name,
+                subject=subject,
+                body_preview=html_content[:200] if html_content else None
             )
             db.session.add(email_log)
+            db.session.flush()  # Flush to get any errors before commit
             db.session.commit()
+            logger.debug(f'Email failure logged: {email_type} to {to_email}, Order: {order_id}')
         except Exception as log_e:
             logger.warning(f'Failed to log email failure: {str(log_e)}')
             # Don't fail if logging fails
@@ -287,7 +318,13 @@ def send_otp_email(user_email, user_name, otp):
     </html>
     '''
     
-    return send_email(user_email, subject, html_content, 'otp_verification')
+    return send_email(
+        user_email, 
+        subject, 
+        html_content, 
+        'otp_verification',
+        receiver_name=user_name
+    )
 
 def send_welcome_email(user_email, user_name):
     """Send welcome email after successful verification"""
@@ -383,7 +420,13 @@ def send_welcome_email(user_email, user_name):
     </html>
     '''
     
-    return send_email(user_email, subject, html_content, 'welcome')
+    return send_email(
+        user_email, 
+        subject, 
+        html_content, 
+        'welcome',
+        receiver_name=user_name
+    )
 
 def send_conversation_email(user_email, admin_email, conversation_data):
     """Send conversation summary to user and admin"""
@@ -505,10 +548,21 @@ def send_conversation_email(user_email, admin_email, conversation_data):
     '''
     
     # Send to user
-    send_email(user_email, subject, html_content, 'conversation')
+    send_email(
+        user_email, 
+        subject, 
+        html_content, 
+        'conversation',
+        receiver_name=conversation_data.get('user_name')
+    )
     
     # Send to admin with [Admin] prefix
-    send_email(admin_email, f'[Admin] {subject}', html_content, 'conversation_admin')
+    send_email(
+        admin_email, 
+        f'[Admin] {subject}', 
+        html_content, 
+        'conversation_admin'
+    )
 
 def send_stock_arrival_notification(dealer_email, dealer_name, product_code, product_name, quantity, dispatch_date, lot_number=None, expiration_date=None):
     """Send stock arrival notification to dealer"""
@@ -550,7 +604,13 @@ def send_stock_arrival_notification(dealer_email, dealer_name, product_code, pro
     </html>
     '''
     
-    send_email(dealer_email, subject, html_content, 'stock_arrival')
+    send_email(
+        dealer_email, 
+        subject, 
+        html_content, 
+        'stock_arrival',
+        receiver_name=dealer_name
+    )
 
 def send_quantity_discrepancy_email(dealer_name, dealer_email, product_code, product_name, sent_quantity, received_quantity, dispatch_date, reason=None):
     """Send quantity discrepancy notification to company"""
@@ -596,7 +656,13 @@ def send_quantity_discrepancy_email(dealer_name, dealer_email, product_code, pro
     </html>
     '''
     
-    send_email(company_email, subject, html_content, 'quantity_discrepancy')
+    send_email(
+        company_email, 
+        subject, 
+        html_content, 
+        'quantity_discrepancy',
+        receiver_name='Company Admin'
+    )
 
 def send_email_with_attachment(to_email, subject, html_content, csv_data=None, filename='report.csv', email_type='report'):
     """Send email with CSV attachment"""
@@ -621,15 +687,28 @@ def send_email_with_attachment(to_email, subject, html_content, csv_data=None, f
         
         mail.send(msg)
         
-        # Log successful email
+        # Log successful email with detailed information
         try:
-            db.session.rollback()
+            sender_config = current_app.config.get('MAIL_DEFAULT_SENDER', 'noreply@quantumblue.ai')
+            if isinstance(sender_config, tuple):
+                sender_email_config = sender_config[1] if len(sender_config) > 1 else sender_config[0]
+                sender_name_config = sender_config[0] if len(sender_config) > 1 else 'Quantum Blue AI'
+            else:
+                sender_email_config = sender_config
+                sender_name_config = 'Quantum Blue AI'
+            
             email_log = EmailLog(
                 recipient=to_email,
                 email_type=email_type,
-                status='sent'
+                status='sent',
+                sender_email=sender_email_config,
+                sender_name=sender_name_config,
+                receiver_email=to_email,
+                subject=subject,
+                body_preview=html_content[:200] if html_content else None
             )
             db.session.add(email_log)
+            db.session.flush()
             db.session.commit()
         except Exception as log_e:
             logger.warning(f'Failed to log email success: {str(log_e)}')
@@ -644,16 +723,29 @@ def send_email_with_attachment(to_email, subject, html_content, csv_data=None, f
     except Exception as e:
         logger.error(f'Email sending failed: {str(e)}')
         
-        # Log failure
+        # Log failure with detailed information
         try:
-            db.session.rollback()
+            sender_config = current_app.config.get('MAIL_DEFAULT_SENDER', 'noreply@quantumblue.ai')
+            if isinstance(sender_config, tuple):
+                sender_email_config = sender_config[1] if len(sender_config) > 1 else sender_config[0]
+                sender_name_config = sender_config[0] if len(sender_config) > 1 else 'Quantum Blue AI'
+            else:
+                sender_email_config = sender_config
+                sender_name_config = 'Quantum Blue AI'
+            
             email_log = EmailLog(
                 recipient=to_email,
                 email_type=email_type,
                 status='failed',
-                error_message=str(e)
+                error_message=str(e),
+                sender_email=sender_email_config,
+                sender_name=sender_name_config,
+                receiver_email=to_email,
+                subject=subject,
+                body_preview=html_content[:200] if html_content else None
             )
             db.session.add(email_log)
+            db.session.flush()
             db.session.commit()
         except Exception as log_e:
             logger.warning(f'Failed to log email failure: {str(log_e)}')

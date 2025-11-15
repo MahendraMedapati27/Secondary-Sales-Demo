@@ -19,6 +19,9 @@ let avatarLoaded = false;
 let baseScaleY = 1.0;
 let mixer = null;
 
+// Hand rotation - FIXED to full standing pose (arms down)
+let handRotationAngle = 270; // Always at maximum - full standing pose with arms down
+
 // Background scene variables
 let backgroundScene, backgroundCamera, backgroundRenderer, backgroundControls;
 let backgroundObject = null;
@@ -112,90 +115,202 @@ function initThreeScene() {
     
     console.log('[NATURAL-AVATAR] ✅ Lighting configured (total intensity: 3.3 - MAXIMUM BRIGHT)');
     
-    // Enable orbit controls for zoom and rotation
-    controls = new OrbitControls(camera, renderer.domElement);
-    controls.enabled = false; // Initially disabled, will be enabled when mouse enters avatar section
-    controls.enableDamping = true;
-    controls.dampingFactor = 0.05;
-    controls.minDistance = 2;
-    controls.maxDistance = 8;
-    controls.target.set(0, 0.5, 0); // Look at lower point (avatar center on floor)
-    controls.update();
-    
-    // Track dragging state for head rotation
-    controls.addEventListener('start', () => {
-        isDragging = true;
-        renderer.domElement.style.cursor = 'grabbing';
-        // Disable background controls when avatar is being dragged
-        if (backgroundControls) {
-            backgroundControls.enabled = false;
-        }
-    });
-    
-    controls.addEventListener('end', () => {
-        isDragging = false;
-        renderer.domElement.style.cursor = 'grab';
-    });
-    
-    renderer.domElement.style.cursor = 'grab';
-    
-    // Enable avatar controls only when mouse is over the actual avatar body
-    // Use mousemove to check if mouse is over avatar using raycasting
-    const avatarCanvasElement = renderer.domElement;
-    let isOverAvatarBody = false;
-    
-    avatarCanvasElement.addEventListener('mousemove', (e) => {
-        const rect = avatarCanvasElement.getBoundingClientRect();
-        const x = e.clientX;
-        const y = e.clientY;
-        
-        // Check if mouse is over avatar body using raycasting
-        const wasOverAvatar = isOverAvatarBody;
-        isOverAvatarBody = getIsOverAvatarBody(x, y);
-        
-        if (isOverAvatarBody && !wasOverAvatar) {
-            // Mouse entered avatar body
-            controls.enabled = true;
-            if (backgroundControls) {
-                backgroundControls.enabled = false;
-            }
-        } else if (!isOverAvatarBody && wasOverAvatar) {
-            // Mouse left avatar body
-            controls.enabled = false;
-            if (backgroundControls) {
-                backgroundControls.enabled = true;
-            }
-        }
-    });
-    
-    // Helper function to check if mouse is over avatar body (using raycasting)
-    const getIsOverAvatarBody = (x, y) => {
-        if (!avatarObject || !renderer || !camera || !scene) return false;
-        
-        const rect = avatarCanvasElement.getBoundingClientRect();
-        if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) {
-            return false;
-        }
-        
-        const mouse = new THREE.Vector2();
-        mouse.x = ((x - rect.left) / rect.width) * 2 - 1;
-        mouse.y = -((y - rect.top) / rect.height) * 2 + 1;
-        
-        const raycaster = new THREE.Raycaster();
-        raycaster.setFromCamera(mouse, camera);
-        const intersects = raycaster.intersectObject(avatarObject, true);
-        
-        return intersects.length > 0;
+    // FIXED POSITION: Custom position coordinates (locked at user's desired position)
+    const FIXED_CAMERA_POSITION = {
+        x: -1.546,      // Left/Right position
+        y: 2.789,       // Up/Down position (height)
+        z: 4.947        // Forward/Back position (zoom)
+    };
+    const FIXED_LOOK_AT = {
+        x: 0.293,       // Look at X
+        y: 1.936,       // Look at Y (height)
+        z: -0.245       // Look at Z
     };
     
-    // Also handle mouse leave from canvas
-    avatarCanvasElement.addEventListener('mouseleave', () => {
-        isOverAvatarBody = false;
-        controls.enabled = false;
-        if (backgroundControls) {
-            backgroundControls.enabled = true;
+    // Set initial camera position to fixed position
+    camera.position.set(FIXED_CAMERA_POSITION.x, FIXED_CAMERA_POSITION.y, FIXED_CAMERA_POSITION.z);
+    camera.lookAt(FIXED_LOOK_AT.x, FIXED_LOOK_AT.y, FIXED_LOOK_AT.z);
+    
+    // Disable orbit controls - avatar position is permanently locked
+    controls = new OrbitControls(camera, renderer.domElement);
+    controls.enabled = false; // PERMANENTLY DISABLED - position is fixed
+    controls.enableDamping = false;
+    controls.enableRotate = false;
+    controls.enableZoom = false;
+    controls.enablePan = false;
+    controls.minDistance = 4.947; // Fixed distance matching z position
+    controls.maxDistance = 4.947; // Same as min to prevent zoom
+    controls.target.set(FIXED_LOOK_AT.x, FIXED_LOOK_AT.y, FIXED_LOOK_AT.z);
+    controls.update();
+    
+    // Add function to capture current position and lock it
+    window.lockAvatarPosition = function() {
+        if (camera && controls) {
+            const pos = camera.position;
+            const target = controls.target;
+            const positionData = {
+                cameraPosition: { x: pos.x, y: pos.y, z: pos.z },
+                lookAt: { x: target.x, y: target.y, z: target.z }
+            };
+            
+            console.log('🔒 Locking avatar at position:');
+            console.log('Camera Position:', positionData.cameraPosition);
+            console.log('Look At:', positionData.lookAt);
+            
+            // Save to localStorage for persistence
+            try {
+                localStorage.setItem('avatarFixedPosition', JSON.stringify(positionData));
+                console.log('💾 Position saved to browser storage - will persist after reload!');
+            } catch (e) {
+                console.warn('⚠️ Could not save to localStorage:', e);
+            }
+            
+            // Disable controls after locking
+            controls.enabled = false;
+            controls.enableRotate = false;
+            controls.enableZoom = false;
+            controls.enablePan = false;
+            
+            // Store the locked position in memory
+            window.lockedCameraPosition = positionData.cameraPosition;
+            window.lockedLookAt = positionData.lookAt;
+            
+            console.log('✅ Avatar position locked! It will stay fixed even after page reload.');
+            console.log('📋 Position data:', JSON.stringify(positionData, null, 2));
+            return positionData;
         }
-    });
+    };
+    
+    // Set the fixed position immediately and lock it
+    window.lockedCameraPosition = FIXED_CAMERA_POSITION;
+    window.lockedLookAt = FIXED_LOOK_AT;
+    
+    // Save to localStorage for persistence
+    try {
+        const positionData = {
+            cameraPosition: FIXED_CAMERA_POSITION,
+            lookAt: FIXED_LOOK_AT
+        };
+        localStorage.setItem('avatarFixedPosition', JSON.stringify(positionData));
+        console.log('💾 Fixed position saved to browser storage');
+    } catch (e) {
+        console.warn('⚠️ Could not save to localStorage:', e);
+    }
+    
+    // Load saved position from localStorage on page load (if different from fixed position)
+    try {
+        const savedPosition = localStorage.getItem('avatarFixedPosition');
+        if (savedPosition) {
+            const positionData = JSON.parse(savedPosition);
+            // Use saved position if it exists, otherwise use fixed position
+            window.lockedCameraPosition = positionData.cameraPosition;
+            window.lockedLookAt = positionData.lookAt;
+            console.log('📂 Loaded saved avatar position from storage:', positionData);
+        } else {
+            // Use the fixed position defined above
+            console.log('📂 Using fixed position:', { cameraPosition: FIXED_CAMERA_POSITION, lookAt: FIXED_LOOK_AT });
+        }
+        
+        // Apply position immediately
+        if (camera && controls) {
+            camera.position.set(
+                window.lockedCameraPosition.x,
+                window.lockedCameraPosition.y,
+                window.lockedCameraPosition.z
+            );
+            controls.target.set(
+                window.lockedLookAt.x,
+                window.lockedLookAt.y,
+                window.lockedLookAt.z
+            );
+            camera.lookAt(
+                window.lockedLookAt.x,
+                window.lockedLookAt.y,
+                window.lockedLookAt.z
+            );
+            controls.update();
+            // Disable controls since position is locked
+            controls.enabled = false;
+            controls.enableRotate = false;
+            controls.enableZoom = false;
+            controls.enablePan = false;
+            console.log('✅ Applied fixed position - controls disabled');
+        }
+    } catch (e) {
+        console.warn('⚠️ Could not load saved position:', e);
+    }
+    
+    // Add function to get current position
+    window.getAvatarPosition = function() {
+        if (camera && controls) {
+            const pos = camera.position;
+            const target = controls.target;
+            console.log('📊 Current Avatar Position:');
+            console.log('Camera:', { x: pos.x.toFixed(2), y: pos.y.toFixed(2), z: pos.z.toFixed(2) });
+            console.log('Look At:', { x: target.x.toFixed(2), y: target.y.toFixed(2), z: target.z.toFixed(2) });
+            return {
+                cameraPosition: { x: pos.x, y: pos.y, z: pos.z },
+                lookAt: { x: target.x, y: target.y, z: target.z }
+            };
+        }
+    };
+    
+    // Real-time position logging as you move the avatar
+    let positionLogInterval = null;
+    let lastLoggedPosition = null;
+    
+    window.startPositionLogging = function() {
+        if (positionLogInterval) {
+            console.log('⚠️ Position logging already active. Use stopPositionLogging() to stop.');
+            return;
+        }
+        
+        console.log('📊 Starting real-time position logging...');
+        console.log('Move the avatar and watch the coordinates update in real-time below:');
+        console.log('---');
+        
+        positionLogInterval = setInterval(() => {
+            if (camera && controls) {
+                const pos = camera.position;
+                const target = controls.target;
+                
+                // Only log if position changed (to avoid spam)
+                const currentPos = `${pos.x.toFixed(3)},${pos.y.toFixed(3)},${pos.z.toFixed(3)}`;
+                if (currentPos !== lastLoggedPosition) {
+                    lastLoggedPosition = currentPos;
+                    console.log(`📍 Camera: x=${pos.x.toFixed(3)}, y=${pos.y.toFixed(3)}, z=${pos.z.toFixed(3)} | Look At: x=${target.x.toFixed(3)}, y=${target.y.toFixed(3)}, z=${target.z.toFixed(3)}`);
+                }
+            }
+        }, 100); // Update every 100ms (10 times per second)
+    };
+    
+    window.stopPositionLogging = function() {
+        if (positionLogInterval) {
+            clearInterval(positionLogInterval);
+            positionLogInterval = null;
+            lastLoggedPosition = null;
+            console.log('✅ Position logging stopped');
+            
+            // Log final position
+            if (camera && controls) {
+                const pos = camera.position;
+                const target = controls.target;
+                console.log('---');
+                console.log('📋 FINAL POSITION:');
+                console.log('Camera Position:', { x: pos.x, y: pos.y, z: pos.z });
+                console.log('Look At:', { x: target.x, y: target.y, z: target.z });
+                console.log('---');
+                console.log('Copy the values above and share them with me to lock the position permanently!');
+            }
+        } else {
+            console.log('⚠️ Position logging is not active. Use startPositionLogging() to start.');
+        }
+    };
+    
+    // Position logging disabled - avatar is now locked at fixed position
+    // If you need to reposition, temporarily enable controls and use startPositionLogging()
+    
+    renderer.domElement.style.cursor = 'default'; // No interaction needed - position is fixed
     
     console.log('[NATURAL-AVATAR] ✅ Scene initialized');
     return true;
@@ -576,7 +691,7 @@ function loadAvatar() {
                     }
                 }
                 
-                // Check for skeleton
+                // Check for skeleton and set avatarSkeleton to the first encountered skeleton
                 if (child.isSkinnedMesh) {
                     console.log('[NATURAL-AVATAR] Found SkinnedMesh:', child.name);
                     if (child.skeleton && !avatarSkeleton) {
@@ -593,11 +708,11 @@ function loadAvatar() {
             }
             mixer = null; // Ensure no mixer
             
-            // Find bones
+            // Find bones (this now prefers bones from the actual skeleton)
             findAvatarBones(avatarObject);
             
-            // Set to natural standing pose
-            setNaturalStandingPose();
+            // Force standing pose using aggressive function (ensures skeleton & skinnedmesh updated)
+            forceStandingPoseAggressive();
             
             // Center and scale
             const box = new THREE.Box3().setFromObject(avatarObject);
@@ -644,6 +759,11 @@ function loadAvatar() {
             // Setup mouse tracking
             setupMouseTracking();
             
+            // Apply persistent smile with open mouth
+            setTimeout(() => {
+                applyPersistentSmile();
+            }, 500); // Small delay to ensure morph targets are ready
+            
             // Start limited idle behaviors
             startLimitedIdleBehaviors();
             
@@ -661,7 +781,292 @@ function loadAvatar() {
     );
 }
 
-// Set natural standing pose - arms down
+// ---------- NEW: Robust forceStandingPose helper ----------
+function forceStandingPose() {
+    if (!avatarObject) {
+        console.warn('forceStandingPose: avatarObject missing');
+        return;
+    }
+
+    // If avatarSkeleton is not set yet, try to find a SkinnedMesh skeleton now
+    if (!avatarSkeleton) {
+        avatarObject.traverse((c) => {
+            if (c.isSkinnedMesh && c.skeleton && !avatarSkeleton) {
+                avatarSkeleton = c.skeleton;
+                console.log('forceStandingPose: grabbed skeleton from skinned mesh:', c.name);
+            }
+        });
+    }
+
+    if (!avatarSkeleton) {
+        console.warn('forceStandingPose: avatarSkeleton not found yet - delaying a frame and retrying...');
+        // Try again next frame (should normally be available immediately after load)
+        requestAnimationFrame(forceStandingPose);
+        return;
+    }
+
+    console.log('forceStandingPose: forcing standing pose on skeleton bones...');
+
+    const bones = avatarSkeleton.bones || [];
+
+    // Helper to find bone by name patterns (case-insensitive)
+    const findBone = (patterns) => {
+        const lower = patterns.map(p => p.toLowerCase());
+        return bones.find(b => {
+            const n = (b.name || '').toLowerCase();
+            return lower.some(p => n.includes(p));
+        }) || null;
+    };
+
+    // Common bone search patterns - adjust if your model uses different naming
+    const rightArm = findBone(['r_upperarm', 'rightarm', 'j_bip_r_upperarm', 'upperarm_r', 'r_arm', 'rupperarm']);
+    const leftArm  = findBone(['l_upperarm', 'leftarm', 'j_bip_l_upperarm', 'upperarm_l', 'l_arm', 'lupperarm']);
+    const rightShoulder = findBone(['r_shoulder', 'right_shoulder', 'clavicle_r', 'r_clavicle']);
+    const leftShoulder  = findBone(['l_shoulder', 'left_shoulder', 'clavicle_l', 'l_clavicle']);
+    const rightFore = findBone(['r_lowerarm', 'r_forearm', 'lowerarm_r', 'rf_forearm']);
+    const leftFore  = findBone(['l_lowerarm', 'l_forearm', 'lowerarm_l', 'lf_forearm']);
+    const rightHand = findBone(['r_hand', 'righthand', 'hand_r']);
+    const leftHand  = findBone(['l_hand', 'lefthand', 'hand_l']);
+    const head      = findBone(['head', 'neck']);
+
+    // Apply shoulder A-shape quaternions if found (your VRM values)
+    if (rightShoulder) {
+        rightShoulder.quaternion.copy(new THREE.Quaternion(0, 0, -0.08027473717361218, 0.9967727757978284));
+        rightShoulder.updateMatrixWorld(true);
+        avatarBones.rightShoulder = rightShoulder;
+        console.log('forceStandingPose: applied right shoulder quaternion to', rightShoulder.name);
+    }
+    if (leftShoulder) {
+        leftShoulder.quaternion.copy(new THREE.Quaternion(0, 0, 0.08532541830751879, 0.9963531366893201));
+        leftShoulder.updateMatrixWorld(true);
+        avatarBones.leftShoulder = leftShoulder;
+        console.log('forceStandingPose: applied left shoulder quaternion to', leftShoulder.name);
+    }
+
+    // Arms: set to standing pose (arms down)
+    if (rightArm) {
+        const e = new THREE.Euler(-0.4, -0.2, 0.05, 'XYZ'); // same as your applyStandingPose
+        rightArm.quaternion.setFromEuler(e);
+        rightArm.updateMatrixWorld(true);
+        avatarBones.rightArm = rightArm;
+        console.log('forceStandingPose: set rightArm:', rightArm.name);
+    } else {
+        console.warn('forceStandingPose: rightArm not found with usual patterns');
+    }
+
+    if (leftArm) {
+        const e = new THREE.Euler(-0.4, 0.2, -0.05, 'XYZ');
+        leftArm.quaternion.setFromEuler(e);
+        leftArm.updateMatrixWorld(true);
+        avatarBones.leftArm = leftArm;
+        console.log('forceStandingPose: set leftArm:', leftArm.name);
+    } else {
+        console.warn('forceStandingPose: leftArm not found with usual patterns');
+    }
+
+    // Forearms / hands - subtle natural values
+    if (rightFore) { rightFore.rotation.x = 0.15; rightFore.updateMatrixWorld(true); avatarBones.rightForearm = rightFore; }
+    if (leftFore)  { leftFore.rotation.x  = 0.15; leftFore.updateMatrixWorld(true); avatarBones.leftForearm = leftFore; }
+    if (rightHand) { rightHand.rotation.set(0,0,0); rightHand.updateMatrixWorld(true); avatarBones.rightHand = rightHand; }
+    if (leftHand)  { leftHand.rotation.set(0,0,0); leftHand.updateMatrixWorld(true); avatarBones.leftHand = leftHand; }
+
+    if (head) { avatarBones.head = head; head.updateMatrixWorld(true); }
+
+    // Save original arm rotations for potential future reference
+    if (avatarBones.rightArm) originalArmRotations.rightArm = avatarBones.rightArm.rotation.x;
+    if (avatarBones.leftArm) originalArmRotations.leftArm = avatarBones.leftArm.rotation.x;
+
+    // Force skeleton update for every SkinnedMesh in avatarObject
+    let foundSkinned = false;
+    avatarObject.traverse((child) => {
+        if (child.isSkinnedMesh && child.skeleton) {
+            // ensure bone matrices are current
+            child.skeleton.bones.forEach(b => {
+                b.updateMatrixWorld(true);
+            });
+            // copy bone world matrices to skeleton.boneMatrices (GPU)
+            child.skeleton.update();
+            // mark skeleton reference too
+            avatarSkeleton = child.skeleton;
+            foundSkinned = true;
+            console.log('forceStandingPose: updated skeleton on skinned mesh:', child.name);
+        }
+    });
+
+    if (!foundSkinned) {
+        console.warn('forceStandingPose: no SkinnedMesh found to update skeleton on');
+    }
+
+    // Optionally set your handRotationAngle to the standing maximum
+    handRotationAngle = 270;
+
+    // render once so browser shows it immediately
+    if (renderer && scene && camera) {
+        renderer.render(scene, camera);
+    }
+
+    console.log('forceStandingPose: standing pose forced.');
+}
+// ---------- END forceStandingPose helper ----------
+
+
+// Apply full standing pose immediately (arms down) - kept for compatibility but not relied upon
+// ---------- Aggressive forceStandingPose that updates all SkinnedMeshes ----------
+function forceStandingPoseAggressive() {
+    if (!avatarObject) {
+        console.warn('forceStandingPoseAggressive: avatarObject missing');
+        return;
+    }
+
+    // Ensure avatarSkeleton exists or try to pick up skeletons from skinned meshes
+    const skinnedMeshes = [];
+    avatarObject.traverse((c) => {
+        if (c.isSkinnedMesh) skinnedMeshes.push(c);
+    });
+
+    if (skinnedMeshes.length === 0) {
+        console.warn('forceStandingPoseAggressive: no SkinnedMesh found - retrying next frame');
+        requestAnimationFrame(forceStandingPoseAggressive);
+        return;
+    }
+
+    console.log('forceStandingPoseAggressive: applying A-pose to', skinnedMeshes.length, 'skinned meshes');
+
+    // Common quaternion / euler targets used for A-pose (arms slightly angled down, not fully down)
+    const shoulderQuatR = new THREE.Quaternion(0, 0, -0.08027473717361218, 0.9967727757978284);
+    const shoulderQuatL = new THREE.Quaternion(0, 0, 0.08532541830751879, 0.9963531366893201);
+    // A-pose: arms at about 30-45 degrees down from horizontal (not fully down like standing pose)
+    // T-pose is ~1.57 rad (90°), A-pose is ~0.5-0.7 rad (30-40°), standing is ~0 rad
+    const upperArmEulerR = new THREE.Euler(2.9, -0.2, 0.05, 'XYZ'); // A-pose: arms angled down (~35°)
+    const upperArmEulerL = new THREE.Euler(2.9, 0.2, -0.05, 'XYZ'); // A-pose: arms angled down (~35°)
+    const forearmRotationX = 0.15;
+
+    // Name patterns we want to affect (adjust if your model uses different naming)
+    const patterns = {
+        rightShoulder: ['r_shoulder','right_shoulder','j_bip_r_shoulder','clavicle_r','j_bip_r_clavicle'],
+        leftShoulder:  ['l_shoulder','left_shoulder','j_bip_l_shoulder','clavicle_l','j_bip_l_clavicle'],
+        rightUpper:    ['r_upperarm','rightarm','j_bip_r_upperarm','upperarm_r','j_bip_r_arm','j_bip_r_upperarm'],
+        leftUpper:     ['l_upperarm','leftarm','j_bip_l_upperarm','upperarm_l','j_bip_l_arm','j_bip_l_upperarm'],
+        rightLower:    ['r_lowerarm','r_forearm','lowerarm_r','j_bip_r_lowerarm'],
+        leftLower:     ['l_lowerarm','l_forearm','lowerarm_l','j_bip_l_lowerarm'],
+        rightHand:     ['r_hand','righthand','hand_r','j_bip_r_hand'],
+        leftHand:      ['l_hand','lefthand','hand_l','j_bip_l_hand'],
+        spine:         ['spine','chest','upperchest','spine_01'],
+    };
+
+    // Helper: find bone by matching patterns in a bones array
+    function findBoneInBones(bones, pats) {
+        const lowerPats = pats.map(p => p.toLowerCase());
+        return bones.find(b => {
+            const n = (b.name || '').toLowerCase();
+            return lowerPats.some(p => n.includes(p));
+        }) || null;
+    }
+
+    // For each skinned mesh, apply transforms to relevant bones on that mesh's skeleton
+    skinnedMeshes.forEach((skinnedMesh) => {
+        try {
+            const skeleton = skinnedMesh.skeleton;
+            const bones = (skeleton && skeleton.bones) ? skeleton.bones : [];
+
+            // find bones per skeleton
+            const rShoulder = findBoneInBones(bones, patterns.rightShoulder);
+            const lShoulder = findBoneInBones(bones, patterns.leftShoulder);
+            const rUpper = findBoneInBones(bones, patterns.rightUpper);
+            const lUpper = findBoneInBones(bones, patterns.leftUpper);
+            const rLower = findBoneInBones(bones, patterns.rightLower);
+            const lLower = findBoneInBones(bones, patterns.leftLower);
+            const rHand  = findBoneInBones(bones, patterns.rightHand);
+            const lHand  = findBoneInBones(bones, patterns.leftHand);
+            const spine  = findBoneInBones(bones, patterns.spine);
+
+            // Apply shoulders (A-shape) first - important because upperArm is child of shoulder/clavicle
+            if (rShoulder) {
+                rShoulder.quaternion.copy(shoulderQuatR);
+                rShoulder.updateMatrixWorld(true);
+                avatarBones.rightShoulder = rShoulder;
+            }
+            if (lShoulder) {
+                lShoulder.quaternion.copy(shoulderQuatL);
+                lShoulder.updateMatrixWorld(true);
+                avatarBones.leftShoulder = lShoulder;
+            }
+
+            // Apply upper arms (use side-specific eulers)
+            if (rUpper) {
+                rUpper.quaternion.setFromEuler(upperArmEulerR);
+                rUpper.updateMatrixWorld(true);
+                avatarBones.rightArm = rUpper;
+            }
+            if (lUpper) {
+                lUpper.quaternion.setFromEuler(upperArmEulerL);
+                lUpper.updateMatrixWorld(true);
+                avatarBones.leftArm = lUpper;
+            }
+
+            // Forearms -> slight forward bend
+            if (rLower) { rLower.rotation.x = forearmRotationX; rLower.updateMatrixWorld(true); avatarBones.rightForearm = rLower; }
+            if (lLower) { lLower.rotation.x = forearmRotationX; lLower.updateMatrixWorld(true); avatarBones.leftForearm = lLower; }
+
+            // Hands -> neutral
+            if (rHand) { rHand.rotation.set(0,0,0); rHand.updateMatrixWorld(true); avatarBones.rightHand = rHand; }
+            if (lHand) { lHand.rotation.set(0,0,0); lHand.updateMatrixWorld(true); avatarBones.leftHand = lHand; }
+
+            // Slight chest/spine subtle adjustment so arms look natural with chest rotation
+            if (spine) {
+                spine.rotation.y = 0; // you can tweak a small rotation if needed
+                spine.updateMatrixWorld(true);
+                avatarBones.spine = spine;
+            }
+
+            // Force update order: bone world matrices -> skeleton.update() -> skinnedMesh matrices
+            bones.forEach(b => b.updateMatrixWorld(true));
+            try {
+                // Re-bind to ensure skeleton and bindMatrix are in sync - safe to call
+                skinnedMesh.bind(skeleton, skinnedMesh.bindMatrix);
+            } catch (e) {
+                // some engines throw if bindMatrix missing; ignore
+            }
+            skeleton.bones.forEach(b => b.updateMatrixWorld(true));
+            skeleton.update();
+            skinnedMesh.updateMatrixWorld(true);
+
+            console.log('forceStandingPoseAggressive: updated skeleton on skinned mesh:', skinnedMesh.name);
+        } catch (err) {
+            console.warn('forceStandingPoseAggressive: error updating skinned mesh', skinnedMesh.name, err);
+        }
+    });
+
+    // Final global update: update entire avatar hierarchy and render once
+    avatarObject.updateMatrixWorld(true);
+    if (renderer && scene && camera) {
+        renderer.render(scene, camera);
+    }
+
+    // Debug: print world quaternion/positions of upper arms (helps see if bones rotated in world space)
+    avatarObject.traverse((c) => {
+        if (c.isBone) {
+            const n = (c.name || '').toLowerCase();
+            if (n.includes('upperarm') || n.includes('upper_arm') || n.includes('upperarm_r') || n.includes('upperarm_l') || n.includes('j_bip_r_upperarm') || n.includes('j_bip_l_upperarm')) {
+                const q = new THREE.Quaternion();
+                c.getWorldQuaternion(q);
+                const p = new THREE.Vector3();
+                c.getWorldPosition(p);
+                console.log(`DEBUG bone world: ${c.name} pos(${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)}) quat(${q.x.toFixed(2)},${q.y.toFixed(2)},${q.z.toFixed(2)},${q.w.toFixed(2)})`);
+            }
+        }
+    });
+
+    // Keep the global avatarBones mapping updated by trying a quick re-scan
+    findAvatarBones(avatarObject);
+
+    console.log('forceStandingPoseAggressive: A-pose applied (aggressive).');
+    // Keep handRotationAngle at A-pose (not needed for A-pose but kept for compatibility)
+    handRotationAngle = 270;
+}
+// ---------- END replacement ----------
+
+// Set natural standing pose - arms down (kept but forceStandingPose is primary)
 function setNaturalStandingPose() {
     console.log('[T-POSE-FIX] 🎯 Applying VRM A-SHAPE POSE (Official VRM Pose Data)...');
     
@@ -678,88 +1083,23 @@ function setNaturalStandingPose() {
         });
     }
     
-    // STRATEGY: Use exact VRM A-shape pose quaternions from official VRM pose library
-    // This is the standard "arms down" pose for VRM avatars
-    
+    // Only store original rotations for reference
     if (avatarBones.rightArm) {
-        console.log('[T-POSE-FIX] 🔍 Right arm bone name:', avatarBones.rightArm.name);
-        console.log('[T-POSE-FIX] Right arm BEFORE:', {
-            x: avatarBones.rightArm.rotation.x.toFixed(3),
-            y: avatarBones.rightArm.rotation.y.toFixed(3),
-            z: avatarBones.rightArm.rotation.z.toFixed(3)
-        });
-        
-        // Store original for reference
         originalArmRotations.rightArm = avatarBones.rightArm.rotation.x;
-        
-        // VRM A-SHAPE POSE: Use exact quaternion from VRM A-shape pose data
-        // rightUpperArm: [x, y, z, w] = [0, 0, -0.4235327838350045, 0.905880776381181]
-        const quatRight = new THREE.Quaternion(
-            0,                      // x
-            0,                      // y
-            -0.4235327838350045,    // z (negative for right arm)
-            0.905880776381181       // w
-        );
-        avatarBones.rightArm.quaternion.copy(quatRight);
-        
-        // Force update
-        avatarBones.rightArm.updateMatrix();
-        avatarBones.rightArm.updateMatrixWorld(true);
-        
-        // CRITICAL: Force skeleton update immediately
-        updateSkeleton();
-        
-        console.log('[T-POSE-FIX] Right arm AFTER (VRM A-shape quaternion):', {
-            x: avatarBones.rightArm.rotation.x.toFixed(3),
-            y: avatarBones.rightArm.rotation.y.toFixed(3),
-            z: avatarBones.rightArm.rotation.z.toFixed(3)
-        });
-        console.log('[T-POSE-FIX] ✅ Right arm VRM A-shape applied & skeleton updated');
+        console.log('[T-POSE-FIX] ✅ Right arm bone found - will be set to standing pose');
     } else {
         console.error('[T-POSE-FIX] ❌ Right arm bone NOT FOUND!');
     }
     
     if (avatarBones.leftArm) {
-        console.log('[T-POSE-FIX] 🔍 Left arm bone name:', avatarBones.leftArm.name);
-        console.log('[T-POSE-FIX] Left arm BEFORE:', {
-            x: avatarBones.leftArm.rotation.x.toFixed(3),
-            y: avatarBones.leftArm.rotation.y.toFixed(3),
-            z: avatarBones.leftArm.rotation.z.toFixed(3)
-        });
-        
-        // Store original for reference
         originalArmRotations.leftArm = avatarBones.leftArm.rotation.x;
-        
-        // VRM A-SHAPE POSE: Use exact quaternion from VRM A-shape pose data
-        // leftUpperArm: [x, y, z, w] = [0, 0, 0.42669474387529654, 0.904395707392066]
-        const quatLeft = new THREE.Quaternion(
-            0,                      // x
-            0,                      // y
-            0.42669474387529654,    // z (positive for left arm)
-            0.904395707392066       // w
-        );
-        avatarBones.leftArm.quaternion.copy(quatLeft);
-        
-        // Force update
-        avatarBones.leftArm.updateMatrix();
-        avatarBones.leftArm.updateMatrixWorld(true);
-        
-        // CRITICAL: Force skeleton update immediately
-        updateSkeleton();
-        
-        console.log('[T-POSE-FIX] Left arm AFTER (VRM A-shape quaternion):', {
-            x: avatarBones.leftArm.rotation.x.toFixed(3),
-            y: avatarBones.leftArm.rotation.y.toFixed(3),
-            z: avatarBones.leftArm.rotation.z.toFixed(3)
-        });
-        console.log('[T-POSE-FIX] ✅ Left arm VRM A-shape applied & skeleton updated');
+        console.log('[T-POSE-FIX] ✅ Left arm bone found - will be set to standing pose');
     } else {
         console.error('[T-POSE-FIX] ❌ Left arm bone NOT FOUND!');
     }
     
     // Shoulders - VRM A-shape pose quaternions
     if (avatarBones.rightShoulder) {
-        // rightShoulder: [x, y, z, w] = [0, 0, -0.08027473717361218, 0.9967727757978284]
         const quatRightShoulder = new THREE.Quaternion(
             0,
             0,
@@ -773,7 +1113,6 @@ function setNaturalStandingPose() {
     }
     
     if (avatarBones.leftShoulder) {
-        // leftShoulder: [x, y, z, w] = [0, 0, 0.08532541830751879, 0.9963531366893201]
         const quatLeftShoulder = new THREE.Quaternion(
             0,
             0,
@@ -790,8 +1129,6 @@ function setNaturalStandingPose() {
     if (avatarBones.rightForearm) {
         avatarBones.rightForearm.rotation.order = 'XYZ';
         avatarBones.rightForearm.rotation.x = -0.1;  // Slight bend
-        avatarBones.rightForearm.rotation.y = 0;
-        avatarBones.rightForearm.rotation.z = 0;
         avatarBones.rightForearm.updateMatrix();
         avatarBones.rightForearm.updateMatrixWorld(true);
     }
@@ -799,8 +1136,6 @@ function setNaturalStandingPose() {
     if (avatarBones.leftForearm) {
         avatarBones.leftForearm.rotation.order = 'XYZ';
         avatarBones.leftForearm.rotation.x = -0.1;   // Slight bend
-        avatarBones.leftForearm.rotation.y = 0;
-        avatarBones.leftForearm.rotation.z = 0;
         avatarBones.leftForearm.updateMatrix();
         avatarBones.leftForearm.updateMatrixWorld(true);
     }
@@ -835,19 +1170,22 @@ function setNaturalStandingPose() {
     console.log('[T-POSE-FIX] ✅ VRM A-SHAPE POSE APPLIED - Arms should be down naturally!');
 }
 
-// Find avatar bones
+// Find avatar bones (prefer bones from avatarSkeleton if available)
 function findAvatarBones(object) {
     console.log('[NATURAL-AVATAR] Scanning for bones...');
     
     let skeletonBones = [];
     object.traverse((child) => {
         if (child.isSkinnedMesh && child.skeleton) {
+            // prefer the skeleton used by skinned mesh
             skeletonBones = child.skeleton.bones;
+            // also store skeleton reference
+            if (!avatarSkeleton) avatarSkeleton = child.skeleton;
         }
     });
     
     function processBone(bone) {
-        const name = bone.name.toLowerCase();
+        const name = (bone.name || '').toLowerCase();
         
         if (name.includes('head') || name.includes('neck')) {
             avatarBones.head = bone;
@@ -856,7 +1194,7 @@ function findAvatarBones(object) {
             avatarBones.spine = bone;
         }
         // VRoid/VRM naming: J_Bip_L_UpperArm, J_Bip_L_LowerArm, etc.
-        if (name.includes('l_upperarm') || name.includes('leftarm') || name.includes('j_bip_l_upperarm')) {
+        if (name.includes('l_upperarm') || name.includes('leftarm') || name.includes('j_bip_l_upperarm') || name.includes('upperarm_l')) {
             avatarBones.leftArm = bone;
         }
         if (name.includes('l_lowerarm') || name.includes('l_forearm') || name.includes('leftforearm') || name.includes('j_bip_l_lowerarm')) {
@@ -865,11 +1203,11 @@ function findAvatarBones(object) {
         if (name.includes('l_hand') || name.includes('lefthand') || name.includes('j_bip_l_hand')) {
             avatarBones.leftHand = bone;
         }
-        if (name.includes('l_shoulder') || name.includes('leftshoulder') || name.includes('j_bip_l_shoulder') || name.includes('j_bip_l_clavicle')) {
+        if (name.includes('l_shoulder') || name.includes('leftshoulder') || name.includes('j_bip_l_shoulder') || name.includes('j_bip_l_clavicle') || name.includes('clavicle_l')) {
             avatarBones.leftShoulder = bone;
         }
         // VRoid/VRM naming: J_Bip_R_UpperArm, J_Bip_R_LowerArm, etc.
-        if (name.includes('r_upperarm') || name.includes('rightarm') || name.includes('j_bip_r_upperarm')) {
+        if (name.includes('r_upperarm') || name.includes('rightarm') || name.includes('j_bip_r_upperarm') || name.includes('upperarm_r')) {
             avatarBones.rightArm = bone;
         }
         if (name.includes('r_lowerarm') || name.includes('r_forearm') || name.includes('rightforearm') || name.includes('j_bip_r_lowerarm')) {
@@ -878,7 +1216,7 @@ function findAvatarBones(object) {
         if (name.includes('r_hand') || name.includes('righthand') || name.includes('j_bip_r_hand')) {
             avatarBones.rightHand = bone;
         }
-        if (name.includes('r_shoulder') || name.includes('rightshoulder') || name.includes('j_bip_r_shoulder') || name.includes('j_bip_r_clavicle')) {
+        if (name.includes('r_shoulder') || name.includes('rightshoulder') || name.includes('j_bip_r_shoulder') || name.includes('j_bip_r_clavicle') || name.includes('clavicle_r')) {
             avatarBones.rightShoulder = bone;
         }
     }
@@ -1067,21 +1405,87 @@ function blinkExpression() {
     });
 }
 
-// Face Expression 2: Smile
-function smileExpression() {
+// Apply persistent smile with open mouth (called on avatar load)
+function applyPersistentSmile() {
+    if (!avatarObject) return;
+    
     avatarObject.traverse((child) => {
         if (child.isMesh && child.morphTargetDictionary) {
+            // Find smile morph target
             const smileTargets = ['smile', 'Smile', 'happy', 'Happy'];
+            let smileIndex = undefined;
             for (const targetName of smileTargets) {
                 const index = child.morphTargetDictionary[targetName];
                 if (index !== undefined) {
-                    animateProperty(child.morphTargetInfluences, index, 0, 0.6, 400, () => {
-                        setTimeout(() => {
-                            animateProperty(child.morphTargetInfluences, index, 0.6, 0, 400);
-                        }, 1500);
-                    });
-                    return;
+                    smileIndex = index;
+                    break;
                 }
+            }
+            
+            // Find mouth open morph target
+            const mouthTargets = ['mouthOpen', 'MouthOpen', 'Aa', 'aa', 'vocal', 'Vocal', 'mouth_open', 'Mouth_Open'];
+            let mouthIndex = undefined;
+            for (const targetName of mouthTargets) {
+                const index = child.morphTargetDictionary[targetName];
+                if (index !== undefined) {
+                    mouthIndex = index;
+                    break;
+                }
+            }
+            
+            // Apply persistent smile
+            if (smileIndex !== undefined) {
+                child.morphTargetInfluences[smileIndex] = 0.7; // Persistent smile
+                console.log('[NATURAL-AVATAR] ✅ Applied persistent smile');
+            }
+            
+            // Apply persistent mouth open
+            if (mouthIndex !== undefined) {
+                child.morphTargetInfluences[mouthIndex] = 0.4; // Persistent open mouth
+                console.log('[NATURAL-AVATAR] ✅ Applied persistent open mouth');
+            }
+        }
+    });
+}
+
+// Face Expression 2: Smile with Open Mouth
+function smileExpression() {
+    avatarObject.traverse((child) => {
+        if (child.isMesh && child.morphTargetDictionary) {
+            // Find smile morph target
+            const smileTargets = ['smile', 'Smile', 'happy', 'Happy'];
+            let smileIndex = undefined;
+            for (const targetName of smileTargets) {
+                const index = child.morphTargetDictionary[targetName];
+                if (index !== undefined) {
+                    smileIndex = index;
+                    break;
+                }
+            }
+            
+            // Find mouth open morph target
+            const mouthTargets = ['mouthOpen', 'MouthOpen', 'Aa', 'aa', 'vocal', 'Vocal', 'mouth_open', 'Mouth_Open'];
+            let mouthIndex = undefined;
+            for (const targetName of mouthTargets) {
+                const index = child.morphTargetDictionary[targetName];
+                if (index !== undefined) {
+                    mouthIndex = index;
+                    break;
+                }
+            }
+            
+            // Apply smile (persistent)
+            if (smileIndex !== undefined) {
+                child.morphTargetInfluences[smileIndex] = 0.7; // Set directly for persistent smile
+            }
+            
+            // Apply mouth open along with smile (persistent)
+            if (mouthIndex !== undefined) {
+                child.morphTargetInfluences[mouthIndex] = 0.4; // Set directly for persistent open mouth
+            }
+            
+            if (smileIndex !== undefined || mouthIndex !== undefined) {
+                return;
             }
         }
     });
@@ -1175,10 +1579,34 @@ function animate() {
     
     const time = Date.now() * 0.001;
     
-    // Update orbit controls
-    if (controls) {
+    // FIXED POSITION: Ensure camera stays at fixed position - never allow movement
+    if (camera && window.lockedCameraPosition && window.lockedLookAt) {
+        // Use locked position if available (from localStorage or lockAvatarPosition)
+        camera.position.set(
+            window.lockedCameraPosition.x,
+            window.lockedCameraPosition.y,
+            window.lockedCameraPosition.z
+        );
+        camera.lookAt(
+            window.lockedLookAt.x,
+            window.lockedLookAt.y,
+            window.lockedLookAt.z
+        );
+    } else if (camera && !controls.enabled) {
+        // Use default fixed position if not locked yet
+        camera.position.set(0, 0.8, 3.5);
+        camera.lookAt(0, 0.5, 0);
+    }
+    
+    // Update controls if they're enabled (for positioning)
+    if (controls && controls.enabled) {
         controls.update();
     }
+    
+    // Do not update controls - they are permanently disabled
+    // if (controls) {
+    //     controls.update();
+    // }
     
     // DO NOT update mixer - it will play animations that override our bone rotations
     // if (mixer) {
@@ -1186,45 +1614,9 @@ function animate() {
     // }
     
     if (avatarObject && avatarLoaded) {
-        // CONTINUOUS T-POSE FIX: Enforce VRM A-shape pose every frame
-        let armUpdated = false;
-        if (avatarBones.rightArm) {
-            // VRM A-shape quaternion for right arm
-            const quatRight = new THREE.Quaternion(0, 0, -0.4235327838350045, 0.905880776381181);
-            avatarBones.rightArm.quaternion.copy(quatRight);
-            avatarBones.rightArm.updateMatrix();
-            avatarBones.rightArm.updateMatrixWorld(true);
-            armUpdated = true;
-        }
-        if (avatarBones.leftArm) {
-            // VRM A-shape quaternion for left arm
-            const quatLeft = new THREE.Quaternion(0, 0, 0.42669474387529654, 0.904395707392066);
-            avatarBones.leftArm.quaternion.copy(quatLeft);
-            avatarBones.leftArm.updateMatrix();
-            avatarBones.leftArm.updateMatrixWorld(true);
-            armUpdated = true;
-        }
-        
-        // Also enforce shoulder positions
-        if (avatarBones.rightShoulder) {
-            const quatRightShoulder = new THREE.Quaternion(0, 0, -0.08027473717361218, 0.9967727757978284);
-            avatarBones.rightShoulder.quaternion.copy(quatRightShoulder);
-            avatarBones.rightShoulder.updateMatrix();
-            avatarBones.rightShoulder.updateMatrixWorld(true);
-            armUpdated = true;
-        }
-        if (avatarBones.leftShoulder) {
-            const quatLeftShoulder = new THREE.Quaternion(0, 0, 0.08532541830751879, 0.9963531366893201);
-            avatarBones.leftShoulder.quaternion.copy(quatLeftShoulder);
-            avatarBones.leftShoulder.updateMatrix();
-            avatarBones.leftShoulder.updateMatrixWorld(true);
-            armUpdated = true;
-        }
-        
-        // CRITICAL: Update skeleton every frame to reflect VRM A-shape pose
-        if (armUpdated) {
-            updateSkeleton();
-        }
+        // HAND ROTATION CONTROL: Apply rotation based on handRotationAngle
+        // Skip the continuous T-pose enforcement - let the hand rotation control handle it
+        // The arm rotation code below will handle the positioning based on handRotationAngle
         
         // Breathing - faster when typing (excited)
         const breathingSpeed = isUserTyping ? 1.5 : 1.0;
@@ -1256,7 +1648,7 @@ function animate() {
             }
         }
         
-        // Keep arms down naturally - enforce natural standing pose (arms hanging down, not T-pose)
+        // Keep arms in A-pose (arms slightly angled down, not fully down like standing pose)
         if (avatarBones.rightArm && !isSpeaking) {
             // Re-get bone from skeleton to ensure we're modifying the actual bone
             let rightArmBone = avatarBones.rightArm;
@@ -1266,17 +1658,22 @@ function animate() {
             }
             
             rightArmBone.rotation.order = 'XYZ';
-            // Natural hanging arm position: arms hanging down (not T-pose)
-            // Use stored original T-pose rotation to calculate the correct offset
-            const originalRot = originalArmRotations.rightArm !== null ? originalArmRotations.rightArm : Math.PI / 2;
-            const tPoseOffset = originalRot > 0.5 ? originalRot : Math.PI / 2; // Assume T-pose if rotation is large
-            const targetX = originalRot - tPoseOffset + 0.1; // Bring to 0 (arms down), then add slight forward tilt
-            rightArmBone.rotation.x = targetX;
-            rightArmBone.rotation.y = -0.15; // Slight inward rotation for natural arm position
-            rightArmBone.rotation.z = 0.1; // Slight rotation for natural arm position
+            // A-pose: arms at about 30-45 degrees down from horizontal
+            // T-pose: arms horizontal (rotation.x ≈ Math.PI/2 or 1.57 radians)
+            // A-pose: arms angled down (rotation.x ≈ 0.6 radians or ~35°)
+            // Standing pose: arms fully down (rotation.x ≈ 0 radians)
             
-            // Update quaternion and matrix
-            const euler = new THREE.Euler(targetX, -0.15, 0.1, 'XYZ');
+            // Always use A-pose rotation
+            const targetX = 0.6; // A-pose: arms angled down (~35° from horizontal)
+            
+            rightArmBone.rotation.x = targetX;
+            
+            // A-pose: arms hang down with slight inward rotation
+            rightArmBone.rotation.y = -0.9; // Inward rotation for natural A-pose
+            rightArmBone.rotation.z = 0.5; // Minimal rotation for natural position
+            
+            // Update quaternion and matrix - CRITICAL: This must happen every frame
+            const euler = new THREE.Euler(targetX, -0.2, 0.05, 'XYZ');
             rightArmBone.quaternion.setFromEuler(euler);
             rightArmBone.updateMatrix();
             rightArmBone.updateMatrixWorld(true);
@@ -1290,17 +1687,22 @@ function animate() {
             }
             
             leftArmBone.rotation.order = 'XYZ';
-            // Natural hanging arm position: arms hanging down (not T-pose)
-            // Use stored original T-pose rotation to calculate the correct offset
-            const originalRot = originalArmRotations.leftArm !== null ? originalArmRotations.leftArm : Math.PI / 2;
-            const tPoseOffset = originalRot > 0.5 ? originalRot : Math.PI / 2; // Assume T-pose if rotation is large
-            const targetX = originalRot - tPoseOffset + 0.1; // Bring to 0 (arms down), then add slight forward tilt
-            leftArmBone.rotation.x = targetX;
-            leftArmBone.rotation.y = 0.15; // Slight inward rotation for natural arm position
-            leftArmBone.rotation.z = -0.1; // Slight rotation for natural arm position
+            // A-pose: arms at about 30-45 degrees down from horizontal
+            // T-pose: arms horizontal (rotation.x ≈ Math.PI/2 or 1.57 radians)
+            // A-pose: arms angled down (rotation.x ≈ 0.6 radians or ~35°)
+            // Standing pose: arms fully down (rotation.x ≈ 0 radians)
             
-            // Update quaternion and matrix
-            const euler = new THREE.Euler(targetX, 0.15, -0.1, 'XYZ');
+            // Always use A-pose rotation
+            const targetX = 0.6; // A-pose: arms angled down (~35° from horizontal)
+            
+            leftArmBone.rotation.x = targetX;
+            
+            // A-pose: arms hang down with slight inward rotation
+            leftArmBone.rotation.y = 0.9; // Inward rotation for natural A-pose
+            leftArmBone.rotation.z = -0.5; // Minimal rotation for natural position
+            
+            // Update quaternion and matrix - CRITICAL: This must happen every frame
+            const euler = new THREE.Euler(targetX, 0.2, -0.05, 'XYZ');
             leftArmBone.quaternion.setFromEuler(euler);
             leftArmBone.updateMatrix();
             leftArmBone.updateMatrixWorld(true);
@@ -1337,7 +1739,7 @@ function animate() {
             avatarBones.spine.updateMatrix();
         }
         
-        // CRITICAL: Update skeleton every frame to make bone changes visible
+        // CRITICAL: Update skeleton every frame to make bone changes visible (including hand rotation)
         updateSkeleton();
     }
     
@@ -1383,18 +1785,19 @@ function handleResize() {
     }
 }
 
-// Reset avatar view
+// Reset avatar view - FIXED POSITION: Always resets to the same fixed position
 function resetAvatarView() {
-    console.log('[NATURAL-AVATAR] Resetting avatar view...');
+    console.log('[NATURAL-AVATAR] Resetting avatar to fixed position...');
     
     if (controls && camera) {
-        // Reset camera position
-        camera.position.set(0, 0.8, 3.5); // Lower Y and slightly zoomed out
-        camera.lookAt(0, 0.5, 0); // Look at lower point
+        // ALWAYS reset to fixed camera position - never changes
+        camera.position.set(0, 0.8, 3.5); // Fixed position
+        camera.lookAt(0, 0.5, 0); // Fixed look at point
         
-        // Reset orbit controls - target lower point
+        // Reset orbit controls target (but controls remain disabled)
         controls.target.set(0, 0.5, 0);
-        controls.update();
+        controls.enabled = false; // Ensure controls stay disabled
+        // Do not call controls.update() - position is fixed
     }
     
     // Reset avatar object position (will be recalculated based on center)
@@ -1408,7 +1811,7 @@ function resetAvatarView() {
         avatarObject.position.x = -center.x * scale;
         avatarObject.position.y = -floorLevel; // Stand on floor
         avatarObject.position.z = -center.z * scale;
-        avatarObject.rotation.y = Math.PI;
+        avatarObject.rotation.y = Math.PI; // Fixed rotation
     }
     
     // Reset background view as well - lower and zoomed in
@@ -1419,7 +1822,7 @@ function resetAvatarView() {
         backgroundControls.update();
     }
     
-    console.log('[NATURAL-AVATAR] ✅ Avatar view reset');
+    console.log('[NATURAL-AVATAR] ✅ Avatar reset to fixed position');
 }
 
 // Set user typing state (called from chat.js)
@@ -1631,13 +2034,15 @@ function initializeAvatar() {
     
     if (initThreeScene()) {
         loadAvatar();
-        loadOfficeBackground(); // Load background after avatar scene is ready
+        // loadOfficeBackground(); // Disabled - using static pharmacy background image instead
         window.addEventListener('resize', handleResize);
     } else {
         console.error('[NATURAL-AVATAR] Scene init failed');
         if (fallbackElement) fallbackElement.style.display = 'flex';
     }
 }
+
+// Hand rotation control removed - avatar is always in full standing pose
 
 // Start
 if (document.readyState === 'loading') {

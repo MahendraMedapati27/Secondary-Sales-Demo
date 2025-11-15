@@ -215,7 +215,7 @@ class EnhancedOrderService:
                 if added_items and not removed_items:
                     response_message += f"Great! I've added the following items to your cart:\n\n"
                     for item in added_items:
-                        response_message += f"• {item['product_name']} - Qty: {item['quantity']} - ${item['total_price']:.2f}\n"
+                        response_message += f"• {item['product_name']} - Qty: {item['quantity']} - {item['total_price']:,.2f} MMK\n"
                 
                 if removed_items:
                     if added_items:
@@ -230,7 +230,7 @@ class EnhancedOrderService:
                     if added_items:
                         response_message += "Added:\n"
                         for item in added_items:
-                            response_message += f"• {item['product_name']} - Qty: {item['quantity']} - ${item['total_price']:.2f}\n"
+                            response_message += f"• {item['product_name']} - Qty: {item['quantity']} - {item['total_price']:,.2f} MMK\n"
                     if removed_items:
                         if added_items:
                             response_message += "\nRemoved:\n"
@@ -724,21 +724,21 @@ You'll receive an email when any of these products become available."""
 
 **🛍️ Order Items:**
 
-| Product | Code | Quantity | FOC | Total Qty | Unit Price | Total |
-|---------|------|----------|-----|-----------|------------|-------|
+| Product | Quantity | FOC | Total Qty | Unit Price | Total |
+|---------|----------|-----|-----------|------------|-------|
 """
             for item in order_items_details:
                 # Show FOC in separate column
                 paid_qty = item['quantity']
                 free_qty = item['free_quantity']
                 total_qty = item['total_quantity']
-                confirmation_message += f"| {item['name']} | {item['code']} | {paid_qty} | +{free_qty} | **{total_qty}** | ${item['unit_price']:,.2f} | ${item['total']:,.2f} |\n"
+                confirmation_message += f"| {item['name']} | {paid_qty} | +{free_qty} | **{total_qty}** | {item['unit_price']:,.2f} MMK | {item['total']:,.2f} MMK |\n"
             
             confirmation_message += f"""
 **💰 Payment Summary:**
-• **Subtotal:** ${order.subtotal:,.2f}
-• **Tax (5%):** ${order.tax_amount:,.2f}
-• **Grand Total:** ${order.total_amount:,.2f}
+• **Subtotal:** {order.subtotal:,.2f} MMK
+• **Tax (5%):** {order.tax_amount:,.2f} MMK
+• **Grand Total:** {order.total_amount:,.2f} MMK
 
 **📊 Status:**
 • {status_message}
@@ -781,11 +781,15 @@ These products will be automatically ordered when new stock arrives. Track with 
                 'message': f"Error placing order: {str(e)}"
             }
     
-    def confirm_order_by_distributor(self, order_id, distributor_user_id):
+    def confirm_order_by_distributor(self, order_id, distributor_user_id, item_edits=None):
         """
-        Confirm order by distributor and generate invoice
+        Confirm order by distributor with optional edits and stock discrepancy handling
+        item_edits: dict of {item_id: {'quantity': int, 'expiry_date': date, 'reason': str}}
         """
         try:
+            from app.models import PendingOrderProducts
+            from datetime import date
+            
             order = Order.query.filter_by(order_id=order_id).first()
             if not order:
                 return {
@@ -803,30 +807,145 @@ These products will be automatically ordered when new stock arrives. Track with 
                     'success': False,
                     'message': "This order doesn't belong to your area."
                 }
+            
+            # Get order items
+            order_items = OrderItem.query.filter_by(order_id=order.id).all()
+            item_edits = item_edits or {}
+            
+            # Process edits and handle stock discrepancies
+            notifications = []
+            cart_like_items = []
+            
+            for item in order_items:
+                item_id = item.id
+                edit_data = item_edits.get(item_id, {})
+                
+                # Get actual available stock
+                from app.models import DealerWiseStockDetails
+                dealers_in_area = User.query.filter_by(role='distributor', area=order.mr.area).all()
+                dealer_unique_ids = [d.unique_id for d in dealers_in_area] if dealers_in_area else []
+                
+                stock_details = DealerWiseStockDetails.query.filter(
+                    DealerWiseStockDetails.product_code == item.product_code,
+                    DealerWiseStockDetails.status == 'confirmed',
+                    DealerWiseStockDetails.dealer_unique_id.in_(dealer_unique_ids),
+                    DealerWiseStockDetails.blocked_quantity > 0
+                ).all()
+                
+                total_available = sum(s.blocked_quantity for s in stock_details)
+                requested_qty = item.quantity
+                
+                # Handle stock discrepancy
+                if total_available < requested_qty:
+                    # Partial dispatch - dispatch available, move rest to pending
+                    dispatch_qty = total_available
+                    pending_qty = requested_qty - total_available
+                    
+                    # Update order item
+                    item.adjusted_quantity = dispatch_qty
+                    item.pending_quantity = pending_qty
+                    item.adjustment_reason = f"Stock discrepancy: Only {dispatch_qty} units available. {pending_qty} units moved to pending orders."
+                    
+                    # Create pending order
+                    pending_order = PendingOrderProducts(
+                        original_order_id=order.order_id,
+                        product_code=item.product_code,
+                        product_name=item.product_name,
+                        requested_quantity=pending_qty,
+                        user_id=order.mr_id,
+                        user_email=order.mr.email if order.mr else '',
+                        status='pending'
+                    )
+                    db.session.add(pending_order)
+                    
+                    notifications.append(f"{item.product_name}: Dispatched {dispatch_qty} units. {pending_qty} units pending (will be dispatched when stock arrives).")
+                    
+                    # Use adjusted quantity for moving to sold
+                    cart_like_items.append(type('CartLikeItem', (), {
+                        'product_code': item.product_code,
+                        'quantity': dispatch_qty
+                    })())
+                else:
+                    # Full dispatch possible - check if dealer adjusted quantity
+                    dispatch_qty = edit_data.get('quantity', requested_qty)
+                    
+                    # Handle quantity adjustment by dealer
+                    if dispatch_qty != requested_qty:
+                        if dispatch_qty < requested_qty:
+                            # Dealer reduced quantity - move difference to pending
+                            pending_qty = requested_qty - dispatch_qty
+                            item.adjusted_quantity = dispatch_qty
+                            item.pending_quantity = pending_qty
+                            
+                            # Get reason from edits or use default
+                            reason = edit_data.get('reason', f'Quantity adjusted: {dispatch_qty} units dispatched, {pending_qty} units moved to pending orders')
+                            item.adjustment_reason = reason
+                            
+                            # Create pending order
+                            pending_order = PendingOrderProducts(
+                                original_order_id=order.order_id,
+                                product_code=item.product_code,
+                                product_name=item.product_name,
+                                requested_quantity=pending_qty,
+                                user_id=order.mr_id,
+                                user_email=order.mr.email if order.mr else '',
+                                status='pending'
+                            )
+                            db.session.add(pending_order)
+                            
+                            notifications.append(f"{item.product_name}: Dispatched {dispatch_qty} units (reduced from {requested_qty}). {pending_qty} units moved to pending orders.")
+                        else:
+                            # Dealer increased quantity - not allowed, use original
+                            dispatch_qty = requested_qty
+                            notifications.append(f"{item.product_name}: Cannot increase quantity above ordered amount. Using original quantity {requested_qty}.")
+                    else:
+                        # Quantity unchanged, but check if reason provided for notification
+                        if 'reason' in edit_data and edit_data['reason']:
+                            item.adjustment_reason = edit_data['reason']
+                    
+                    # Update expiry date if edited
+                    if 'expiry_date' in edit_data and edit_data['expiry_date']:
+                        try:
+                            from datetime import datetime
+                            if isinstance(edit_data['expiry_date'], str):
+                                item.adjusted_expiry_date = datetime.strptime(edit_data['expiry_date'], '%Y-%m-%d').date()
+                            else:
+                                item.adjusted_expiry_date = edit_data['expiry_date']
+                            self.logger.info(f"Updated expiry date for item {item.id}: {item.adjusted_expiry_date}")
+                        except Exception as e:
+                            self.logger.error(f"Error updating expiry date: {str(e)}")
+                    
+                    # Update lot number if edited (save to dedicated field)
+                    if 'lot_number' in edit_data and edit_data['lot_number']:
+                        item.adjusted_lot_number = edit_data['lot_number'].strip()
+                        self.logger.info(f"Updated lot number for item {item.id}: {item.adjusted_lot_number}")
+                        # Also add to adjustment_reason if not already there
+                        if item.adjustment_reason and 'lot number' not in item.adjustment_reason.lower():
+                            item.adjustment_reason = f"{item.adjustment_reason}. Lot Number: {item.adjusted_lot_number}"
+                        elif not item.adjustment_reason:
+                            item.adjustment_reason = f"Lot Number: {item.adjusted_lot_number}"
+                    
+                    cart_like_items.append(type('CartLikeItem', (), {
+                        'product_code': item.product_code,
+                        'quantity': dispatch_qty
+                    })())
+            
             # Update order status
             order.distributor_confirmed_at = datetime.utcnow()
             order.distributor_confirmed_by = distributor_user_id
             order.status = 'confirmed'
             order.order_stage = 'confirmed'
             
-            # Move blocked quantities to sold when dealer confirms
-            # This is where stock transitions from blocked -> sold
-            if order.mr and order.mr.area:
-                # Get order items to move blocked to sold
-                order_items = OrderItem.query.filter_by(order_id=order.id).all()
-                # Convert to cart-like items for the method
-                cart_like_items = []
-                for item in order_items:
-                    # Create a simple object with the needed attributes
-                    class CartLikeItem:
-                        def __init__(self, product_code, quantity):
-                            self.product_code = product_code
-                            self.quantity = quantity
-                    cart_like_items.append(CartLikeItem(item.product_code, item.quantity))
-                
+            # Move blocked quantities to sold
+            if order.mr and order.mr.area and cart_like_items:
                 self._move_blocked_to_sold_for_mr_order(order.mr, cart_like_items)
             
             db.session.commit()
+            
+            # Include notifications in response if there are stock discrepancies
+            result_message = f"Order {order_id} confirmed and invoice generated"
+            if notifications:
+                result_message += "\n\n⚠️ Stock Discrepancies:\n" + "\n".join(f"• {n}" for n in notifications)
             
             # Generate invoice (for records only - not stored in Order model)
             invoice_number = self._generate_invoice(order)
@@ -836,7 +955,7 @@ These products will be automatically ordered when new stock arrives. Track with 
             admin_email = current_app.config.get('ADMIN_EMAIL') if current_app else None
             order_items_list = OrderItem.query.filter_by(order_id=order.id).all()
             
-            # Build items table with FOC
+            # Build items table with FOC - show adjusted quantities if available
             table = """<table style='border-collapse:collapse; width:100%; margin:20px 0;'>
                 <thead><tr style='background:#3b82f6; color:white;'>
                     <th style='padding:12px; text-align:left;'>Product</th>
@@ -845,32 +964,188 @@ These products will be automatically ordered when new stock arrives. Track with 
                     <th style='padding:12px; text-align:right;'>Unit Price</th>
                     <th style='padding:12px; text-align:right;'>Total</th>
                 </tr></thead><tbody>"""
+            
+            # Recalculate totals based on adjusted quantities
+            recalculated_subtotal = 0.0
             for item in order_items_list:
-                quantity = item.quantity or 0
+                # Use adjusted quantity if available, otherwise use original
+                quantity = item.adjusted_quantity if item.adjusted_quantity is not None else (item.quantity or 0)
                 foc_qty = item.free_quantity or 0
                 foc_display = f"<strong>+{foc_qty}</strong>" if foc_qty > 0 else "-"
+                
+                # Calculate total based on adjusted quantity
+                unit_price = item.unit_price or 0.0
+                item_total = quantity * unit_price
+                recalculated_subtotal += item_total
+                
+                # Show original quantity if different from adjusted
+                qty_display = str(quantity)
+                if item.adjusted_quantity is not None and item.adjusted_quantity != item.quantity:
+                    qty_display = f"{quantity} <small style='color:#856404;'>(was {item.quantity})</small>"
+                
                 table += f"""<tr style='border-bottom:1px solid #e5e7eb;'>
                     <td style='padding:10px;'>{item.product.product_name} ({item.product_code})</td>
-                    <td style='padding:10px; text-align:center;'>{quantity}</td>
+                    <td style='padding:10px; text-align:center;'>{qty_display}</td>
                     <td style='padding:10px; text-align:center; color:#10b981;'>{foc_display}</td>
-                    <td style='padding:10px; text-align:right;'>${item.unit_price:,.2f}</td>
-                    <td style='padding:10px; text-align:right;'>${item.total_price:,.2f}</td>
+                    <td style='padding:10px; text-align:right;'>{unit_price:,.2f} MMK</td>
+                    <td style='padding:10px; text-align:right;'>{item_total:,.2f} MMK</td>
                 </tr>"""
             table += "</tbody></table>"
             
-            # Tax information
+            # Tax information - recalculate based on adjusted quantities
             tax_html = ""
+            # Recalculate tax based on adjusted quantities
+            recalculated_tax = recalculated_subtotal * 0.05
+            recalculated_grand_total = recalculated_subtotal + recalculated_tax
+            
+            # Check if totals need to be updated (if quantities were adjusted)
+            has_quantity_adjustments = any(
+                item.adjusted_quantity is not None and item.adjusted_quantity != item.quantity 
+                for item in order_items_list
+            )
+            
             if hasattr(order, 'subtotal') and order.subtotal:
-                tax_html = f"""
-                    <div class='success-box'>
-                        <h3 style='margin-top: 0; color: #059669;'>💰 Payment Summary</h3>
-                        <p style='margin: 5px 0;'><strong>Subtotal:</strong> ${order.subtotal:,.2f}</p>
-                        <p style='margin: 5px 0;'><strong>Tax (5%):</strong> ${order.tax_amount:,.2f}</p>
-                        <p style='margin: 5px 0; font-size: 1.2em;'><strong>Grand Total:</strong> ${order.total_amount:,.2f}</p>
+                # Show recalculated totals if quantities were adjusted
+                if has_quantity_adjustments:
+                    tax_html = f"""
+                        <div class='success-box'>
+                            <h3 style='margin-top: 0; color: #059669;'>💰 Payment Summary</h3>
+                            <p style='margin: 5px 0;'><strong>Subtotal:</strong> {recalculated_subtotal:,.2f} MMK <small style='color:#856404;'>(adjusted from {order.subtotal:,.2f} MMK)</small></p>
+                            <p style='margin: 5px 0;'><strong>Tax (5%):</strong> {recalculated_tax:,.2f} MMK</p>
+                            <p style='margin: 5px 0; font-size: 1.2em;'><strong>Grand Total:</strong> {recalculated_grand_total:,.2f} MMK</p>
+                        </div>
+                    """
+                else:
+                    tax_html = f"""
+                        <div class='success-box'>
+                            <h3 style='margin-top: 0; color: #059669;'>💰 Payment Summary</h3>
+                            <p style='margin: 5px 0;'><strong>Subtotal:</strong> {order.subtotal:,.2f} MMK</p>
+                            <p style='margin: 5px 0;'><strong>Tax (5%):</strong> {order.tax_amount:,.2f} MMK</p>
+                            <p style='margin: 5px 0; font-size: 1.2em;'><strong>Grand Total:</strong> {order.total_amount:,.2f} MMK</p>
+                        </div>
+                    """
+            else:
+                if has_quantity_adjustments:
+                    tax_html = f"<p style='font-size:1.2em;'><strong>Total Amount:</strong> {recalculated_grand_total:,.2f} MMK <small style='color:#856404;'>(adjusted)</small></p>"
+                else:
+                    tax_html = f"<p style='font-size:1.2em;'><strong>Total Amount:</strong> {order.total_amount:,.2f} MMK</p>"
+            
+            # Build adjustments section if any items were adjusted
+            # Only show items with actual adjustments: quantity change, expiry change, or reason (excluding lot-only reasons)
+            adjustments_html = ""
+            adjusted_items = []
+            
+            for item in order_items_list:
+                has_actual_adjustment = False
+                adjustment_details = []
+                
+                # Check for quantity adjustment
+                if item.adjusted_quantity is not None and item.adjusted_quantity != item.quantity:
+                    has_actual_adjustment = True
+                    adjustment_details.append({
+                        'type': 'quantity',
+                        'value': f"{item.quantity} → {item.adjusted_quantity} units",
+                        'pending': item.pending_quantity if item.pending_quantity and item.pending_quantity > 0 else None
+                    })
+                
+                # Check for lot number adjustment (separate field)
+                # Only show lot number if there's a quantity change or other meaningful adjustment
+                if item.adjusted_lot_number and (
+                    (item.adjusted_quantity is not None and item.adjusted_quantity != item.quantity) or
+                    (item.adjustment_reason and 'lot number' not in item.adjustment_reason.lower())
+                ):
+                    adjustment_details.append({
+                        'type': 'lot_number',
+                        'value': item.adjusted_lot_number
+                    })
+                    if not has_actual_adjustment:
+                        has_actual_adjustment = True
+                
+                # Check for expiry date adjustment (only show if quantity was also changed)
+                # Expiry date is always set from database, so only show as adjustment if quantity changed
+                if item.adjusted_expiry_date and (item.adjusted_quantity is not None and item.adjusted_quantity != item.quantity):
+                    adjustment_details.append({
+                        'type': 'expiry',
+                        'value': item.adjusted_expiry_date.strftime('%Y-%m-%d')
+                    })
+                
+                # Check for reason (but exclude if it's only lot number)
+                if item.adjustment_reason:
+                    # Check if reason contains more than just lot number
+                    reason_lower = item.adjustment_reason.lower().strip()
+                    # Check if it's only a lot number (various formats)
+                    is_only_lot = (
+                        reason_lower.startswith('lot number:') or 
+                        reason_lower.startswith('lot:') or
+                        reason_lower == 'lot number' or
+                        (reason_lower.startswith('lot number: lot:') and len(reason_lower.split(':')) <= 3)
+                    )
+                    
+                    # Only include reason if:
+                    # 1. It's not just a lot number, OR
+                    # 2. There's a quantity change (in which case show the full reason including lot)
+                    if not is_only_lot:
+                        # It's a meaningful reason (not just lot number)
+                        adjustment_details.append({
+                            'type': 'reason',
+                            'value': item.adjustment_reason
+                        })
+                        if not has_actual_adjustment:
+                            has_actual_adjustment = True
+                    elif item.adjusted_quantity is not None and item.adjusted_quantity != item.quantity:
+                        # Quantity was changed, so include the reason even if it contains lot number
+                        adjustment_details.append({
+                            'type': 'reason',
+                            'value': item.adjustment_reason
+                        })
+                
+                if has_actual_adjustment:
+                    adjusted_items.append({
+                        'item': item,
+                        'details': adjustment_details
+                    })
+            
+            if adjusted_items:
+                adjustments_html = """
+                    <div class='warning-box' style='background-color:#fff3cd; border-left:4px solid #ffc107; padding:15px; margin:20px 0; border-radius:5px;'>
+                        <h3 style='margin-top: 0; color: #856404;'>⚠️ Order Adjustments</h3>
+                        <p style='margin: 5px 0; color: #856404;'>The following adjustments were made to your order:</p>
+                        <ul style='margin: 10px 0; padding-left: 20px;'>
+                """
+                for adj_item in adjusted_items:
+                    item = adj_item['item']
+                    details = adj_item['details']
+                    adj_info = f"<li style='margin: 8px 0;'><strong>{item.product_name}:</strong><br>"
+                    
+                    for detail in details:
+                        if detail['type'] == 'quantity':
+                            adj_info += f"• Quantity: {detail['value']}"
+                            if detail['pending']:
+                                adj_info += f" ({detail['pending']} units moved to pending orders)"
+                            adj_info += "<br>"
+                        elif detail['type'] == 'expiry':
+                            adj_info += f"• Expiry Date: {detail['value']}<br>"
+                        elif detail['type'] == 'lot_number':
+                            adj_info += f"• Lot Number: {detail['value']}<br>"
+                        elif detail['type'] == 'reason':
+                            # Filter out lot number from reason if it's already shown separately
+                            reason_text = detail['value']
+                            if item.adjusted_lot_number and f"Lot Number: {item.adjusted_lot_number}" in reason_text:
+                                reason_text = reason_text.replace(f"Lot Number: {item.adjusted_lot_number}", "").strip()
+                                reason_text = reason_text.rstrip('.').strip()
+                            if reason_text:
+                                adj_info += f"• Reason: {reason_text}<br>"
+                    
+                    adj_info += "</li>"
+                    adjustments_html += adj_info
+                
+                adjustments_html += """
+                        </ul>
+                        <p style='margin: 10px 0 0 0; color: #856404; font-size: 0.9em;'>
+                            <strong>Note:</strong> If any items were moved to pending orders, they will be automatically processed when new stock arrives.
+                        </p>
                     </div>
                 """
-            else:
-                tax_html = f"<p style='font-size:1.2em;'><strong>Total Amount:</strong> ${order.total_amount:,.2f}</p>"
             
             content = f"""
                 <h2 style='color:#059669; margin-top:0;'>✅ Order Confirmed!</h2>
@@ -885,6 +1160,8 @@ These products will be automatically ordered when new stock arrives. Track with 
                     <p style='margin: 5px 0;'><strong>Status:</strong> <span style='color:#059669; font-weight:bold;'>Confirmed</span></p>
                     <p style='margin: 5px 0;'><strong>Invoice:</strong> {invoice_number}</p>
                 </div>
+                
+                {adjustments_html}
                 
                 <h3>🛍️ Order Items</h3>
                 {table}
@@ -909,15 +1186,37 @@ These products will be automatically ordered when new stock arrives. Track with 
             )
             
             if mr:
-                send_email(mr.email, f"✅ Your order {order.order_id} has been confirmed!", email_html, 'order_confirmed_customer')
-            send_email(distributor.email, f"Order {order.order_id} confirmed for fulfillment", email_html, 'order_confirmed_distributor')
+                send_email(
+                    mr.email, 
+                    f"✅ Your order {order.order_id} has been confirmed!", 
+                    email_html, 
+                    'order_confirmed_customer',
+                    order_id=order.order_id,
+                    receiver_name=mr.name
+                )
+            send_email(
+                distributor.email, 
+                f"Order {order.order_id} confirmed for fulfillment", 
+                email_html, 
+                'order_confirmed_distributor',
+                order_id=order.order_id,
+                receiver_name=distributor.name
+            )
             if admin_email:
-                send_email(admin_email, f"[Admin] Order {order.order_id} confirmed", email_html, 'order_confirmed_admin')
+                send_email(
+                    admin_email, 
+                    f"[Admin] Order {order.order_id} confirmed", 
+                    email_html, 
+                    'order_confirmed_admin',
+                    order_id=order.order_id,
+                    receiver_name='Admin'
+                )
 
             return {
                 'success': True,
-                'message': f"Order {order_id} confirmed and invoice generated",
-                'invoice_number': invoice_number
+                'message': result_message,
+                'invoice_number': invoice_number,
+                'notifications': notifications
             }
         except Exception as e:
             self.logger.error(f"Error confirming order: {str(e)}")
@@ -925,6 +1224,261 @@ These products will be automatically ordered when new stock arrives. Track with 
             return {
                 'success': False,
                 'message': f"Error confirming order: {str(e)}"
+            }
+    
+    def cancel_order_by_mr(self, order_id, mr_user_id):
+        """
+        Cancel order by MR - unblock stock and update order status
+        """
+        try:
+            order = Order.query.filter_by(order_id=order_id).first()
+            if not order:
+                return {
+                    'success': False,
+                    'message': "Order not found"
+                }
+            
+            mr = User.query.get(mr_user_id)
+            if not mr or mr.role != 'mr':
+                return {
+                    'success': False,
+                    'message': "Only MRs can cancel their own orders"
+                }
+            
+            if order.mr_id != mr_user_id:
+                return {
+                    'success': False,
+                    'message': "You can only cancel your own orders"
+                }
+            
+            # Check if order can be cancelled (only pending orders)
+            if order.status not in ['pending', 'draft']:
+                return {
+                    'success': False,
+                    'message': f"Cannot cancel order. Order status is '{order.status}'. Only pending orders can be cancelled."
+                }
+            
+            # Unblock quantities
+            order_items = OrderItem.query.filter_by(order_id=order.id).all()
+            
+            # Find dealers in MR's area
+            dealers_in_area = User.query.filter_by(
+                role='distributor',
+                area=order.mr.area
+            ).all()
+            
+            dealer_unique_ids = [d.unique_id for d in dealers_in_area] if dealers_in_area else []
+            
+            for item in order_items:
+                # Get stock details with blocked quantity
+                from sqlalchemy import case
+                stock_details = DealerWiseStockDetails.query.filter(
+                    DealerWiseStockDetails.product_code == item.product_code,
+                    DealerWiseStockDetails.dealer_unique_id.in_(dealer_unique_ids),
+                    DealerWiseStockDetails.blocked_quantity > 0
+                ).order_by(
+                    case(
+                        (DealerWiseStockDetails.expiry_date.is_(None), 1),
+                        else_=0
+                    ),
+                    DealerWiseStockDetails.expiry_date.asc()
+                ).all()
+                
+                remaining_to_unblock = item.quantity
+                
+                # Unblock using FEFO
+                for stock_detail in stock_details:
+                    if remaining_to_unblock <= 0:
+                        break
+                    
+                    blocked_in_this_stock = stock_detail.blocked_quantity
+                    if blocked_in_this_stock <= 0:
+                        continue
+                    
+                    quantity_to_unblock = min(remaining_to_unblock, blocked_in_this_stock)
+                    
+                    # Move from blocked back to available
+                    stock_detail.blocked_quantity -= quantity_to_unblock
+                    stock_detail.update_available_quantity()
+                    
+                    self.logger.info(
+                        f"Unblocked {quantity_to_unblock} units of {item.product_code} "
+                        f"(Stock ID: {stock_detail.id}, Available now: {stock_detail.available_for_sale})"
+                    )
+                    
+                    remaining_to_unblock -= quantity_to_unblock
+            
+            # Update order status
+            order.status = 'cancelled'
+            order.order_stage = 'cancelled'
+            
+            db.session.commit()
+            
+            # Send email notifications
+            try:
+                from app.email_utils import create_email_template, send_email
+                from flask import current_app
+                
+                # Prepare order items list for email
+                items_html = ""
+                total_amount = 0
+                for item in order_items:
+                    item_total = (item.quantity + (item.free_quantity or 0)) * item.unit_price
+                    total_amount += item_total
+                    foc_text = f" + {item.free_quantity} FREE" if item.free_quantity and item.free_quantity > 0 else ""
+                    items_html += f"""
+                        <tr>
+                            <td style="padding: 10px; border-bottom: 1px solid #dee2e6;">
+                                <strong>{item.product_name}</strong>
+                            </td>
+                            <td style="padding: 10px; border-bottom: 1px solid #dee2e6; text-align: center;">
+                                {item.quantity}{foc_text}
+                            </td>
+                            <td style="padding: 10px; border-bottom: 1px solid #dee2e6; text-align: right;">
+                                {item.unit_price:,.2f} MMK
+                            </td>
+                            <td style="padding: 10px; border-bottom: 1px solid #dee2e6; text-align: right;">
+                                {item_total:,.2f} MMK
+                            </td>
+                        </tr>
+                    """
+                
+                # Email to MR (Customer)
+                mr_content = f"""
+                    <h2 style='color:#ff9800; margin-top:0;'>⚠️ Order Cancelled</h2>
+                    <p>Dear <strong>{mr.name}</strong>,</p>
+                    <p>Your order <strong>{order.order_id}</strong> has been successfully cancelled.</p>
+                    
+                    <div class='info-box'>
+                        <h3 style='margin-top: 0;'>Cancellation Details</h3>
+                        <p style='margin: 5px 0;'><strong>Order ID:</strong> {order.order_id}</p>
+                        <p style='margin: 5px 0;'><strong>Order Date:</strong> {order.created_at.strftime('%B %d, %Y at %I:%M %p') if order.created_at else 'N/A'}</p>
+                        <p style='margin: 5px 0;'><strong>Cancellation Date:</strong> {datetime.utcnow().strftime('%B %d, %Y at %I:%M %p')}</p>
+                    </div>
+                    
+                    <div class='info-box'>
+                        <h3 style='margin-top: 0;'>Order Items</h3>
+                        <table style='width: 100%; border-collapse: collapse; margin-top: 10px;'>
+                            <thead>
+                                <tr style='background-color: #f8f9fa;'>
+                                    <th style='padding: 10px; text-align: left; border-bottom: 2px solid #dee2e6;'>Product Name</th>
+                                    <th style='padding: 10px; text-align: center; border-bottom: 2px solid #dee2e6;'>Quantity</th>
+                                    <th style='padding: 10px; text-align: right; border-bottom: 2px solid #dee2e6;'>Unit Price</th>
+                                    <th style='padding: 10px; text-align: right; border-bottom: 2px solid #dee2e6;'>Total</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {items_html}
+                            </tbody>
+                            <tfoot>
+                                <tr style='background-color: #f8f9fa; font-weight: bold;'>
+                                    <td colspan='3' style='padding: 10px; text-align: right; border-top: 2px solid #dee2e6;'>Total Amount:</td>
+                                    <td style='padding: 10px; text-align: right; border-top: 2px solid #dee2e6;'>{total_amount:,.2f} MMK</td>
+                                </tr>
+                            </tfoot>
+                        </table>
+                    </div>
+                    
+                    <p style='margin-top: 20px;'>The stock that was blocked for this order has been released and is now available for other orders.</p>
+                    <p>You can place a new order anytime through the chatbot.</p>
+                """
+                
+                mr_email_html = create_email_template(
+                    title="Order Cancelled",
+                    content=mr_content,
+                    footer_text="If you have any questions, please contact your distributor or reply to this email."
+                )
+                
+                send_email(
+                    mr.email,
+                    f"⚠️ Order {order.order_id} - Cancelled",
+                    mr_email_html,
+                    'order_cancelled_customer',
+                    order_id=order.order_id,
+                    receiver_name=mr.name
+                )
+                
+                # Email to all distributors in the area
+                for distributor in dealers_in_area:
+                    distributor_content = f"""
+                        <h2 style='color:#ff9800; margin-top:0;'>⚠️ Order Cancellation Notification</h2>
+                        <p>Dear <strong>{distributor.name}</strong>,</p>
+                        <p>This is to inform you that order <strong>{order.order_id}</strong> placed by MR <strong>{mr.name}</strong> has been cancelled.</p>
+                        
+                        <div class='info-box'>
+                            <h3 style='margin-top: 0;'>Order Details</h3>
+                            <p style='margin: 5px 0;'><strong>Order ID:</strong> {order.order_id}</p>
+                            <p style='margin: 5px 0;'><strong>MR Name:</strong> {mr.name}</p>
+                            <p style='margin: 5px 0;'><strong>MR Email:</strong> <a href='mailto:{mr.email}'>{mr.email}</a></p>
+                            <p style='margin: 5px 0;'><strong>Area:</strong> {order.mr.area if order.mr else 'N/A'}</p>
+                            <p style='margin: 5px 0;'><strong>Order Date:</strong> {order.created_at.strftime('%B %d, %Y at %I:%M %p') if order.created_at else 'N/A'}</p>
+                            <p style='margin: 5px 0;'><strong>Cancellation Date:</strong> {datetime.utcnow().strftime('%B %d, %Y at %I:%M %p')}</p>
+                        </div>
+                        
+                        <div class='info-box'>
+                            <h3 style='margin-top: 0;'>Order Items</h3>
+                            <table style='width: 100%; border-collapse: collapse; margin-top: 10px;'>
+                                <thead>
+                                    <tr style='background-color: #f8f9fa;'>
+                                        <th style='padding: 10px; text-align: left; border-bottom: 2px solid #dee2e6;'>Product Name</th>
+                                        <th style='padding: 10px; text-align: center; border-bottom: 2px solid #dee2e6;'>Quantity</th>
+                                        <th style='padding: 10px; text-align: right; border-bottom: 2px solid #dee2e6;'>Unit Price</th>
+                                        <th style='padding: 10px; text-align: right; border-bottom: 2px solid #dee2e6;'>Total</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {items_html}
+                                </tbody>
+                                <tfoot>
+                                    <tr style='background-color: #f8f9fa; font-weight: bold;'>
+                                        <td colspan='3' style='padding: 10px; text-align: right; border-top: 2px solid #dee2e6;'>Total Amount:</td>
+                                        <td style='padding: 10px; text-align: right; border-top: 2px solid #dee2e6;'>{total_amount:,.2f} MMK</td>
+                                    </tr>
+                                </tfoot>
+                            </table>
+                        </div>
+                        
+                        <div class='warning-box'>
+                            <h3 style='margin-top: 0;'>Stock Status</h3>
+                            <p style='margin: 5px 0;'>The stock that was blocked for this order has been automatically released and is now available for other orders.</p>
+                        </div>
+                    """
+                    
+                    distributor_email_html = create_email_template(
+                        title="Order Cancellation Notification",
+                        content=distributor_content,
+                        footer_text="This is an automated notification. Please check your inventory management system for updated stock levels."
+                    )
+                    
+                    send_email(
+                        distributor.email,
+                        f"⚠️ Order {order.order_id} Cancelled by MR {mr.name}",
+                        distributor_email_html,
+                        'order_cancelled_distributor',
+                        order_id=order.order_id,
+                        receiver_name=distributor.name
+                    )
+                
+                self.logger.info(f"Order cancellation emails sent for order {order.order_id}")
+            except Exception as email_e:
+                self.logger.error(f"Error sending cancellation emails: {str(email_e)}")
+                # Don't fail the cancellation if email fails
+            
+            return {
+                'success': True,
+                'message': f"Order {order_id} has been cancelled successfully.",
+                'action_buttons': [
+                    {'text': 'View All Orders', 'action': 'track_order'},
+                    {'text': 'Back to Home', 'action': 'home'}
+                ]
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error cancelling order: {str(e)}")
+            db.session.rollback()
+            return {
+                'success': False,
+                'message': f"Error cancelling order: {str(e)}"
             }
     
     def reject_order_by_distributor(self, order_id, distributor_user_id, rejection_reason=None):
@@ -1044,7 +1598,14 @@ These products will be automatically ordered when new stock arrives. Track with 
                     footer_text="If you have any questions, please contact your distributor or reply to this email."
                 )
                 
-                send_email(mr.email, f"❌ Order {order.order_id} - Rejected", email_html, 'order_rejected')
+                send_email(
+                    mr.email, 
+                    f"❌ Order {order.order_id} - Rejected", 
+                    email_html, 
+                    'order_rejected',
+                    order_id=order.order_id,
+                    receiver_name=mr.name
+                )
             
             return {
                 'success': True,
@@ -1145,20 +1706,30 @@ These products will be automatically ordered when new stock arrives. Track with 
                 'success': False,
                 'message': "This order doesn't belong to your area."
             }
-        # Compose table
+        # Compose table with FOC information
         items = []
         for item in order.order_items:
             quantity = item.quantity or 0
+            free_quantity = getattr(item, 'free_quantity', 0) or 0
             items.append({
                 'product_code': item.product_code,
                 'product_name': item.product.product_name,
                 'quantity': quantity,
+                'free_quantity': free_quantity,
+                'total_quantity': quantity + free_quantity,
                 'unit_price': item.unit_price,
                 'total_price': item.total_price
             })
         table = "| Product | Quantity | Unit Price | Total |\n|--------|---------|-----------|-------|\n"
         for row in items:
-            table += f"| {row['product_name']} ({row['product_code']}) | {row['quantity']} | ${row['unit_price']} | ${row['total_price']} |\n"
+            # Get FOC quantity if available
+            free_qty = row.get('free_quantity', 0)
+            quantity = row.get('quantity', 0)
+            if free_qty and free_qty > 0:
+                qty_display = f"{quantity} paid + {free_qty} FREE = {quantity + free_qty} total"
+            else:
+                qty_display = str(quantity)
+            table += f"| {row['product_name']} | {qty_display} | {row['unit_price']:,.2f} MMK | {row['total_price']:,.2f} MMK |\n"
         status = order.status
         
         summary = f"**Order ID:** {order.order_id}\n**Status:** {status}\n**Placed By:** {order.mr.name} ({order.mr.role})\n\n" + table
@@ -1197,14 +1768,14 @@ These products will be automatically ordered when new stock arrives. Track with 
             """
             for item in order_items:
                 quantity = item.quantity or 0
-                table += f"<tr style='background:#f7f8fa;'><td>{item.product.product_name} ({item.product_code})</td><td>{quantity}</td><td>${item.unit_price}</td><td>${item.total_price}</td></tr>"
+                table += f"<tr style='background:#f7f8fa;'><td>{item.product.product_name}</td><td>{quantity}</td><td>{item.unit_price:,.2f} MMK</td><td>{item.total_price:,.2f} MMK</td></tr>"
             table += "</table>"
             # --- LLM summary ---
             llm = self.llm_service.groq_service.client if hasattr(self.llm_service, 'groq_service') else None
             user_block = f"<b>Order Placed By:</b> {placed_by_user.name} ({placed_by_user.role}) — {placed_by_user.email}<br>Phone: {placed_by_user.phone}" if placed_by_user else ''
             summary = ""
             if llm:
-                prompt = f"You are an AI assistant at Quantum Blue. Summarize the following order for a distributor, focusing on clarity, shipment urgency, and next steps.\nOrder ID: {order.order_id}\nCustomer: {placed_by_user.name}\nTotal: ${order.total_amount}\nArea: {order.mr.area if order.mr else 'N/A'}.\nSay: 'Please confirm or discuss changes/next steps.'\nKeep it one concise, friendly paragraph."
+                prompt = f"You are an AI assistant at Quantum Blue. Summarize the following order for a distributor, focusing on clarity, shipment urgency, and next steps.\nOrder ID: {order.order_id}\nCustomer: {placed_by_user.name}\nTotal: {order.total_amount:,.2f} MMK\nArea: {order.mr.area if order.mr else 'N/A'}.\nSay: 'Please confirm or discuss changes/next steps.'\nKeep it one concise, friendly paragraph."
                 response = llm.chat.completions.create(
                     model=current_app.config.get('GROQ_MODEL', 'llama-3.3-70b-versatile'),
                     messages=[{"role": "user", "content": prompt}],
@@ -1313,13 +1884,13 @@ These products will be automatically ordered when new stock arrives. Track with 
                 tax_html = f"""
                     <div class='success-box' style='margin-top: 20px;'>
                         <h3 style='margin-top: 0; color: #059669;'>💰 Payment Summary</h3>
-                        <p style='margin: 5px 0;'><strong>Subtotal:</strong> ${order.subtotal:,.2f}</p>
-                        <p style='margin: 5px 0;'><strong>Tax (5%):</strong> ${order.tax_amount:,.2f}</p>
-                        <p style='margin: 5px 0; font-size: 1.2em;'><strong>Grand Total:</strong> ${order.total_amount:,.2f}</p>
+                        <p style='margin: 5px 0;'><strong>Subtotal:</strong> {order.subtotal:,.2f} MMK</p>
+                        <p style='margin: 5px 0;'><strong>Tax (5%):</strong> {order.tax_amount:,.2f} MMK</p>
+                        <p style='margin: 5px 0; font-size: 1.2em;'><strong>Grand Total:</strong> {order.total_amount:,.2f} MMK</p>
                     </div>
                 """
             else:
-                tax_html = f"<div style='margin-top:10px; font-size:1.2em;'><b>Order Total:</b> ${order.total_amount:,.2f}</div>"
+                tax_html = f"<div style='margin-top:10px; font-size:1.2em;'><b>Order Total:</b> {order.total_amount:,.2f} MMK</div>"
             
             content = f"""
                 <h2 style='color:#1e40af; margin-top: 0;'>New Order Notification 📦</h2>
@@ -1362,7 +1933,9 @@ These products will be automatically ordered when new stock arrives. Track with 
                 distributor.email,
                 subject,
                 html,
-                'distributor_notification'
+                'distributor_notification',
+                order_id=order.order_id,
+                receiver_name=distributor.name
             )
             self.logger.info(f"Distributor notification sent for order {order.order_id}")
         except Exception as e:
@@ -1392,20 +1965,41 @@ These products will be automatically ordered when new stock arrives. Track with 
             if customer:
                 subject = f"Invoice Generated - Order {order.order_id}"
                 html_content = self._generate_invoice_html(order, order_items, customer, distributor)
-                send_email(customer.email, subject, html_content, 'invoice_customer')
+                send_email(
+                    customer.email, 
+                    subject, 
+                    html_content, 
+                    'invoice_customer',
+                    order_id=order.order_id,
+                    receiver_name=customer.name
+                )
             
             # Email to distributor
             if distributor:
                 subject = f"Invoice Copy - Order {order.order_id}"
                 html_content = self._generate_invoice_html(order, order_items, customer, distributor, is_distributor=True)
-                send_email(distributor.email, subject, html_content, 'invoice_distributor')
+                send_email(
+                    distributor.email, 
+                    subject, 
+                    html_content, 
+                    'invoice_distributor',
+                    order_id=order.order_id,
+                    receiver_name=distributor.name
+                )
             
             # Email to company
             admin_email = current_app.config.get('ADMIN_EMAIL')
             if admin_email:
                 subject = f"Order Invoice - {order.order_id}"
                 html_content = self._generate_invoice_html(order, order_items, customer, distributor, is_admin=True)
-                send_email(admin_email, subject, html_content, 'invoice_admin')
+                send_email(
+                    admin_email, 
+                    subject, 
+                    html_content, 
+                    'invoice_admin',
+                    order_id=order.order_id,
+                    receiver_name='Admin'
+                )
             
             self.logger.info(f"Invoice emails sent for order {order.order_id}")
             
@@ -1423,8 +2017,8 @@ These products will be automatically ordered when new stock arrives. Track with 
                 <td>{item['product_code']}</td>
                 <td>{item['product_name']}</td>
                 <td>{item['quantity']}</td>
-                <td>${item['unit_price']:.2f}</td>
-                <td>${item['total_price']:.2f}</td>
+                <td>{item['unit_price']:,.2f} MMK</td>
+                <td>{item['total_price']:,.2f} MMK</td>
             </tr>
             """
         
@@ -1481,7 +2075,7 @@ These products will be automatically ordered when new stock arrives. Track with 
                     </table>
                     
                     <div class="total">
-                        <p><strong>Total Amount: ${order.total_amount:.2f}</strong></p>
+                        <p><strong>Total Amount: {order.total_amount:,.2f} MMK</strong></p>
                     </div>
                     
                     <div class="footer">
