@@ -464,7 +464,7 @@ def ensure_action_buttons(response_data, user):
 
 @chatbot_bp.route('/message', methods=['POST'])
 def process_message():
-    """Process chat message with enhanced RB (Powered by Quantum Blue AI) logic"""
+    """Process chat message with enhanced HV (Powered by Quantum Blue AI) logic"""
     try:
         from app.input_validation import (
             validate_and_sanitize_message, validate_unique_id,
@@ -511,7 +511,7 @@ def process_message():
         # Onboarding states
         if state == 'ask_unique_id':
             session['onboarding_state'] = 'get_unique_id'
-            response_text = 'Hello! Welcome to RB (Powered by Quantum Blue AI). Please enter your unique ID to continue.'
+            response_text = 'Hello! Welcome to HV (Powered by Quantum Blue AI). Please enter your unique ID to continue.'
             # Translate welcome message
             if user_language != 'en':
                 translation_service = get_translation_service()
@@ -610,7 +610,7 @@ def process_message():
             
             llm_service = get_llm_service()
             if llm_service and llm_service.client:
-                intent_prompt = f"""You are an AI assistant for RB (Powered by Quantum Blue AI). A user just logged in and you asked them what they would like to do.
+                intent_prompt = f"""You are an AI assistant for HV (Powered by Quantum Blue AI). A user just logged in and you asked them what they would like to do.
 
 User's message: "{user_message}"
 
@@ -2540,7 +2540,7 @@ def handle_general_conversation(user_message, user, context_data):
             }), 200
         
         # Generate contextual response
-        context_prompt = f"""You are Quantum Blue's AI assistant for RB (Powered by Quantum Blue AI). 
+        context_prompt = f"""You are Quantum Blue's AI assistant for HV (Powered by Quantum Blue AI). 
         
 User: {user_message}
 
@@ -2622,7 +2622,7 @@ def generate_welcome_message(user):
     if user.role == 'company':
         return f"""Welcome {user.name}! 👋
 
-**RB Company Analytics System**
+**HV Company Analytics System**
 
 I'm your database reporting assistant. I can help you:
 
@@ -4432,7 +4432,7 @@ Welcome {user.name}! I can help you export data from any table in our database.
         elif any(greeting in message_lower for greeting in ['hi', 'hello', 'hey', 'good morning', 'good afternoon']):
             response = f"""Hello {user.name}! 👋
 
-Welcome to RB Company Analytics.
+Welcome to HV Company Analytics.
 
 I'm here to help you generate database reports and export data. You can request reports from any table in our system.
 

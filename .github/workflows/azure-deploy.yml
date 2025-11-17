@@ -1,5 +1,5 @@
-# Azure App Service GitHub Actions Workflow
-name: Deploy to Azure App Service
+# Azure App Service GitHub Actions Workflow for Demo App
+name: Deploy Demo App to Azure
 
 on:
   push:
@@ -7,9 +7,10 @@ on:
   workflow_dispatch:
 
 env:
-  AZURE_WEBAPP_NAME: my-chatbot-app-73d666
+  AZURE_WEBAPP_NAME: chatbot-demo-4660
   AZURE_WEBAPP_PACKAGE_PATH: '.'
-  PYTHON_VERSION: '3.9'
+  PYTHON_VERSION: '3.11'
+  RESOURCE_GROUP: 'chatbot-rg'
 
 jobs:
   build-and-deploy:
@@ -31,20 +32,24 @@ jobs:
     - name: Install dependencies
       run: |
         source venv/bin/activate
+        pip install --upgrade pip
         pip install -r requirements.txt
     
     - name: Verify deployment files
       run: |
         echo "Checking deployment files..."
         ls -la
-        echo "Checking startup.py exists:"
-        ls -la startup.py
-        echo "Checking run.py exists:"
-        ls -la run.py
-        echo "Checking web.config exists:"
-        ls -la web.config
+        if [ -f "startup.py" ]; then
+          echo "✓ startup.py exists"
+        fi
+        if [ -f "run.py" ]; then
+          echo "✓ run.py exists"
+        fi
+        if [ -f "web.config" ]; then
+          echo "✓ web.config exists"
+        fi
         echo "Checking app directory:"
-        ls -la app/
+        ls -la app/ || echo "app directory not found"
     
     - name: Login to Azure
       uses: azure/login@v1
@@ -56,6 +61,7 @@ jobs:
       uses: azure/webapps-deploy@v2
       with:
         app-name: ${{ env.AZURE_WEBAPP_NAME }}
+        resource-group: ${{ env.RESOURCE_GROUP }}
         slot-name: 'production'
         package: ${{ env.AZURE_WEBAPP_PACKAGE_PATH }}
     
@@ -63,4 +69,5 @@ jobs:
       uses: azure/CLI@v1
       with:
         inlineScript: |
-          az webapp restart --name ${{ env.AZURE_WEBAPP_NAME }} --resource-group chatbot-rg
+          az webapp restart --name ${{ env.AZURE_WEBAPP_NAME }} --resource-group ${{ env.RESOURCE_GROUP }}
+
