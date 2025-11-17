@@ -874,7 +874,7 @@ These products will be automatically ordered when new stock arrives. Track with 
             from app.models import PendingOrderProducts
             from datetime import date
             
-            # Validation first (no transaction needed)
+            # Lock order for update (requires active transaction)
             from app.db_locking import lock_order_for_update
             order = lock_order_for_update(order_id, nowait=False)
             if not order:
@@ -1480,7 +1480,7 @@ These products will be automatically ordered when new stock arrives. Track with 
         Wrapped in single transaction for atomicity
         """
         try:
-            # Validation first (no transaction needed)
+            # Lock order for update (requires active transaction)
             from app.db_locking import lock_order_for_update
             order = lock_order_for_update(order_id, nowait=False)
             if not order:
@@ -1740,7 +1740,7 @@ These products will be automatically ordered when new stock arrives. Track with 
         Wrapped in single transaction for atomicity
         """
         try:
-            # Validation first (no transaction needed)
+            # Lock order for update (requires active transaction)
             from app.db_locking import lock_order_for_update
             order = lock_order_for_update(order_id, nowait=False)
             if not order:
@@ -1882,6 +1882,7 @@ These products will be automatically ordered when new stock arrives. Track with 
         Get order status and details
         """
         try:
+            # Lock order for update (requires active transaction)
             from app.db_locking import lock_order_for_update
             order = lock_order_for_update(order_id, nowait=False)
             if not order:

@@ -45,9 +45,19 @@ ORDER_ID_PATTERN = re.compile(r'^[A-Z0-9\-_]+$')
 PRODUCT_CODE_PATTERN = re.compile(r'^[A-Z0-9\-_]+$')
 UNIQUE_ID_PATTERN = re.compile(r'^[A-Z0-9\-_]+$')
 
-# Dangerous SQL keywords (basic protection - SQLAlchemy ORM provides primary protection)
-SQL_KEYWORDS = ['DROP', 'DELETE', 'TRUNCATE', 'ALTER', 'CREATE', 'INSERT', 'UPDATE', 
-                'EXEC', 'EXECUTE', 'UNION', 'SELECT', 'SCRIPT', '--', '/*', '*/']
+# Only block destructive SQL operations (DROP, TRUNCATE, DELETE, ALTER TABLE)
+# Allow SELECT, INSERT, UPDATE as chatbot legitimately uses these
+# SQLAlchemy ORM provides primary protection against SQL injection
+DESTRUCTIVE_SQL_PATTERNS = [
+    r'\bDROP\s+(TABLE|DATABASE|SCHEMA|INDEX|VIEW)',  # DROP TABLE/DATABASE/SCHEMA/INDEX/VIEW
+    r'\bTRUNCATE\s+TABLE',  # TRUNCATE TABLE
+    r'\bDELETE\s+FROM',  # DELETE FROM (destructive operation)
+    r'\bALTER\s+TABLE\s+\w+\s+DROP',  # ALTER TABLE ... DROP
+    r'\bDROP\s+TABLE\s+IF\s+EXISTS',  # DROP TABLE IF EXISTS
+    r';\s*DROP\s+',  # ; followed by DROP
+    r';\s*TRUNCATE\s+',  # ; followed by TRUNCATE
+    r';\s*DELETE\s+',  # ; followed by DELETE
+]
 
 
 def sanitize_string(value, max_length=None, allow_html=False):
@@ -77,15 +87,16 @@ def sanitize_string(value, max_length=None, allow_html=False):
         logger.warning(f"Input exceeded max length: {len(value)} > {max_length}")
         return None
     
-    # Check for SQL injection patterns (basic check - ORM provides primary protection)
+    # Only check for destructive SQL operations (DROP, TRUNCATE, DELETE, ALTER TABLE DROP)
+    # Allow SELECT, INSERT, UPDATE as chatbot legitimately uses these
+    # SQLAlchemy ORM provides primary protection against SQL injection
     value_upper = value.upper()
-    for keyword in SQL_KEYWORDS:
-        if keyword in value_upper:
-            # Check if it's part of a word or standalone
-            pattern = r'\b' + re.escape(keyword) + r'\b'
-            if re.search(pattern, value_upper):
-                logger.warning(f"Potential SQL injection attempt detected: {keyword}")
-                return None
+    
+    # Check for destructive SQL patterns only
+    for pattern in DESTRUCTIVE_SQL_PATTERNS:
+        if re.search(pattern, value_upper, re.IGNORECASE | re.DOTALL):
+            logger.warning(f"Potential destructive SQL operation detected: {pattern}")
+            return None
     
     # Escape HTML to prevent XSS (unless HTML is explicitly allowed)
     if not allow_html:

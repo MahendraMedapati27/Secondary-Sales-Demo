@@ -1,4 +1,4 @@
-from flask import Flask, redirect, url_for, request, jsonify
+from flask import Flask, redirect, url_for, request, jsonify, g
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager
 from flask_cors import CORS
@@ -74,12 +74,21 @@ def create_app(config_class=Config):
     # Initialize request ID and error handling
     from app.error_handling import generate_request_id, get_request_id
     
+    @app.route('/favicon.ico')
+    def favicon():
+        """Handle favicon requests - return 204 No Content to avoid 404 errors"""
+        return '', 204
+    
     @app.before_request
     def before_request():
         """Set up request context"""
         from flask import g
         import time
         from app.session_manager import enforce_session_timeout, cleanup_session
+        
+        # Skip favicon requests to reduce log clutter
+        if request.path == '/favicon.ico':
+            return
         
         g.request_id = generate_request_id()
         g.request_start_time = time.time()

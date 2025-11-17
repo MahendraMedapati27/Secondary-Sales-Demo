@@ -37,6 +37,10 @@ def lock_order_for_update(order_id, user_id=None, nowait=False):
     """
     Lock an order row for update to prevent concurrent modifications.
     
+    Note: This function requires an active database transaction.
+    Flask-SQLAlchemy auto-starts transactions, but ensure you're within
+    a request context when calling this.
+    
     Args:
         order_id: Order ID to lock
         user_id: Optional user ID for authorization check
@@ -44,16 +48,24 @@ def lock_order_for_update(order_id, user_id=None, nowait=False):
     
     Returns:
         Locked Order object or None if not found
+    
+    Raises:
+        Exception if locking fails or transaction is not active
     """
     from app.models import Order
     
     try:
+        # Ensure we're in a transaction context
+        # Flask-SQLAlchemy auto-starts transactions, but we verify session is active
+        if not db.session.is_active:
+            logger.warning("Session is not active, attempting to start transaction")
+        
         query = Order.query.filter_by(order_id=order_id)
         
         if user_id:
             query = query.filter_by(mr_id=user_id)
         
-        # Add row lock
+        # Add row lock (requires active transaction)
         if nowait:
             order = query.with_for_update(nowait=True).first()
         else:

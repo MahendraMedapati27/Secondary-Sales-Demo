@@ -527,10 +527,9 @@ def process_message():
                 return jsonify({'response': 'Language updated'}), 200
             
             # Validate and sanitize unique_id
-            unique_id_raw = user_message.strip().upper()
-            unique_id = validate_unique_id(unique_id_raw)
-            
-            if not unique_id:
+            unique_id_raw = user_message.strip()
+            # validate_unique_id returns boolean, so we check it and use the raw value if valid
+            if not validate_unique_id(unique_id_raw):
                 response_text = 'Please enter a valid unique ID.'
                 if user_language != 'en':
                     translation_service = get_translation_service()
@@ -538,6 +537,8 @@ def process_message():
                         response_text = translation_service.translate(response_text, user_language)
                 return jsonify({'response': response_text}), 200
             
+            # Use the validated raw value (not the boolean return)
+            unique_id = unique_id_raw
             db_service = get_db_service()
             user = db_service.get_user_by_unique_id(unique_id)
             
@@ -3165,15 +3166,23 @@ def get_product_details():
         if not product_id_raw and not product_name_raw:
             return jsonify({'error': 'Product ID or name is required'}), 400
         
-        # Sanitize product_id if provided
+        # Sanitize product_id if provided - can be string or integer
         product_id = None
+        product_id_str = None
         if product_id_raw:
+            # Try to convert to int if possible, but also keep as string for search
             try:
                 product_id = int(product_id_raw)
                 if product_id <= 0:
-                    return jsonify({'error': 'Invalid product ID'}), 400
+                    product_id = None
+                else:
+                    product_id_str = str(product_id_raw)  # Keep original as string for search
             except (ValueError, TypeError):
-                return jsonify({'error': 'Invalid product ID format'}), 400
+                # If not an integer, treat as string (could be product name or string ID)
+                product_id_str = str(product_id_raw).strip()
+                if not product_id_str:
+                    product_id = None
+                    product_id_str = None
         
         # Sanitize product_name if provided
         product_name = None
@@ -3186,16 +3195,25 @@ def get_product_details():
         if not search_service.is_available():
             return jsonify({'error': 'Azure AI Search is not configured'}), 503
         
-        # Try to get product by name first, then by ID
+        # Try to get product by name first, then by ID/string
         product = None
         if product_name:
             product = search_service.get_product_by_name(product_name)
         
-        if not product and product_id:
-            # Search by ID
-            results = search_service.search_products(product_id, top=1)
+        if not product and product_id_str:
+            # Search by ID string (could be integer ID or product name)
+            results = search_service.search_products(product_id_str, top=10)
             if results:
-                product = results[0]
+                # If we have a numeric ID, try to find exact match first
+                if product_id:
+                    for p in results:
+                        p_id = p.get('id') or p.get('product_id')
+                        if p_id and (str(p_id) == str(product_id) or int(p_id) == product_id):
+                            product = p
+                            break
+                # If no exact match or not numeric, use first result
+                if not product:
+                    product = results[0]
         
         if not product:
             return jsonify({'error': 'Product not found'}), 404
@@ -3227,6 +3245,8 @@ def get_product_details():
 def cancel_order_action():
     """Cancel order by MR"""
     try:
+        from app.input_validation import validate_and_sanitize_order_id
+        
         user_id = session.get('user_id')
         if not user_id:
             return jsonify({'error': 'User not logged in'}), 401

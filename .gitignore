@@ -85,6 +85,21 @@ htmlcov/
 *.md
 !README.md
 
+# Environment and config files
+current_env_vars.json
+translation_cache.json
+
+# Test files
+test_*.py
+verify_*.py
+
+# PowerShell scripts
+*.ps1
+
+# Excel files (data files)
+*.xlsx
+*.xls
+
 # Temporary Files
 *.tmp
 *.temp

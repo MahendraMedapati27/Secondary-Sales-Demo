@@ -372,8 +372,7 @@ document.head.appendChild(script);
     All old code has been completely removed.
 -->
 
-<!-- Avatar Functions (for chat integration) -->
-<script src="{{ url_for('static', filename='js/avatar.js') }}?v={{ cache_buster if cache_buster else range(1000, 9999) | random }}&t={{ range(1000, 9999) | random }}"></script>
+<!-- Avatar Functions (for chat integration) - Using three_avatar.js instead of avatar.js -->
 <!-- i18n initialization must load before enhanced_chat.js -->
 <script src="{{ url_for('static', filename='js/i18n.js') }}?v={{ cache_buster if cache_buster else range(1000, 9999) | random }}&t={{ range(1000, 9999) | random }}"></script>
 <script src="{{ url_for('static', filename='js/enhanced_chat.js') }}?v={{ cache_buster if cache_buster else range(1000, 9999) | random }}&t={{ range(1000, 9999) | random }}"></script>
