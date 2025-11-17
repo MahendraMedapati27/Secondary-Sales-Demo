@@ -32,6 +32,13 @@ class Config:
     AZURE_SEARCH_INDEX_NAME = os.getenv('AZURE_SEARCH_INDEX_NAME', 'products-index')
     
     # ------------------------------------------------------------------------
+    ## AZURE TRANSLATOR CONFIGURATION
+    # ------------------------------------------------------------------------
+    AZURE_TRANSLATOR_ENDPOINT = os.getenv('AZURE_TRANSLATOR_ENDPOINT', 'https://api.cognitive.microsofttranslator.com')
+    AZURE_TRANSLATOR_API_KEY = os.getenv('AZURE_TRANSLATOR_API_KEY')
+    AZURE_TRANSLATOR_REGION = os.getenv('AZURE_TRANSLATOR_REGION', 'eastus2')
+    
+    # ------------------------------------------------------------------------
     ## AZURE BLOB STORAGE CONFIGURATION
     # ------------------------------------------------------------------------
     AZURE_STORAGE_CONNECTION_STRING = os.getenv('AZURE_STORAGE_CONNECTION_STRING')
@@ -62,11 +69,12 @@ class Config:
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     
     SQLALCHEMY_ENGINE_OPTIONS = {
-        'pool_pre_ping': True,
-        'pool_size': int(os.getenv('DB_POOL_SIZE', 5)),
-        'max_overflow': int(os.getenv('DB_MAX_OVERFLOW', 10)),
-        'pool_recycle': int(os.getenv('DB_POOL_RECYCLE', 1800)),
-        'pool_timeout': int(os.getenv('DB_POOL_TIMEOUT', 30)),
+        'pool_pre_ping': True,  # Verify connections before using
+        'pool_size': int(os.getenv('DB_POOL_SIZE', 15)),  # Increased from 5 to 15
+        'max_overflow': int(os.getenv('DB_MAX_OVERFLOW', 25)),  # Increased from 10 to 25
+        'pool_recycle': int(os.getenv('DB_POOL_RECYCLE', 1800)),  # Recycle connections after 30 minutes
+        'pool_timeout': int(os.getenv('DB_POOL_TIMEOUT', 30)),  # Timeout waiting for connection
+        'echo_pool': os.getenv('DB_ECHO_POOL', 'False').lower() == 'true',  # Log pool events for debugging
     }
     
     if SQL_SERVER:
@@ -81,8 +89,15 @@ class Config:
         }
     
     # ------------------------------------------------------------------------
-    ## EMAIL/SMTP CONFIGURATION
+    ## EMAIL CONFIGURATION
     # ------------------------------------------------------------------------
+    # Microsoft Graph API Configuration (replacing SMTP)
+    MS_GRAPH_TENANT_ID = os.getenv('MS_GRAPH_TENANT_ID')
+    MS_GRAPH_CLIENT_ID = os.getenv('MS_GRAPH_CLIENT_ID')
+    MS_GRAPH_CLIENT_SECRET = os.getenv('MS_GRAPH_CLIENT_SECRET')
+    MS_GRAPH_SENDER_EMAIL = os.getenv('MS_GRAPH_SENDER_EMAIL')  # Email address to send from (must be in Azure AD)
+    
+    # Legacy SMTP Configuration (kept for backward compatibility, but not used)
     MAIL_SERVER = os.getenv('MAIL_SERVER', 'smtp.gmail.com')
     MAIL_PORT = int(os.getenv('MAIL_PORT', 587))
     MAIL_USE_TLS = os.getenv('MAIL_USE_TLS', 'True').lower() == 'true'

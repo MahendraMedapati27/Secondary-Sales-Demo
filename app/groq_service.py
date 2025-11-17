@@ -103,13 +103,22 @@ Output **ONLY** one of the following two words: **PERFORM_SEARCH** or **NO_SEARC
     # ------------------------------------------------------------------------
     
     def generate_response(self, user_message, conversation_history=None, context_data=None):
-        """Generate response using Groq"""
+        """Generate response using Groq with timeout and circuit breaker"""
+        from app.timeout_utils import with_timeout, get_timeout
+        from app.circuit_breaker import get_circuit_breaker
+        from app.error_handling import ExternalServiceError
+        
         start_time = time.time()
         
         if not self.client:
             return self._generate_fallback_response(user_message, context_data, start_time)
         
-        try:
+        # Get circuit breaker for Groq
+        breaker = get_circuit_breaker('groq', failure_threshold=5, recovery_timeout=60)
+        
+        # Define the actual API call function
+        @with_timeout(get_timeout('llm'), 'Groq API call')
+        def _call_groq_api():
             system_message = self._build_system_message(context_data)
             messages = [{"role": "system", "content": system_message}]
             
@@ -130,7 +139,19 @@ Output **ONLY** one of the following two words: **PERFORM_SEARCH** or **NO_SEARC
                 top_p=0.95
             )
             
-            assistant_message = response.choices[0].message.content
+            return response.choices[0].message.content
+        
+        try:
+            # Call with circuit breaker protection
+            assistant_message = breaker.call(
+                _call_groq_api,
+                fallback=lambda: None  # Will use fallback response below
+            )
+            
+            if assistant_message is None:
+                # Circuit breaker used fallback
+                return self._generate_fallback_response(user_message, context_data, start_time)
+            
             response_time = time.time() - start_time
             
             if self._should_format_as_table(user_message):
@@ -143,7 +164,7 @@ Output **ONLY** one of the following two words: **PERFORM_SEARCH** or **NO_SEARC
             }
         
         except Exception as e:
-            logger.error(f'Groq API error: {str(e)}')
+            logger.error(f'Groq API error: {str(e)}', exc_info=True)
             return self._generate_fallback_response(user_message, context_data, start_time)
     
     def _build_system_message(self, context_data):

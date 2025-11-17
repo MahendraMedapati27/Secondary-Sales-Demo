@@ -464,3 +464,113 @@ class EmailLog(db.Model):
             'created_at': self.created_at.isoformat() if self.created_at else None
         }
 
+class Notification(db.Model):
+    """Notification model for real-time notifications"""
+    __tablename__ = 'notifications'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
+    notification_type = db.Column(db.String(50), nullable=False, index=True)  # 'new_order', 'order_approved', 'order_rejected', 'stock_arrival', 'low_stock', 'payment_reminder', 'order_status_change'
+    title = db.Column(db.String(200), nullable=False)
+    message = db.Column(db.Text, nullable=False)
+    data = db.Column(db.Text, nullable=True)  # JSON string for additional data (order_id, product_code, etc.)
+    is_read = db.Column(db.Boolean, default=False, nullable=False, index=True)
+    read_at = db.Column(db.DateTime, nullable=True)
+    action_url = db.Column(db.String(500), nullable=True)  # URL to navigate when notification is clicked
+    priority = db.Column(db.String(20), default='normal')  # 'low', 'normal', 'high', 'urgent'
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+    
+    # Relationships
+    user = db.relationship('User', backref='notifications', lazy=True)
+    
+    def __repr__(self):
+        return f'<Notification {self.id} - {self.notification_type} for User {self.user_id}>'
+    
+    def to_dict(self):
+        """Convert to dictionary"""
+        return {
+            'id': self.id,
+            'user_id': self.user_id,
+            'notification_type': self.notification_type,
+            'title': self.title,
+            'message': self.message,
+            'data': self.data,
+            'is_read': self.is_read,
+            'read_at': self.read_at.isoformat() if self.read_at else None,
+            'action_url': self.action_url,
+            'priority': self.priority,
+            'created_at': self.created_at.isoformat() if self.created_at else None
+        }
+    
+    def mark_as_read(self):
+        """Mark notification as read"""
+        self.is_read = True
+        self.read_at = datetime.utcnow()
+        db.session.commit()
+
+class NotificationPreference(db.Model):
+    """User notification preferences"""
+    __tablename__ = 'notification_preferences'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, unique=True, index=True)
+    
+    # Notification type preferences (True = enabled, False = disabled)
+    new_order_enabled = db.Column(db.Boolean, default=True)
+    order_approved_enabled = db.Column(db.Boolean, default=True)
+    order_rejected_enabled = db.Column(db.Boolean, default=True)
+    stock_arrival_enabled = db.Column(db.Boolean, default=True)
+    low_stock_enabled = db.Column(db.Boolean, default=True)
+    payment_reminder_enabled = db.Column(db.Boolean, default=True)
+    order_status_change_enabled = db.Column(db.Boolean, default=True)
+    
+    # Delivery preferences
+    in_app_enabled = db.Column(db.Boolean, default=True)
+    push_enabled = db.Column(db.Boolean, default=True)
+    email_enabled = db.Column(db.Boolean, default=False)  # Optional email notifications
+    
+    # Push notification subscription (stored as JSON)
+    push_subscription = db.Column(db.Text, nullable=True)  # JSON string for browser push subscription
+    
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    user = db.relationship('User', backref='notification_preference', uselist=False, lazy=True)
+    
+    def __repr__(self):
+        return f'<NotificationPreference for User {self.user_id}>'
+    
+    def to_dict(self):
+        """Convert to dictionary"""
+        return {
+            'id': self.id,
+            'user_id': self.user_id,
+            'new_order_enabled': self.new_order_enabled,
+            'order_approved_enabled': self.order_approved_enabled,
+            'order_rejected_enabled': self.order_rejected_enabled,
+            'stock_arrival_enabled': self.stock_arrival_enabled,
+            'low_stock_enabled': self.low_stock_enabled,
+            'payment_reminder_enabled': self.payment_reminder_enabled,
+            'order_status_change_enabled': self.order_status_change_enabled,
+            'in_app_enabled': self.in_app_enabled,
+            'push_enabled': self.push_enabled,
+            'email_enabled': self.email_enabled,
+            'push_subscription': self.push_subscription,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None
+        }
+    
+    def is_type_enabled(self, notification_type):
+        """Check if a specific notification type is enabled"""
+        type_map = {
+            'new_order': self.new_order_enabled,
+            'order_approved': self.order_approved_enabled,
+            'order_rejected': self.order_rejected_enabled,
+            'stock_arrival': self.stock_arrival_enabled,
+            'low_stock': self.low_stock_enabled,
+            'payment_reminder': self.payment_reminder_enabled,
+            'order_status_change': self.order_status_change_enabled
+        }
+        return type_map.get(notification_type, True)  # Default to enabled if type not found
+

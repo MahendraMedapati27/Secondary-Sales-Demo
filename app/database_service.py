@@ -21,19 +21,24 @@ class DatabaseService:
     
     def create_user(self, name, email, phone, role='mr', pharmacy_name=None, area=None, discount=0.0):
         """Create new user with updated schema fields"""
-        user = User(
-            name=name,
-            email=email,
-            phone=phone,
-            role=role,  # 'mr' or 'distributor'
-            pharmacy_name=pharmacy_name,
-            area=area,
-            discount=discount
-        )
-        user.generate_unique_id()
-        db.session.add(user)
-        db.session.commit()
-        return user
+        try:
+            user = User(
+                name=name,
+                email=email,
+                phone=phone,
+                role=role,  # 'mr' or 'distributor'
+                pharmacy_name=pharmacy_name,
+                area=area,
+                discount=discount
+            )
+            user.generate_unique_id()
+            db.session.add(user)
+            db.session.commit()
+            return user
+        except Exception as e:
+            self.logger.error(f"Error creating user: {str(e)}")
+            db.session.rollback()
+            raise
     
     def get_user_by_unique_id(self, unique_id):
         """Get user by unique ID"""
@@ -57,13 +62,18 @@ class DatabaseService:
     
     def update_user_area(self, user_id, area):
         """Update user's area"""
-        user = User.query.get(user_id)
-        if user:
-            user.area = area
-            user.updated_at = datetime.utcnow()
-            db.session.commit()
-            return user
-        return None
+        try:
+            user = User.query.get(user_id)
+            if user:
+                user.area = area
+                user.updated_at = datetime.utcnow()
+                db.session.commit()
+                return user
+            return None
+        except Exception as e:
+            self.logger.error(f"Error updating user area: {str(e)}")
+            db.session.rollback()
+            raise
     
     # Product Management
     def get_all_products(self):
@@ -156,32 +166,48 @@ class DatabaseService:
     # Order Management
     def create_order(self, mr_id, mr_unique_id, customer_id=None, customer_unique_id=None):
         """Create new order"""
-        order = Order(
-            mr_id=mr_id,
-            mr_unique_id=mr_unique_id,
-            customer_id=customer_id,
-            customer_unique_id=customer_unique_id
-        )
-        order.generate_order_id()
-        db.session.add(order)
-        db.session.commit()
-        return order
+        try:
+            order = Order(
+                mr_id=mr_id,
+                mr_unique_id=mr_unique_id,
+                customer_id=customer_id,
+                customer_unique_id=customer_unique_id
+            )
+            order.generate_order_id()
+            db.session.add(order)
+            db.session.commit()
+            return order
+        except Exception as e:
+            self.logger.error(f"Error creating order: {str(e)}")
+            try:
+                db.session.rollback()
+            except Exception:
+                pass
+            raise
     
     def add_order_item(self, order_id, product_id, product_code, product_name, quantity, unit_price):
         """Add item to order"""
-        total_price = quantity * unit_price
-        order_item = OrderItem(
-            order_id=order_id,
-            product_id=product_id,
-            product_code=product_code,
-            product_name=product_name,
-            quantity=quantity,
-            unit_price=unit_price,
-            total_price=total_price
-        )
-        db.session.add(order_item)
-        db.session.commit()
-        return order_item
+        try:
+            total_price = quantity * unit_price
+            order_item = OrderItem(
+                order_id=order_id,
+                product_id=product_id,
+                product_code=product_code,
+                product_name=product_name,
+                quantity=quantity,
+                unit_price=unit_price,
+                total_price=total_price
+            )
+            db.session.add(order_item)
+            db.session.commit()
+            return order_item
+        except Exception as e:
+            self.logger.error(f"Error adding order item: {str(e)}")
+            try:
+                db.session.rollback()
+            except Exception:
+                pass
+            raise
     
     def update_order_total(self, order_id):
         """Update order total amount"""
@@ -307,12 +333,11 @@ class DatabaseService:
             db.session.commit()
             self.logger.info(f"Saved conversation for user {user_id}")
             return conversation
-            
         except Exception as e:
             self.logger.error(f"Error saving conversation: {str(e)}")
             try:
                 db.session.rollback()
-            except:
+            except Exception:
                 pass
             return None
     
@@ -324,13 +349,16 @@ class DatabaseService:
     
     # Cart Management
     def add_to_cart(self, user_id, product_id, product_code, product_name, quantity, unit_price):
-        """Add item to user's cart"""
+        """Add item to user's cart with row-level locking"""
         try:
-            # Check if item already exists in cart
-            existing_item = CartItem.query.filter_by(
+            from app.db_locking import with_row_lock
+            
+            # Check if item already exists in cart (with lock to prevent race conditions)
+            existing_item_query = CartItem.query.filter_by(
                 user_id=user_id, 
                 product_id=product_id
-            ).first()
+            )
+            existing_item = with_row_lock(existing_item_query, nowait=False).first()
             
             if existing_item:
                 # Update quantity
@@ -354,11 +382,13 @@ class DatabaseService:
                 db.session.add(cart_item)
                 db.session.commit()
                 return cart_item, "Item added to cart"
-            
         except Exception as e:
             self.logger.error(f"Error adding to cart: {str(e)}")
-            db.session.rollback()
-            return None, f"Error adding to cart: {str(e)}"
+            try:
+                db.session.rollback()
+            except Exception:
+                pass
+            raise
     
     def get_cart_items(self, user_id):
         """Get user's cart items"""
@@ -381,7 +411,10 @@ class DatabaseService:
             return None, "Cart item not found"
         except Exception as e:
             self.logger.error(f"Error updating cart item: {str(e)}")
-            db.session.rollback()
+            try:
+                db.session.rollback()
+            except Exception:
+                pass
             return None, f"Error updating cart item: {str(e)}"
     
     def remove_from_cart(self, cart_item_id):
@@ -395,7 +428,10 @@ class DatabaseService:
             return False, "Cart item not found"
         except Exception as e:
             self.logger.error(f"Error removing from cart: {str(e)}")
-            db.session.rollback()
+            try:
+                db.session.rollback()
+            except Exception:
+                pass
             return False, f"Error removing from cart: {str(e)}"
     
     def clear_cart(self, user_id):
@@ -406,7 +442,10 @@ class DatabaseService:
             return True, "Cart cleared"
         except Exception as e:
             self.logger.error(f"Error clearing cart: {str(e)}")
-            db.session.rollback()
+            try:
+                db.session.rollback()
+            except Exception:
+                pass
             return False, f"Error clearing cart: {str(e)}"
     
     # Dealer Stock Management
@@ -441,24 +480,35 @@ class DatabaseService:
             return None
         except Exception as e:
             self.logger.error(f"Error confirming dealer stock: {str(e)}")
-            db.session.rollback()
+            try:
+                db.session.rollback()
+            except Exception:
+                pass
             return None
     
     # Customer Management
     def create_customer(self, name, email, phone, address, mr_id, mr_unique_id):
         """Create new customer"""
-        customer = Customer(
-            name=name,
-            email=email,
-            phone=phone,
-            address=address,
-            mr_id=mr_id,
-            mr_unique_id=mr_unique_id
-        )
-        customer.generate_unique_id()
-        db.session.add(customer)
-        db.session.commit()
-        return customer
+        try:
+            customer = Customer(
+                name=name,
+                email=email,
+                phone=phone,
+                address=address,
+                mr_id=mr_id,
+                mr_unique_id=mr_unique_id
+            )
+            customer.generate_unique_id()
+            db.session.add(customer)
+            db.session.commit()
+            return customer
+        except Exception as e:
+            self.logger.error(f"Error creating customer: {str(e)}")
+            try:
+                db.session.rollback()
+            except Exception:
+                pass
+            raise
     
     def get_customers_by_mr(self, mr_id):
         """Get customers for a specific MR"""
@@ -473,22 +523,54 @@ class DatabaseService:
                                     requested_quantity, user_id, user_email):
         """Create a pending order product entry for out-of-stock items"""
         try:
+            # Validate all required fields before creating
+            if not product_code or not str(product_code).strip():
+                self.logger.error("product_code is required for pending order")
+                return None
+            
+            if not product_name or not str(product_name).strip():
+                self.logger.error("product_name is required for pending order")
+                return None
+            
+            if requested_quantity is None or requested_quantity < 0:
+                self.logger.error(f"Invalid requested_quantity: {requested_quantity}")
+                return None
+            
+            if not user_id:
+                self.logger.error("user_id is required for pending order")
+                return None
+            
+            # Ensure user_email is not None or empty
+            if not user_email or not str(user_email).strip():
+                # Try to get email from user
+                user = User.query.get(user_id)
+                if user and user.email:
+                    user_email = user.email
+                else:
+                    self.logger.warning(f"No email found for user {user_id}, using placeholder")
+                    user_email = 'no-email@placeholder.com'  # Ensure non-null value
+            
             pending_order = PendingOrderProducts(
-                original_order_id=original_order_id,
-                product_code=product_code,
-                product_name=product_name,
-                requested_quantity=requested_quantity,
-                user_id=user_id,
-                user_email=user_email,
+                original_order_id=original_order_id if original_order_id else None,
+                product_code=str(product_code).strip(),
+                product_name=str(product_name).strip(),
+                requested_quantity=int(requested_quantity),
+                user_id=int(user_id),
+                user_email=str(user_email).strip(),
                 status='pending'
             )
             db.session.add(pending_order)
             db.session.commit()
-            self.logger.info(f"Created pending order for product {product_code}")
+            self.logger.info(f"Created pending order for product {product_code}, quantity {requested_quantity}, user {user_id}")
             return pending_order
         except Exception as e:
             self.logger.error(f"Error creating pending order product: {str(e)}")
-            db.session.rollback()
+            import traceback
+            traceback.print_exc()
+            try:
+                db.session.rollback()
+            except Exception:
+                pass
             return None
     
     def get_pending_orders(self, user_id=None, status='pending'):

@@ -167,8 +167,8 @@
 
     <!-- Right Side: Chatbot Interface -->
     <div class="chat-section">
-        <div class="card shadow-lg h-100">
-            <div class="card-header bg-gradient-primary text-white d-flex justify-content-between align-items-center">
+        <div class="card shadow-lg h-100" style="position: relative;">
+            <div class="card-header bg-gradient-primary text-white d-flex justify-content-between align-items-center" style="position: relative;">
                 <div class="d-flex align-items-center">
                     <img src="/static/Images/Q_logo_quantum_blue-removebg-preview.png" alt="Quantum Blue Logo" style="width: 180px; height: 80px; margin-right: -50px; margin-left: -50px; margin-top: -8px; object-fit: contain;">
                     <h6 class="mb-0 me-3" style="font-size: 1.1rem;">
@@ -176,21 +176,27 @@
                     </h6>
                 </div>
                 <div class="btn-group" role="group">
-                    <button class="btn btn-sm btn-light d-flex align-items-center gap-1" onclick="toggleUserInfoPanel()" title="Toggle User Info" id="userInfoToggleBtn">
+                    <button class="btn btn-sm btn-light d-flex align-items-center gap-1" onclick="toggleUserInfoPanel()" data-i18n-title="buttons.userInfo" title="Toggle User Info" id="userInfoToggleBtn">
                         <i class="fas fa-chevron-down" id="userInfoToggleIcon"></i>
-                        <span>User Info</span>
+                        <span data-i18n="buttons.userInfo">User Info</span>
                     </button>
-                    <a href="https://highvolt.tech/demo-ss-dashboard/" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-light d-flex align-items-center gap-1" title="Open Dashboard">
+                    <a href="https://highvolt.tech/demo-ss-dashboard/" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-light d-flex align-items-center gap-1" data-i18n-title="buttons.dashboard" title="Open Dashboard">
                         <i class="fas fa-chart-line"></i>
-                        <span>Dashboard</span>
+                        <span data-i18n="buttons.dashboard">Dashboard</span>
                     </a>
-                    <button class="btn btn-sm btn-light d-flex align-items-center gap-1" onclick="resetChat()" title="Reset Chat - Start New Conversation">
+                    <select id="languageSelector" class="btn btn-sm btn-light" style="border: 1px solid #dee2e6; padding: 6px 12px; cursor: pointer;" onchange="changeLanguage(this.value)">
+                        <option value="en">🇺🇸 English</option>
+                        <option value="my">🇲🇲 မြန်မာ (Burmese)</option>
+                        <option value="hi">🇮🇳 हिंदी (Hindi)</option>
+                        <option value="te">🇮🇳 తెలుగు (Telugu)</option>
+                    </select>
+                    <button class="btn btn-sm btn-light d-flex align-items-center gap-1" onclick="resetChat()" data-i18n-title="buttons.reset" title="Reset Chat - Start New Conversation">
                         <i class="fas fa-redo"></i>
-                        <span>Reset</span>
+                        <span data-i18n="buttons.reset">Reset</span>
                     </button>
-                    <button class="btn btn-sm btn-light d-flex align-items-center gap-1" onclick="viewCart()" title="View Cart" id="cartButton" style="display: none;">
+                    <button class="btn btn-sm btn-light d-flex align-items-center gap-1" onclick="viewCart()" data-i18n-title="buttons.cart" title="View Cart" id="cartButton" style="display: none;">
                         <i class="fas fa-shopping-cart"></i>
-                        <span>Cart</span>
+                        <span data-i18n="buttons.cart">Cart</span>
                     </button>
                 </div>
             </div>
@@ -202,21 +208,21 @@
                         <div class="user-info-item">
                             <div class="d-flex align-items-center gap-2 mb-1">
                                 <i class="fas fa-user text-primary"></i>
-                                <span class="text-muted small">User</span>
+                                <span class="text-muted small" data-i18n="labels.user">User</span>
                             </div>
                             <div class="fw-bold text-primary" id="userName">-</div>
                         </div>
                         <div class="user-info-item">
                             <div class="d-flex align-items-center gap-2 mb-1">
                                 <i class="fas fa-map-marker-alt text-primary"></i>
-                                <span class="text-muted small">Area</span>
+                                <span class="text-muted small" data-i18n="labels.area">Area</span>
                             </div>
                             <div class="fw-bold text-primary" id="userArea">-</div>
                         </div>
                         <div class="user-info-item">
                             <div class="d-flex align-items-center gap-2 mb-1">
                                 <i class="fas fa-tag text-primary"></i>
-                                <span class="text-muted small">Type</span>
+                                <span class="text-muted small" data-i18n="labels.type">Type</span>
                             </div>
                             <div class="fw-bold text-primary" id="userType">-</div>
                         </div>
@@ -239,7 +245,8 @@
                     <div class="position-relative">
                         <div class="input-group">
                             <input type="text" id="messageInput" class="form-control" 
-                                   placeholder="Enter your unique ID to start..." autocomplete="off" />
+                                   data-i18n-placeholder="placeholders.typeMessage"
+                                   placeholder="Type your message..." autocomplete="off" />
                             <button class="btn btn-primary" onclick="sendMessage()" id="sendButton" disabled>
                                 <i class="fas fa-paper-plane"></i> Send
                             </button>
@@ -284,6 +291,9 @@
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                <button type="button" class="btn btn-info" onclick="saveCartAsTemplate()">
+                    <i class="fas fa-save"></i> Save as Template
+                </button>
                 <button type="button" class="btn btn-success" onclick="placeOrder()">Confirm Cart & Place Order</button>
             </div>
         </div>
@@ -364,6 +374,8 @@ document.head.appendChild(script);
 
 <!-- Avatar Functions (for chat integration) -->
 <script src="{{ url_for('static', filename='js/avatar.js') }}?v={{ cache_buster if cache_buster else range(1000, 9999) | random }}&t={{ range(1000, 9999) | random }}"></script>
+<!-- i18n initialization must load before enhanced_chat.js -->
+<script src="{{ url_for('static', filename='js/i18n.js') }}?v={{ cache_buster if cache_buster else range(1000, 9999) | random }}&t={{ range(1000, 9999) | random }}"></script>
 <script src="{{ url_for('static', filename='js/enhanced_chat.js') }}?v={{ cache_buster if cache_buster else range(1000, 9999) | random }}&t={{ range(1000, 9999) | random }}"></script>
 
 <!-- User Info Panel Toggle Function -->

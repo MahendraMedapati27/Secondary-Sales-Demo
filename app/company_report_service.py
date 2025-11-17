@@ -39,7 +39,9 @@ class CompanyReportService:
             'model': OrderItem,
             'name': 'Order Items',
             'columns': ['id', 'order_id', 'product_id', 'product_code', 'product_name',
-                       'quantity', 'free_quantity', 'unit_price', 'total_price', 'created_at']
+                       'quantity', 'free_quantity', 'unit_price', 'total_price',
+                       'adjusted_quantity', 'adjusted_expiry_date', 'adjusted_lot_number',
+                       'adjustment_reason', 'pending_quantity', 'created_at', 'updated_at']
         },
         'products': {
             'model': Product,
@@ -84,7 +86,8 @@ class CompanyReportService:
             'model': EmailLog,
             'name': 'Email Logs',
             'columns': ['id', 'recipient', 'email_type', 'status', 'error_message',
-                       'sent_at']
+                       'order_id', 'sender_email', 'sender_name', 'receiver_email', 
+                       'receiver_name', 'subject', 'body_preview', 'created_at']
         }
     }
     
@@ -121,17 +124,28 @@ class CompanyReportService:
             model = table_info['model']
             available_columns = table_info['columns']
             
+            # Also try to get all columns from the model itself (for dynamic detection)
+            model_columns = []
+            if hasattr(model, '__table__'):
+                model_columns = [col.name for col in model.__table__.columns]
+            
+            # Merge available_columns with model_columns (prioritize available_columns order)
+            all_available_columns = available_columns.copy()
+            for col in model_columns:
+                if col not in all_available_columns:
+                    all_available_columns.append(col)
+            
             # Determine columns to export
             if selected_columns and len(selected_columns) > 0:
-                # Validate selected columns
-                columns_to_export = [col for col in selected_columns if col in available_columns]
+                # Validate selected columns against both lists
+                columns_to_export = [col for col in selected_columns if col in all_available_columns]
                 if not columns_to_export:
                     return {
                         'success': False,
                         'error': 'No valid columns selected'
                     }
             else:
-                columns_to_export = available_columns
+                columns_to_export = all_available_columns
             
             # Query the data
             query = db.session.query(model)
@@ -160,15 +174,52 @@ class CompanyReportService:
             for record in records:
                 row = []
                 for col in columns_to_export:
-                    value = getattr(record, col, '')
-                    
-                    # Format datetime objects
-                    if isinstance(value, datetime):
-                        value = value.strftime('%Y-%m-%d %H:%M:%S')
-                    
-                    # Convert None to empty string
-                    if value is None:
-                        value = ''
+                    try:
+                        # Try to get attribute value directly
+                        if hasattr(record, col):
+                            value = getattr(record, col)
+                        else:
+                            # If attribute doesn't exist, try to_dict() method if available
+                            if hasattr(record, 'to_dict'):
+                                record_dict = record.to_dict()
+                                value = record_dict.get(col, None)
+                                # If to_dict returns empty string or None, keep as None (will be converted to N/A later)
+                                if value == '':
+                                    value = None
+                            else:
+                                value = None
+                        
+                        # Format datetime objects
+                        if isinstance(value, datetime):
+                            value = value.strftime('%Y-%m-%d %H:%M:%S')
+                        elif hasattr(value, 'isoformat') and value is not None:  # Handle date objects
+                            try:
+                                value = value.isoformat()
+                            except:
+                                value = str(value)
+                        
+                        # Convert None to N/A
+                        if value is None:
+                            value = 'N/A'
+                        
+                        # Convert empty string to N/A
+                        if isinstance(value, str) and value.strip() == '':
+                            value = 'N/A'
+                        
+                        # Convert boolean to string
+                        if isinstance(value, bool):
+                            value = 'Yes' if value else 'No'
+                        
+                        # Ensure value is a string for CSV
+                        if not isinstance(value, str):
+                            value = str(value)
+                            
+                    except AttributeError:
+                        # Column doesn't exist on this model - set to N/A
+                        value = 'N/A'
+                    except Exception as e:
+                        logger.warning(f"Error extracting column {col} from record {record.id if hasattr(record, 'id') else 'unknown'}: {str(e)}")
+                        value = 'N/A'
                     
                     row.append(value)
                 

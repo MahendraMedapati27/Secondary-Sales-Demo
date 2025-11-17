@@ -11,11 +11,14 @@ from app.groq_service import GroqService
 from app.email_utils import send_otp_email, send_conversation_email
 from app.stock_management_service import StockManagementService
 from app.azure_search_service import get_search_service
+from app.translation_service import get_translation_service
 import logging
 import time
 from datetime import datetime
 import json
 import os
+from io import BytesIO
+import re
 
 chatbot_bp = Blueprint('enhanced_chatbot', __name__)
 
@@ -356,8 +359,75 @@ def get_default_action_buttons(user):
     
     return action_buttons
 
+def translate_response(data: dict, target_language: str = 'en') -> dict:
+    """
+    Translate response data to target language
+    
+    Args:
+        data: Response dictionary
+        target_language: Target language code (en, hi, te, my)
+        
+    Returns:
+        Translated response dictionary
+    """
+    if target_language == 'en' or not target_language:
+        return data
+    
+    translation_service = get_translation_service()
+    if not translation_service.is_available():
+        return data
+    
+    translated_data = data.copy()
+    
+    # Translate main response text
+    if 'response' in translated_data and isinstance(translated_data['response'], str):
+        translated_data['response'] = translation_service.translate(
+            translated_data['response'], 
+            target_language
+        )
+    
+    # Translate action buttons text
+    if 'action_buttons' in translated_data and isinstance(translated_data['action_buttons'], list):
+        for button in translated_data['action_buttons']:
+            if isinstance(button, dict) and 'text' in button:
+                button['text'] = translation_service.translate(button['text'], target_language)
+    
+    # Translate error messages
+    if 'error' in translated_data and isinstance(translated_data['error'], str):
+        translated_data['error'] = translation_service.translate(
+            translated_data['error'], 
+            target_language
+        )
+    
+    # Translate product names and descriptions
+    if 'products' in translated_data and isinstance(translated_data['products'], list):
+        for product in translated_data['products']:
+            if isinstance(product, dict):
+                if 'name' in product:
+                    product['name'] = translation_service.translate(product['name'], target_language)
+                if 'description' in product:
+                    product['description'] = translation_service.translate(product['description'], target_language)
+    
+    # Translate order details
+    if 'order_details' in translated_data:
+        order_details = translated_data['order_details']
+        if isinstance(order_details, dict):
+            # Translate order status and other text fields
+            for key in ['status', 'message', 'error']:
+                if key in order_details and isinstance(order_details[key], str):
+                    order_details[key] = translation_service.translate(order_details[key], target_language)
+    
+    return translated_data
+
 def ensure_action_buttons(response_data, user):
-    """Ensure response has action buttons, adding defaults if missing"""
+    """
+    Ensure response has action buttons, adding defaults if missing.
+    IMPORTANT: This function translates responses for the user, but the database
+    should already have the original English text saved via save_conversation().
+    """
+    # Get user's language preference from session or request
+    target_language = session.get('user_language', 'en')
+    
     # Skip adding default buttons for company users if they already have interactive_report_selection
     if isinstance(response_data, tuple):
         # Flask jsonify response (tuple)
@@ -367,21 +437,28 @@ def ensure_action_buttons(response_data, user):
             if data:
                 # Don't add default buttons if interactive components exist
                 if data.get('interactive_report_selection'):
+                    # Translate before returning (database already has English)
+                    data = translate_response(data, target_language)
                     return jsonify(data), status_code
                     
                 if 'action_buttons' not in data or not data.get('action_buttons'):
                     data['action_buttons'] = get_default_action_buttons(user)
+                
+                # Translate response for user (database already has English)
+                data = translate_response(data, target_language)
                 return jsonify(data), status_code
         return response_data
     elif isinstance(response_data, dict):
         # Dict response
         # Don't add default buttons if interactive components exist
         if response_data.get('interactive_report_selection'):
-            return response_data
+            return translate_response(response_data, target_language)
             
         if 'action_buttons' not in response_data or not response_data.get('action_buttons'):
             response_data['action_buttons'] = get_default_action_buttons(user)
-        return response_data
+        
+        # Translate response for user (database already has English)
+        return translate_response(response_data, target_language)
     
     return response_data
 
@@ -389,11 +466,38 @@ def ensure_action_buttons(response_data, user):
 def process_message():
     """Process chat message with enhanced RB (Powered by Quantum Blue AI) logic"""
     try:
-        data = request.get_json()
-        user_message = data.get('message', '').strip()
+        from app.input_validation import (
+            validate_and_sanitize_message, validate_unique_id,
+            MAX_LENGTHS, sanitize_string
+        )
         
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'Invalid JSON or missing Content-Type header'}), 400
+        
+        # Validate and sanitize message
+        user_message_raw = data.get('message', '')
+        if not isinstance(user_message_raw, str):
+            return jsonify({'error': 'Message must be a string'}), 400
+        
+        user_message = validate_and_sanitize_message(user_message_raw)
         if not user_message:
-            return jsonify({'error': 'Message cannot be empty'}), 400
+            error_msg = 'Message cannot be empty or exceeds maximum length'
+            user_language = data.get('language', session.get('user_language', 'en'))
+            if user_language != 'en':
+                translation_service = get_translation_service()
+                if translation_service.is_available():
+                    error_msg = translation_service.translate(error_msg, user_language)
+            return jsonify({'error': error_msg}), 400
+        
+        # Validate and sanitize language
+        user_language_raw = data.get('language', session.get('user_language', 'en'))
+        user_language = sanitize_string(str(user_language_raw), max_length=MAX_LENGTHS['language'])
+        if not user_language or user_language not in ['en', 'hi', 'my', 'te']:
+            user_language = 'en'  # Default to English if invalid
+        
+        # Store user language preference in session
+        session['user_language'] = user_language
         
         # Enhanced onboarding flow with unique ID
         if 'onboarding_state' not in session:
@@ -407,23 +511,54 @@ def process_message():
         # Onboarding states
         if state == 'ask_unique_id':
             session['onboarding_state'] = 'get_unique_id'
+            response_text = 'Hello! Welcome to RB (Powered by Quantum Blue AI). Please enter your unique ID to continue.'
+            # Translate welcome message
+            if user_language != 'en':
+                translation_service = get_translation_service()
+                if translation_service.is_available():
+                    response_text = translation_service.translate(response_text, user_language)
             return jsonify({
-                'response': 'Hello! Welcome to RB (Powered by Quantum Blue AI). Please enter your unique ID to continue.'
+                'response': response_text
             }), 200
 
         if state == 'get_unique_id':
-            unique_id = user_message.strip()
+            # Handle language change message
+            if user_message == 'lang_change':
+                return jsonify({'response': 'Language updated'}), 200
+            
+            # Validate and sanitize unique_id
+            unique_id_raw = user_message.strip().upper()
+            unique_id = validate_unique_id(unique_id_raw)
+            
+            if not unique_id:
+                response_text = 'Please enter a valid unique ID.'
+                if user_language != 'en':
+                    translation_service = get_translation_service()
+                    if translation_service.is_available():
+                        response_text = translation_service.translate(response_text, user_language)
+                return jsonify({'response': response_text}), 200
+            
             db_service = get_db_service()
             user = db_service.get_user_by_unique_id(unique_id)
             
             if not user:
+                response_text = 'Unique ID not found. Please check your ID and try again, or contact support for assistance.'
+                if user_language != 'en':
+                    translation_service = get_translation_service()
+                    if translation_service.is_available():
+                        response_text = translation_service.translate(response_text, user_language)
                 return jsonify({
-                    'response': 'Unique ID not found. Please check your ID and try again, or contact support for assistance.'
+                    'response': response_text
                 }), 200
             
             if not user.is_active:
+                response_text = 'Your account is inactive. Please contact support for assistance.'
+                if user_language != 'en':
+                    translation_service = get_translation_service()
+                    if translation_service.is_available():
+                        response_text = translation_service.translate(response_text, user_language)
                 return jsonify({
-                    'response': 'Your account is inactive. Please contact support for assistance.'
+                    'response': response_text
                 }), 200
             
             # Set user session
@@ -449,7 +584,13 @@ def process_message():
             else:
                 full_message = f"{welcome_message}\n\nPlease select an option below:"
             
-            return jsonify({
+            # Translate welcome message if needed
+            if user_language != 'en':
+                translation_service = get_translation_service()
+                if translation_service.is_available():
+                    full_message = translation_service.translate(full_message, user_language)
+            
+            return ensure_action_buttons(jsonify({
                 'response': full_message,
                 'action_buttons': action_buttons,
                 'user_info': {
@@ -458,7 +599,7 @@ def process_message():
                     'role': user.role,
                     'warehouse': user.area  # Use area instead of nearest_warehouse
                 }
-            }), 200
+            }), user), 200
 
         # Ask for user intent after verification
         if state == 'ask_intent':
@@ -912,43 +1053,8 @@ Respond with ONLY a JSON object:
         product_info_keywords = ['product info', 'productinfo', 'i want product info', 'show product info']
         if message_lower in product_info_keywords or (message_lower == 'product info'):
             logger.info(f"Detected Product Info button click: {user_message}")
-            # Return product search interface
-            search_service = get_search_service()
-            if not search_service.is_available():
-                response = "Product Info feature requires Azure AI Search to be configured. Please contact your administrator."
-                save_conversation(user.id, user_message, response)
-                return jsonify({
-                    'response': response,
-                    'action_buttons': [
-                        {'text': 'Place Order', 'action': 'place_order'},
-                        {'text': 'View Open Order', 'action': 'open_order'},
-                        {'text': 'Company Info', 'action': 'company_info'}
-                    ]
-                }), 200
-            
-            # Get all available products for the selection list
-            products = search_service.get_all_products(top=100)
-            product_list = []
-            for product in products:
-                # Extract product name from various possible fields
-                product_name = product.get('product_name') or product.get('name') or product.get('title') or 'Unknown Product'
-                product_list.append({
-                    'id': product.get('id') or product.get('product_id') or product_name,
-                    'name': product_name,
-                    'description': product.get('description') or product.get('content') or product.get('text') or ''
-                })
-            
-            save_conversation(user.id, user_message, "Product Info search interface opened")
-            return jsonify({
-                'response': 'Please search for a product or select from the list below:',
-                'interactive_product_search': True,
-                'products': product_list,
-                'action_buttons': [
-                    {'text': 'Place Order', 'action': 'place_order'},
-                    {'text': 'View Open Order', 'action': 'open_order'},
-                    {'text': 'Company Info', 'action': 'company_info'}
-                ]
-            }), 200
+            # Use the dedicated handler function for consistency
+            return handle_product_info_or_query(user_message, user, context_data)
         
         # Check for "track order" messages BEFORE intent classification
         # This handles messages like "track order", "I want to track an order" from the action button
@@ -1235,6 +1341,8 @@ Respond with ONLY a JSON object:
                     data = response_obj.get_json()
                     if data:
                         data['intent'] = intent
+                        # Translate response before returning
+                        data = translate_response(data, user_language)
                         return jsonify(data), status_code
             elif isinstance(response, dict):
                 response['intent'] = intent
@@ -1253,7 +1361,25 @@ def handle_order_confirmation(user, user_id):
         enhanced_order_service = get_enhanced_order_service()
         
         # Place order from cart
-        result = enhanced_order_service.place_order(user_id)
+        # Get customer details if MR - customer selection is mandatory for MRs
+        customer_id = None
+        if user.role == 'mr':
+            if 'selected_customer_id' not in session:
+                response = "To place an order, I need to know which customer you're ordering for. Please select a customer first by clicking 'Place Order'."
+                save_conversation(user.id, "confirm order", response)
+                return jsonify({
+                    'response': response,
+                    'requires_customer_selection': True,
+                    'action_buttons': [
+                        {'text': 'Place Order', 'action': 'place_order'},
+                        {'text': 'View Open Order', 'action': 'open_order'},
+                        {'text': 'Company Info', 'action': 'company_info'},
+                        {'text': 'Product Info', 'action': 'product_info'}
+                    ]
+                }), 200
+            customer_id = session.get('selected_customer_id')
+        
+        result = enhanced_order_service.place_order(user_id, customer_id=customer_id)
         
         if result['success']:
             save_conversation(user.id, "confirm order", result['message'])
@@ -1592,17 +1718,27 @@ def handle_track_order(user_message, user, context_data=None):
                     })
                 
                 # Return selection box for distributors
-                response_msg = f"**📊 Order Management - {user.area} Area**\n\n"
-                response_msg += f"Found **{len(orders_data)}** orders in your area.\n\n"
-                response_msg += "**Use filters below to narrow down orders:**\n"
-                response_msg += "• Filter by MR Name\n"
-                response_msg += "• Filter by Status (Pending, Confirmed, Rejected)\n"
-                response_msg += "• Filter by Date\n\n"
-                response_msg += "Select an order to view details and take action (Confirm/Reject)."
+                # Build response in English first (for database)
+                response_msg_en = f"**📊 Order Management - {user.area} Area**\n\n"
+                response_msg_en += f"Found **{len(orders_data)}** orders in your area.\n\n"
+                response_msg_en += "**Use filters below to narrow down orders:**\n"
+                response_msg_en += "• Filter by MR Name\n"
+                response_msg_en += "• Filter by Status (Pending, Confirmed, Rejected)\n"
+                response_msg_en += "• Filter by Date\n\n"
+                response_msg_en += "Select an order to view details and take action (Confirm/Reject)."
                 
-                save_conversation(user.id, user_message, response_msg)
+                # Save English version to database
+                save_conversation(user.id, user_message, response_msg_en)
                 
-                return jsonify({
+                # Translate for user if needed
+                user_language = session.get('user_language', 'en')
+                response_msg = response_msg_en
+                if user_language != 'en':
+                    translation_service = get_translation_service()
+                    if translation_service.is_available():
+                        response_msg = translation_service.translate(response_msg_en, user_language)
+                
+                return ensure_action_buttons(jsonify({
                     'response': response_msg,
                     'interactive_order_selection': True,  # Flag for frontend to show selection box
                     'order_selection_type': 'distributor',  # Type of selection
@@ -1613,7 +1749,7 @@ def handle_track_order(user_message, user, context_data=None):
                         'statuses': unique_statuses,
                         'dates': unique_dates
                     }
-                }), 200
+                }), user), 200
         # fall back to self-tracking for non-distributors
         if order_id:
             status = enhanced_order_service.get_order_status(order_id, user.id)
@@ -1722,15 +1858,25 @@ def handle_track_order(user_message, user, context_data=None):
                 })
             
             # Return response with orders data and filters for interactive display (NO MR filter for MR users)
-            response_msg = f"**📊 Your Orders**\n\n"
-            response_msg += f"Found **{len(orders)}** order(s) in total.\n\n"
-            response_msg += "**Use the filters below to narrow down your search:**\n"
-            response_msg += "• Filter by Customer\n"
-            response_msg += "• Filter by Status\n"
-            response_msg += "• Filter by Date\n\n"
-            response_msg += "**Select an order from the dropdown to view details.**"
+            # Build response in English first (for database)
+            response_msg_en = f"**📊 Your Orders**\n\n"
+            response_msg_en += f"Found **{len(orders)}** order(s) in total.\n\n"
+            response_msg_en += "**Use the filters below to narrow down your search:**\n"
+            response_msg_en += "• Filter by Customer\n"
+            response_msg_en += "• Filter by Status\n"
+            response_msg_en += "• Filter by Date\n\n"
+            response_msg_en += "**Select an order from the dropdown to view details.**"
             
-            save_conversation(user.id, user_message, response_msg)
+            # Save English version to database
+            save_conversation(user.id, user_message, response_msg_en)
+            
+            # Translate for user if needed
+            user_language = session.get('user_language', 'en')
+            response_msg = response_msg_en
+            if user_language != 'en':
+                translation_service = get_translation_service()
+                if translation_service.is_available():
+                    response_msg = translation_service.translate(response_msg_en, user_language)
             
             return jsonify({
                 'response': response_msg,
@@ -1766,13 +1912,27 @@ def handle_track_order(user_message, user, context_data=None):
             })
         
         # Return response with orders data for interactive display
-        return jsonify({
-            'response': 'Here are your recent orders. Select an order to view details:',
+        # Build response in English first
+        response_text_en = 'Here are your recent orders. Select an order to view details:'
+        
+        # Translate for user if needed
+        user_language = session.get('user_language', 'en')
+        response_text = response_text_en
+        if user_language != 'en':
+            translation_service = get_translation_service()
+            if translation_service.is_available():
+                response_text = translation_service.translate(response_text_en, user_language)
+        
+        # Save English version to database
+        save_conversation(user.id, user_message, response_text_en)
+        
+        return ensure_action_buttons(jsonify({
+            'response': response_text,
             'show_orders_table': True,
             'orders': orders_list,
             'interactive_order_selection': True,
             'action_buttons': []  # Prevent showing action buttons when order selection is active
-        }), 200
+        }), user), 200
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -1864,13 +2024,87 @@ def handle_company_info(user_message, user):
 
 def handle_product_info_or_query(user_message, user, context_data):
     """Handle product information and database queries"""
+    # Get user language at the start of the function
+    try:
+        user_language = session.get('user_language', 'en')
+    except:
+        user_language = 'en'
+    
     # Check if this is specifically the Product Info button click
     message_lower = user_message.lower().strip()
     if message_lower in ['product info', 'productinfo']:
-        # Return product search interface
-        search_service = get_search_service()
-        if not search_service.is_available():
-            response = "Product Info feature requires Azure AI Search to be configured. Please contact your administrator."
+        try:
+            # Return product search interface
+            search_service = get_search_service()
+            if not search_service or not search_service.is_available():
+                logger.warning("Azure AI Search not available for Product Info")
+                response = "Product Info feature requires Azure AI Search to be configured. Please contact your administrator."
+                save_conversation(user.id, user_message, response)
+                return jsonify({
+                    'response': response,
+                    'action_buttons': [
+                        {'text': 'Place Order', 'action': 'place_order'},
+                        {'text': 'View Open Order', 'action': 'open_order'},
+                        {'text': 'Company Info', 'action': 'company_info'}
+                    ]
+                }), 200
+            
+            # Get all available products for the selection list
+            try:
+                products = search_service.get_all_products(top=100)
+                product_list = []
+                for product in products:
+                    # Extract product name from various possible fields
+                    product_name = product.get('product_name') or product.get('name') or product.get('title') or 'Unknown Product'
+                    product_list.append({
+                        'id': product.get('id') or product.get('product_id') or product_name,
+                        'name': product_name,
+                        'description': product.get('description') or product.get('content') or product.get('text') or ''
+                    })
+                
+                logger.info(f"Product Info: Retrieved {len(product_list)} products for user {user.id}")
+            except Exception as e:
+                logger.error(f"Error retrieving products for Product Info: {str(e)}")
+                product_list = []
+            
+            save_conversation(user.id, user_message, "Product Info search interface opened")
+            response_text = '🔍 **Product Information Search**\n\nPlease use the search interface below to find product information. You can search by product name or browse the available products.'
+            # Translate response (user_language already defined at function start)
+            if user_language != 'en':
+                translation_service = get_translation_service()
+                if translation_service.is_available():
+                    response_text = translation_service.translate(response_text, user_language)
+            
+            return ensure_action_buttons(jsonify({
+                'response': response_text,
+                'interactive_product_search': True,
+                'products': product_list,
+                'action_buttons': [
+                    {'text': 'Place Order', 'action': 'place_order'},
+                    {'text': 'View Open Order', 'action': 'open_order'},
+                    {'text': 'Company Info', 'action': 'company_info'}
+                ]
+            }), user), 200
+        except Exception as e:
+            logger.error(f"Error retrieving products from Azure Search: {str(e)}")
+            response = f"Product Info feature is temporarily unavailable. Error: {str(e)}"
+            # Translate error message (user_language already defined at function start)
+            if user_language != 'en':
+                translation_service = get_translation_service()
+                if translation_service.is_available():
+                    response = translation_service.translate(response, user_language)
+            save_conversation(user.id, user_message, response)
+            return ensure_action_buttons(jsonify({
+                    'response': response,
+                    'action_buttons': [
+                        {'text': 'Place Order', 'action': 'place_order'},
+                        {'text': 'View Open Order', 'action': 'open_order'},
+                        {'text': 'Company Info', 'action': 'company_info'}
+                    ]
+                }), user), 200
+        except Exception as e:
+            logger.error(f"Error in handle_product_info_or_query for Product Info button: {str(e)}")
+            response = "Sorry, I encountered an error while opening the Product Info feature. Please try again."
             save_conversation(user.id, user_message, response)
             return jsonify({
                 'response': response,
@@ -1880,30 +2114,6 @@ def handle_product_info_or_query(user_message, user, context_data):
                     {'text': 'Company Info', 'action': 'company_info'}
                 ]
             }), 200
-        
-        # Get all available products for the selection list
-        products = search_service.get_all_products(top=100)
-        product_list = []
-        for product in products:
-            # Extract product name from various possible fields
-            product_name = product.get('product_name') or product.get('name') or product.get('title') or 'Unknown Product'
-            product_list.append({
-                'id': product.get('id') or product.get('product_id') or product_name,
-                'name': product_name,
-                'description': product.get('description') or product.get('content') or product.get('text') or ''
-            })
-        
-        save_conversation(user.id, user_message, "Product Info search interface opened")
-        return jsonify({
-            'response': 'Please search for a product or select from the list below:',
-            'interactive_product_search': True,
-            'products': product_list,
-            'action_buttons': [
-                {'text': 'Place Order', 'action': 'place_order'},
-                {'text': 'View Open Order', 'action': 'open_order'},
-                {'text': 'Company Info', 'action': 'company_info'}
-            ]
-        }), 200
     
     try:
         db_service = get_db_service()
@@ -2447,17 +2657,23 @@ Type **"generate report"** to get started or **"help"** for more information."""
         return f"Welcome back, {user.name}! I'm here to help you with your orders and answer any questions. What would you like to do today?"
 
 def save_conversation(user_id, user_message, bot_response):
-    """Save conversation to database"""
+    """
+    Save conversation to database.
+    IMPORTANT: Always saves in English (original language).
+    Translation happens only when sending to user, not when saving to database.
+    """
     try:
         db_service = get_db_service()
         session_id = session.get('session_id')
         
         if session_id:
+            # Always save original English text to database
+            # Translation is only for display to user, not for storage
             db_service.save_conversation(
                 user_id=user_id,
                 session_id=session_id,
                 user_message=user_message,
-                bot_response=bot_response
+                bot_response=bot_response  # This should be the original English response
             )
     except Exception as e:
         logger.error(f"Error saving conversation: {str(e)}")
@@ -2615,6 +2831,7 @@ def select_customer():
 @chatbot_bp.route('/select_order', methods=['POST'])
 def select_order():
     """Select order for distributor or MR to view details"""
+    from app.input_validation import validate_and_sanitize_order_id
     try:
         user_id = session.get('user_id')
         if not user_id:
@@ -2632,11 +2849,17 @@ def select_order():
             return jsonify({'error': 'Only distributors and MRs can use this feature'}), 403
         
         data = request.get_json()
-        order_id = data.get('order_id')
+        if not data:
+            return jsonify({'error': 'Invalid JSON or missing Content-Type header'}), 400
         
-        if not order_id:
+        order_id_raw = data.get('order_id')
+        if not order_id_raw:
             logger.warning(f"select_order: Order ID not provided by user {user_id}")
             return jsonify({'error': 'Order ID is required'}), 400
+        
+        order_id = validate_and_sanitize_order_id(order_id_raw)
+        if not order_id:
+            return jsonify({'error': 'Invalid order ID format'}), 400
         
         logger.info(f"select_order: User {user_id} ({user.role}) requesting order {order_id}")
         
@@ -2720,9 +2943,25 @@ def select_order():
         # Get customer info if available
         customer_name = None
         customer_id = None
-        if order.customer:
-            customer_name = f"{order.customer.name} ({order.customer.unique_id})"
-            customer_id = order.customer.unique_id
+        if order.customer_id:
+            # Try to get customer from relationship first
+            if order.customer:
+                customer_name = f"{order.customer.name} ({order.customer.unique_id})"
+                customer_id = order.customer.unique_id
+            else:
+                # If relationship not loaded, query directly
+                from app.models import Customer
+                customer = Customer.query.get(order.customer_id)
+                if customer:
+                    customer_name = f"{customer.name} ({customer.unique_id})"
+                    customer_id = customer.unique_id
+        elif order.customer_unique_id:
+            # Fallback: try to get customer by unique_id
+            from app.models import Customer
+            customer = Customer.query.filter_by(unique_id=order.customer_unique_id).first()
+            if customer:
+                customer_name = f"{customer.name} ({customer.unique_id})"
+                customer_id = customer.unique_id
         
         # Build detailed response
         order_details = {
@@ -2759,6 +2998,11 @@ def select_order():
 def confirm_order_action():
     """Confirm order by distributor"""
     try:
+        from app.input_validation import (
+            validate_and_sanitize_order_id, validate_quantity, 
+            sanitize_string, MAX_LENGTHS, sanitize_dict
+        )
+        
         user_id = session.get('user_id')
         if not user_id:
             return jsonify({'error': 'User not logged in'}), 401
@@ -2768,11 +3012,69 @@ def confirm_order_action():
             return jsonify({'error': 'Only distributors can confirm orders'}), 403
         
         data = request.get_json()
-        order_id = data.get('order_id')
-        item_edits = data.get('item_edits', {})  # {item_id: {'quantity': int, 'expiry_date': str, 'reason': str}}
+        if not data:
+            return jsonify({'error': 'Invalid JSON or missing Content-Type header'}), 400
         
-        if not order_id:
+        # Validate and sanitize order_id
+        order_id_raw = data.get('order_id')
+        if not order_id_raw:
             return jsonify({'error': 'Order ID is required'}), 400
+        
+        order_id = validate_and_sanitize_order_id(order_id_raw)
+        if not order_id:
+            return jsonify({'error': 'Invalid order ID format'}), 400
+        
+        # Validate and sanitize item_edits
+        item_edits_raw = data.get('item_edits')  # {item_id: {'quantity': int, 'expiry_date': str, 'reason': str}}
+        
+        # Handle null/None item_edits - convert to empty dict so backend uses original quantities
+        if item_edits_raw is None:
+            item_edits = {}
+        elif not isinstance(item_edits_raw, dict):
+            item_edits = {}
+        else:
+            # Sanitize item_edits dictionary
+            item_edits = {}
+            for item_id_str, edits in item_edits_raw.items():
+                if not isinstance(edits, dict):
+                    continue
+                
+                try:
+                    item_id = int(item_id_str)
+                    if item_id <= 0:
+                        continue
+                    
+                    sanitized_edit = {}
+                    
+                    # Validate quantity
+                    if 'quantity' in edits:
+                        qty = edits['quantity']
+                        if validate_quantity(qty):
+                            sanitized_edit['quantity'] = int(qty)
+                    
+                    # Sanitize lot_number
+                    if 'lot_number' in edits and edits['lot_number']:
+                        lot = sanitize_string(str(edits['lot_number']), max_length=MAX_LENGTHS['lot_number'])
+                        if lot:
+                            sanitized_edit['lot_number'] = lot
+                    
+                    # Validate expiry_date (format: YYYY-MM-DD)
+                    if 'expiry_date' in edits and edits['expiry_date']:
+                        expiry = sanitize_string(str(edits['expiry_date']), max_length=10)
+                        if expiry and re.match(r'^\d{4}-\d{2}-\d{2}$', expiry):
+                            sanitized_edit['expiry_date'] = expiry
+                    
+                    # Sanitize reason
+                    if 'reason' in edits and edits['reason']:
+                        reason = sanitize_string(str(edits['reason']), max_length=MAX_LENGTHS['reason'])
+                        if reason:
+                            sanitized_edit['reason'] = reason
+                    
+                    if sanitized_edit:
+                        item_edits[item_id] = sanitized_edit
+                        
+                except (ValueError, TypeError):
+                    continue
         
         # Convert expiry_date strings to date objects and item_id to int if provided
         if item_edits:
@@ -2806,11 +3108,19 @@ def confirm_order_action():
 def search_products():
     """Search for products in Azure AI Search"""
     try:
-        data = request.get_json()
-        search_query = data.get('query', '').strip()
+        from app.input_validation import sanitize_string, MAX_LENGTHS
         
-        if not search_query:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'Invalid JSON or missing Content-Type header'}), 400
+        
+        search_query_raw = data.get('query', '').strip()
+        if not search_query_raw:
             return jsonify({'error': 'Search query is required'}), 400
+        
+        search_query = sanitize_string(search_query_raw, max_length=MAX_LENGTHS['search_query'])
+        if not search_query:
+            return jsonify({'error': 'Invalid search query'}), 400
         
         search_service = get_search_service()
         if not search_service.is_available():
@@ -2842,12 +3152,35 @@ def search_products():
 def get_product_details():
     """Get detailed information about a specific product"""
     try:
-        data = request.get_json()
-        product_id = data.get('product_id')
-        product_name = data.get('product_name')
+        from app.input_validation import sanitize_string, MAX_LENGTHS
         
-        if not product_id and not product_name:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'Invalid JSON or missing Content-Type header'}), 400
+        
+        product_id_raw = data.get('product_id')
+        product_name_raw = data.get('product_name')
+        
+        # Validate that at least one is provided
+        if not product_id_raw and not product_name_raw:
             return jsonify({'error': 'Product ID or name is required'}), 400
+        
+        # Sanitize product_id if provided
+        product_id = None
+        if product_id_raw:
+            try:
+                product_id = int(product_id_raw)
+                if product_id <= 0:
+                    return jsonify({'error': 'Invalid product ID'}), 400
+            except (ValueError, TypeError):
+                return jsonify({'error': 'Invalid product ID format'}), 400
+        
+        # Sanitize product_name if provided
+        product_name = None
+        if product_name_raw:
+            product_name = sanitize_string(str(product_name_raw), max_length=MAX_LENGTHS['product_name'])
+            if not product_name:
+                return jsonify({'error': 'Invalid product name'}), 400
         
         search_service = get_search_service()
         if not search_service.is_available():
@@ -2903,10 +3236,16 @@ def cancel_order_action():
             return jsonify({'error': 'Only MRs can cancel their orders'}), 403
         
         data = request.get_json()
-        order_id = data.get('order_id')
+        if not data:
+            return jsonify({'error': 'Invalid JSON or missing Content-Type header'}), 400
         
-        if not order_id:
+        order_id_raw = data.get('order_id')
+        if not order_id_raw:
             return jsonify({'error': 'Order ID is required'}), 400
+        
+        order_id = validate_and_sanitize_order_id(order_id_raw)
+        if not order_id:
+            return jsonify({'error': 'Invalid order ID format'}), 400
         
         # Cancel order
         enhanced_order_service = get_enhanced_order_service()
@@ -2918,10 +3257,208 @@ def cancel_order_action():
         logger.error(f"Error cancelling order: {str(e)}")
         return jsonify({'error': 'Error cancelling order'}), 500
 
+# Bulk order endpoints removed - bulk order functionality has been removed
+
+# Export orders endpoint removed - was part of bulk order functionality
+# @chatbot_bp.route('/export_orders_excel', methods=['POST'])
+def export_orders_excel_removed():
+    """Export orders to Excel format"""
+    try:
+        user_id = session.get('user_id')
+        if not user_id:
+            return jsonify({'error': 'User not logged in'}), 401
+        
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+        
+        data = request.get_json()
+        order_ids = data.get('order_ids')  # None = all orders
+        
+        from app.models import Order, OrderItem
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment
+        from io import BytesIO
+        
+        # Query orders
+        if user.role == 'distributor':
+            # Get MRs in distributor's area
+            mr_ids = [u.id for u in User.query.filter_by(role='mr', area=user.area).all()]
+            if order_ids:
+                orders = Order.query.filter(Order.order_id.in_(order_ids), Order.mr_id.in_(mr_ids)).all()
+            else:
+                orders = Order.query.filter(Order.mr_id.in_(mr_ids)).all()
+        elif user.role == 'mr':
+            if order_ids:
+                orders = Order.query.filter(Order.order_id.in_(order_ids), Order.mr_id == user_id).all()
+            else:
+                orders = Order.query.filter_by(mr_id=user_id).all()
+        else:
+            return jsonify({'error': 'Unauthorized'}), 403
+        
+        # Create Excel workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Orders Export"
+        
+        # Header row
+        headers = ['Order ID', 'Date', 'Status', 'MR Name', 'Customer', 'Total Items', 'Subtotal', 'Tax', 'Grand Total (MMK)']
+        header_fill = PatternFill(start_color="2563eb", end_color="2563eb", fill_type="solid")
+        header_font = Font(bold=True, color="FFFFFF")
+        
+        for col_num, header in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col_num)
+            cell.value = header
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+        
+        # Data rows
+        for row_num, order in enumerate(orders, 2):
+            ws.cell(row=row_num, column=1, value=order.order_id)
+            ws.cell(row=row_num, column=2, value=order.created_at.strftime('%Y-%m-%d %H:%M:%S') if order.created_at else 'N/A')
+            ws.cell(row=row_num, column=3, value=(order.status or 'N/A').replace('_', ' ').title())
+            ws.cell(row=row_num, column=4, value=order.mr.name if order.mr else 'N/A')
+            ws.cell(row=row_num, column=5, value=order.customer.name if order.customer else 'N/A')
+            
+            # Calculate totals
+            total_items = sum(item.quantity + (item.free_quantity or 0) for item in order.order_items)
+            subtotal = float(order.subtotal) if order.subtotal else 0.0
+            tax = float(order.tax_amount) if order.tax_amount else 0.0
+            grand_total = float(order.total_amount) if order.total_amount else 0.0
+            
+            ws.cell(row=row_num, column=6, value=total_items)
+            ws.cell(row=row_num, column=7, value=subtotal)
+            ws.cell(row=row_num, column=8, value=tax)
+            ws.cell(row=row_num, column=9, value=grand_total)
+        
+        # Auto-adjust column widths
+        for col in ws.columns:
+            max_length = 0
+            col_letter = col[0].column_letter
+            for cell in col:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            adjusted_width = min(max_length + 2, 50)
+            ws.column_dimensions[col_letter].width = adjusted_width
+        
+        # Save to BytesIO
+        output = BytesIO()
+        wb.save(output)
+        output.seek(0)
+        
+        from flask import Response
+        return Response(
+            output.getvalue(),
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            headers={'Content-Disposition': f'attachment; filename=orders_export_{datetime.now().strftime("%Y%m%d")}.xlsx'}
+        )
+        
+    except Exception as e:
+        logger.error(f"Error exporting orders to Excel: {str(e)}")
+        return jsonify({'error': 'Error exporting to Excel'}), 500
+
+@chatbot_bp.route('/advanced_search', methods=['POST'])
+def advanced_search():
+    """Advanced search across orders, products, and customers"""
+    try:
+        user_id = session.get('user_id')
+        if not user_id:
+            return jsonify({'success': False, 'error': 'User not logged in'}), 401
+        
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({'success': False, 'error': 'User not found'}), 404
+        
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'Invalid JSON or missing Content-Type header'}), 400
+        
+        from app.input_validation import sanitize_string, MAX_LENGTHS, sanitize_dict
+        
+        query_raw = data.get('query', '').strip().lower()
+        query = sanitize_string(query_raw, max_length=MAX_LENGTHS['search_query']) if query_raw else ''
+        
+        filters_raw = data.get('filters', {})
+        filters = sanitize_dict(filters_raw) if isinstance(filters_raw, dict) else {}
+        
+        results = {
+            'orders': [],
+            'products': [],
+            'customers': []
+        }
+        
+        # Search orders
+        if user.role == 'mr':
+            orders = Order.query.filter_by(mr_id=user_id).all()
+        elif user.role == 'distributor':
+            mr_ids = [u.id for u in User.query.filter_by(role='mr', area=user.area).all()]
+            orders = Order.query.filter(Order.mr_id.in_(mr_ids)).all()
+        else:
+            orders = []
+        
+        # Filter orders by query
+        if query:
+            filtered_orders = []
+            for order in orders:
+                if (query in order.order_id.lower() or
+                    (order.customer and query in order.customer.name.lower()) or
+                    (order.mr and query in order.mr.name.lower())):
+                    filtered_orders.append(order)
+            results['orders'] = [{
+                'order_id': o.order_id,
+                'status': o.status,
+                'total_amount': float(o.total_amount) if o.total_amount else 0.0,
+                'order_date': o.created_at.strftime('%Y-%m-%d') if o.created_at else 'N/A',
+                'customer_name': o.customer.name if o.customer else None
+            } for o in filtered_orders[:20]]  # Limit to 20
+        
+        # Search products
+        if user.role == 'mr':
+            db_service = get_db_service()
+            products = db_service.get_products_from_dealer_stock(user.area)
+        else:
+            products = Product.query.all()
+        
+        if query:
+            filtered_products = [p for p in products if query in (p.product_name or '').lower()]
+            results['products'] = [{
+                'product_name': p.product_name,
+                'product_code': getattr(p, 'product_code', None),
+                'price': float(p.price) if p.price else 0.0
+            } for p in filtered_products[:20]]
+        
+        # Search customers (for MRs)
+        if user.role == 'mr' and query:
+            customers = Customer.query.filter_by(mr_id=user_id).all()
+            filtered_customers = [c for c in customers if query in c.name.lower() or query in c.unique_id.lower()]
+            results['customers'] = [{
+                'name': c.name,
+                'unique_id': c.unique_id,
+                'email': c.email,
+                'phone': c.phone
+            } for c in filtered_customers[:10]]
+        
+        return jsonify({
+            'success': True,
+            'results': results,
+            'orders': results['orders'],
+            'products': results['products']
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error in advanced search: {str(e)}")
+        return jsonify({'success': False, 'error': 'Error performing search'}), 500
+
 @chatbot_bp.route('/reject_order_action', methods=['POST'])
 def reject_order_action():
     """Reject order by distributor"""
     try:
+        from app.input_validation import validate_and_sanitize_order_id, sanitize_string, MAX_LENGTHS
+        
         user_id = session.get('user_id')
         if not user_id:
             return jsonify({'error': 'User not logged in'}), 401
@@ -2931,11 +3468,23 @@ def reject_order_action():
             return jsonify({'error': 'Only distributors can reject orders'}), 403
         
         data = request.get_json()
-        order_id = data.get('order_id')
-        rejection_reason = data.get('reason', 'No reason provided')
+        if not data:
+            return jsonify({'error': 'Invalid JSON or missing Content-Type header'}), 400
         
-        if not order_id:
+        order_id_raw = data.get('order_id')
+        if not order_id_raw:
             return jsonify({'error': 'Order ID is required'}), 400
+        
+        order_id = validate_and_sanitize_order_id(order_id_raw)
+        if not order_id:
+            return jsonify({'error': 'Invalid order ID format'}), 400
+        
+        # Sanitize rejection_reason if provided
+        rejection_reason_raw = data.get('reason', 'No reason provided')
+        rejection_reason = sanitize_string(
+            str(rejection_reason_raw), 
+            max_length=MAX_LENGTHS['rejection_reason']
+        ) if rejection_reason_raw else 'No reason provided'
         
         # Reject order
         enhanced_order_service = get_enhanced_order_service()
@@ -2960,13 +3509,35 @@ def add_customer():
             return jsonify({'error': 'Only MRs can add customers'}), 403
         
         data = request.get_json()
-        name = data.get('name', '').strip()
-        email = data.get('email', '').strip()
-        phone = data.get('phone', '').strip()
-        address = data.get('address', '').strip()
+        if not data:
+            return jsonify({'error': 'Invalid JSON or missing Content-Type header'}), 400
         
+        from app.input_validation import (
+            sanitize_string, validate_email, validate_phone, MAX_LENGTHS
+        )
+        
+        # Validate and sanitize inputs
+        name_raw = data.get('name', '').strip()
+        name = sanitize_string(name_raw, max_length=MAX_LENGTHS['customer_name'])
         if not name:
-            return jsonify({'error': 'Customer name is required'}), 400
+            return jsonify({'error': 'Customer name is required and must be valid'}), 400
+        
+        email_raw = data.get('email', '').strip()
+        email = None
+        if email_raw:
+            email = sanitize_string(email_raw, max_length=MAX_LENGTHS['email'])
+            if email and not validate_email(email):
+                return jsonify({'error': 'Invalid email format'}), 400
+        
+        phone_raw = data.get('phone', '').strip()
+        phone = None
+        if phone_raw:
+            phone = sanitize_string(phone_raw, max_length=MAX_LENGTHS['phone'])
+            if phone and not validate_phone(phone):
+                return jsonify({'error': 'Invalid phone number format'}), 400
+        
+        address_raw = data.get('address', '').strip()
+        address = sanitize_string(address_raw, max_length=500) if address_raw else None
         
         # Create new customer
         customer = Customer(
@@ -2983,8 +3554,13 @@ def add_customer():
         customer.generate_unique_id()
         
         # Save to database
-        db.session.add(customer)
-        db.session.commit()
+        try:
+            db.session.add(customer)
+            db.session.commit()
+        except Exception as e:
+            logger.error(f"Error saving customer to database: {str(e)}")
+            db.session.rollback()
+            raise
         
         # Store selected customer in session
         session['selected_customer_id'] = customer.id
@@ -3044,7 +3620,14 @@ def place_order():
         # Get customer details if MR
         user = User.query.get(user_id)
         customer_id = None
-        if user and user.role == 'mr' and 'selected_customer_id' in session:
+        if user and user.role == 'mr':
+            # For MRs, customer selection is mandatory
+            if 'selected_customer_id' not in session:
+                return jsonify({
+                    'success': False,
+                    'message': 'Please select a customer before placing an order. Use "Place Order" to select a customer first.',
+                    'requires_customer_selection': True
+                }), 400
             customer_id = session.get('selected_customer_id')
         
         result = enhanced_order_service.place_order(user_id, customer_id=customer_id)
@@ -3075,6 +3658,10 @@ def place_order():
 def add_to_cart_api():
     """Add product to cart via API (for bulk additions)"""
     try:
+        from app.input_validation import (
+            validate_and_sanitize_product_code, validate_quantity
+        )
+        
         user_id = session.get('user_id')
         if not user_id:
             return jsonify({'error': 'User not logged in'}), 401
@@ -3084,15 +3671,27 @@ def add_to_cart_api():
             return jsonify({'error': 'User not found'}), 404
         
         data = request.get_json()
-        product_code = data.get('product_code')
-        quantity = data.get('quantity')
+        if not data:
+            return jsonify({'error': 'Invalid JSON or missing Content-Type header'}), 400
         
-        if not product_code or not quantity:
-            return jsonify({'error': 'Product code and quantity required'}), 400
+        # Validate and sanitize product_code
+        product_code_raw = data.get('product_code')
+        if not product_code_raw:
+            return jsonify({'error': 'Product code is required'}), 400
         
-        quantity = int(quantity)
-        if quantity <= 0:
-            return jsonify({'error': 'Quantity must be greater than 0'}), 400
+        product_code = validate_and_sanitize_product_code(product_code_raw)
+        if not product_code:
+            return jsonify({'error': 'Invalid product code format'}), 400
+        
+        # Validate quantity
+        quantity_raw = data.get('quantity')
+        if not quantity_raw:
+            return jsonify({'error': 'Quantity is required'}), 400
+        
+        if not validate_quantity(quantity_raw):
+            return jsonify({'error': 'Quantity must be a positive integer'}), 400
+        
+        quantity = int(quantity_raw)
         
         # Get product from dealer stock
         db_service = get_db_service()
@@ -3105,7 +3704,10 @@ def add_to_cart_api():
                 break
         
         if not product:
-            return jsonify({'error': 'Product not found'}), 404
+            return jsonify({
+                'success': False,
+                'error': f'Product with code "{product_code}" not found in your area. The product may no longer be available or the product code may have changed.'
+            }), 200  # Return 200 with success: false so frontend can parse it
         
         # Get pricing
         pricing_service = get_pricing_service()
@@ -3115,38 +3717,62 @@ def add_to_cart_api():
         )
         
         if 'error' in pricing:
-            return jsonify({'error': pricing['error']}), 400
+            return jsonify({
+                'success': False,
+                'error': pricing['error']
+            }), 200  # Return 200 with success: false so frontend can parse it
         
         # Add to cart
         unit_price = pricing['pricing']['final_price']
-        cart_item, message = db_service.add_to_cart(
-            user_id,
-            product.get('product_id'),
-            product_code,
-            product.get('product_name'),
-            quantity,
-            unit_price
-        )
+        logger.info(f"Adding to cart: product_code={product_code}, product_id={product.get('product_id')}, quantity={quantity}, unit_price={unit_price}")
         
-        if cart_item:
+        try:
+            cart_item, message = db_service.add_to_cart(
+                user_id,
+                product.get('product_id'),
+                product_code,
+                product.get('product_name'),
+                quantity,
+                unit_price
+            )
+            
+            if cart_item:
+                logger.info(f"Successfully added to cart: cart_item_id={cart_item.id if hasattr(cart_item, 'id') else 'N/A'}")
+                return jsonify({
+                    'success': True,
+                    'message': message,
+                    'cart_item': {
+                        'id': cart_item.id,
+                        'product_code': cart_item.product_code,
+                        'product_name': cart_item.product_name,
+                        'quantity': cart_item.quantity,
+                        'unit_price': cart_item.unit_price
+                    },
+                    'pricing': pricing
+                }), 200
+            else:
+                logger.warning(f"add_to_cart returned None for product_code={product_code}")
+                return jsonify({
+                    'success': False,
+                    'error': message or 'Failed to add product to cart'
+                }), 200  # Return 200 with success: false so frontend can parse it
+        except Exception as db_error:
+            logger.error(f"Database error adding to cart: {str(db_error)}")
+            import traceback
+            traceback.print_exc()
             return jsonify({
-                'success': True,
-                'message': message,
-                'cart_item': {
-                    'id': cart_item.id,
-                    'product_code': cart_item.product_code,
-                    'product_name': cart_item.product_name,
-                    'quantity': cart_item.quantity,
-                    'unit_price': cart_item.unit_price
-                },
-                'pricing': pricing
-            }), 200
-        else:
-            return jsonify({'error': message}), 400
+                'success': False,
+                'error': f'Database error: {str(db_error)}'
+            }), 200  # Return 200 with success: false so frontend can parse it
             
     except Exception as e:
         logger.error(f"Error adding to cart: {str(e)}")
-        return jsonify({'error': 'Error adding product to cart'}), 500
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': f'Error adding product to cart: {str(e)}'
+        }), 200  # Return 200 with success: false so frontend can parse it
 
 @chatbot_bp.route('/cart', methods=['GET'])
 def get_cart():
@@ -3227,12 +3853,24 @@ def get_cart():
         tax_amount = subtotal * tax_rate
         grand_total = subtotal + tax_amount
         
+        # Get customer info if available (for MRs)
+        customer_id = None
+        customer_name = ''
+        if 'selected_customer_id' in session:
+            customer_id = session.get('selected_customer_id')
+            from app.models import Customer
+            customer = Customer.query.get(customer_id)
+            if customer:
+                customer_name = customer.name
+        
         return jsonify({
             'cart_items': cart_data,
             'subtotal': round(subtotal, 2),
             'tax_rate': tax_rate,
             'tax_amount': round(tax_amount, 2),
-            'grand_total': round(grand_total, 2)
+            'grand_total': round(grand_total, 2),
+            'customer_id': customer_id,
+            'customer_name': customer_name
         }), 200
         
     except Exception as e:
@@ -3455,6 +4093,57 @@ def update_cart_quantity(item_id):
         logger.error(f"Error updating cart quantity: {str(e)}")
         db.session.rollback()
         return jsonify({'error': 'Error updating cart quantity'}), 500
+
+@chatbot_bp.route('/api/quick-stats', methods=['GET'])
+def get_quick_stats():
+    """Get quick statistics for the current user"""
+    try:
+        user_id = session.get('user_id')
+        if not user_id:
+            return jsonify({'success': False, 'error': 'User not logged in'}), 401
+        
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({'success': False, 'error': 'User not found'}), 404
+        
+        stats = {
+            'pendingOrders': 0,
+            'totalOrders': 0,
+            'cartItems': 0
+        }
+        
+        if user.role == 'mr':
+            # Count pending orders for this MR
+            from app.models import Order
+            stats['pendingOrders'] = Order.query.filter_by(
+                mr_id=user_id,
+                status='pending'
+            ).count()
+            stats['totalOrders'] = Order.query.filter_by(mr_id=user_id).count()
+            
+            # Count cart items
+            from app.models import CartItem
+            stats['cartItems'] = CartItem.query.filter_by(user_id=user_id).count()
+            
+        elif user.role == 'distributor':
+            # Count pending orders in distributor's area
+            from app.models import Order, User as UserModel
+            mr_ids_in_area = [u.id for u in UserModel.query.filter_by(role='mr', area=user.area).all()]
+            if mr_ids_in_area:
+                stats['pendingOrders'] = Order.query.filter(
+                    Order.mr_id.in_(mr_ids_in_area),
+                    Order.status == 'pending'
+                ).count()
+                stats['totalOrders'] = Order.query.filter(Order.mr_id.in_(mr_ids_in_area)).count()
+        
+        return jsonify({
+            'success': True,
+            'stats': stats
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting quick stats: {str(e)}")
+        return jsonify({'success': False, 'error': 'Error getting stats'}), 500
 
 @chatbot_bp.route('/api/products', methods=['GET'])
 def get_products_api():

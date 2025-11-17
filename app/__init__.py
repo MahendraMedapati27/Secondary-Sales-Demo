@@ -1,4 +1,4 @@
-from flask import Flask, redirect, url_for, request
+from flask import Flask, redirect, url_for, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager
 from flask_cors import CORS
@@ -8,6 +8,8 @@ from pathlib import Path
 import logging
 import threading
 import time
+import os
+from datetime import datetime
 
 db = SQLAlchemy()
 login_manager = LoginManager()
@@ -27,6 +29,15 @@ def create_app(config_class=Config):
         static_folder=str(static_path),
     )
     app.config.from_object(config_class)
+    
+    # Set request size limits (10MB)
+    app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024  # 10MB
+    
+    # Session configuration
+    app.config['PERMANENT_SESSION_LIFETIME'] = 3600  # 1 hour
+    app.config['SESSION_COOKIE_HTTPONLY'] = True
+    app.config['SESSION_COOKIE_SECURE'] = os.getenv('SESSION_COOKIE_SECURE', 'False').lower() == 'true'
+    app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
     
     # Fix MIME type for JavaScript modules and add cache-busting headers
     @app.after_request
@@ -60,6 +71,80 @@ def create_app(config_class=Config):
     mail.init_app(app)
     CORS(app)
     
+    # Initialize request ID and error handling
+    from app.error_handling import generate_request_id, get_request_id
+    
+    @app.before_request
+    def before_request():
+        """Set up request context"""
+        from flask import g
+        import time
+        from app.session_manager import enforce_session_timeout, cleanup_session
+        
+        g.request_id = generate_request_id()
+        g.request_start_time = time.time()
+        
+        # Session management
+        if request.endpoint and request.endpoint != 'static':
+            try:
+                enforce_session_timeout()
+                cleanup_session()
+            except Exception as e:
+                logger.warning(f"Session management error: {str(e)}")
+        
+        # Enforce request size limit
+        if request.content_length and request.content_length > app.config['MAX_CONTENT_LENGTH']:
+            from app.error_handling import ValidationError
+            raise ValidationError(f"Request too large. Maximum size: {app.config['MAX_CONTENT_LENGTH'] / 1024 / 1024}MB")
+        
+        # Log request
+        logger = logging.getLogger(__name__)
+        logger.info(
+            f"Request: {request.method} {request.path}",
+            extra={
+                'method': request.method,
+                'path': request.path,
+                'request_id': get_request_id(),
+                'content_length': request.content_length
+            }
+        )
+    
+    @app.after_request
+    def after_request(response):
+        """Log response, add request ID header, and track metrics"""
+        from app.error_handling import get_request_id
+        from app.metrics import record_request
+        import time
+        
+        response.headers['X-Request-ID'] = get_request_id()
+        
+        # Track metrics
+        if hasattr(g, 'request_start_time'):
+            response_time = time.time() - g.request_start_time
+            record_request(request.path, response.status_code, response_time)
+        
+        return response
+    
+    # Global error handler
+    @app.errorhandler(Exception)
+    def handle_exception(e):
+        """Global exception handler"""
+        from app.error_handling import handle_error, AppError
+        from app.metrics import record_error
+        
+        # Record error metrics
+        error_type = type(e).__name__
+        record_error(error_type, request.path)
+        
+        return handle_error(e, include_traceback=app.debug)
+    
+    # Metrics endpoint
+    @app.route('/metrics')
+    def metrics():
+        """Get application metrics"""
+        from app.metrics import get_metrics_summary
+        return jsonify(get_metrics_summary()), 200
+    
     # Register blueprints
     from app.auth import auth_bp
     from app.enhanced_chatbot import chatbot_bp as enhanced_chatbot_bp
@@ -75,7 +160,155 @@ def create_app(config_class=Config):
     # Health check endpoint for Azure monitoring
     @app.route('/health')
     def health():
+        """Basic health check"""
         return {'status': 'healthy', 'service': 'quantum-blue-chatbot'}, 200
+    
+    # Database connection health check endpoint
+    @app.route('/health/db')
+    def health_db():
+        """Database connection health check"""
+        try:
+            from sqlalchemy import text
+            from app.timeout_utils import get_timeout, with_timeout
+            engine = db.get_engine()
+            
+            @with_timeout(get_timeout('database'), 'Database health check')
+            def _check_db():
+                with engine.connect() as conn:
+                    result = conn.execute(text("SELECT 1 as test"))
+                    return result.fetchone()[0]
+            
+            test_value = _check_db()
+            
+            if test_value == 1:
+                # Get pool status
+                pool = engine.pool
+                pool_status = {
+                    'size': pool.size(),
+                    'checked_in': pool.checkedin(),
+                    'checked_out': pool.checkedout(),
+                    'overflow': pool.overflow(),
+                    'invalid': pool.invalid()
+                }
+                
+                return {
+                    'status': 'healthy',
+                    'database': 'connected',
+                    'pool_status': pool_status
+                }, 200
+            else:
+                return {'status': 'unhealthy', 'database': 'query_failed'}, 503
+                    
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.error(f"Database health check failed: {str(e)}")
+            return {
+                'status': 'unhealthy',
+                'database': 'connection_failed',
+                'error': str(e)
+            }, 503
+    
+    # Deep health check endpoint
+    @app.route('/health/deep')
+    def health_deep():
+        """Deep health check for all dependencies"""
+        from app.circuit_breaker import _circuit_breakers
+        from app.timeout_utils import get_timeout, with_timeout
+        from sqlalchemy import text
+        
+        health_status = {
+            'status': 'healthy',
+            'timestamp': datetime.utcnow().isoformat(),
+            'checks': {}
+        }
+        
+        overall_healthy = True
+        
+        # Database check
+        try:
+            @with_timeout(get_timeout('database'), 'Database check')
+            def _check_db():
+                engine = db.get_engine()
+                with engine.connect() as conn:
+                    result = conn.execute(text("SELECT 1"))
+                    return result.fetchone()[0] == 1
+            
+            db_healthy = _check_db()
+            health_status['checks']['database'] = {
+                'status': 'healthy' if db_healthy else 'unhealthy',
+                'response_time': None  # Could track this
+            }
+            if not db_healthy:
+                overall_healthy = False
+        except Exception as e:
+            health_status['checks']['database'] = {
+                'status': 'unhealthy',
+                'error': str(e)
+            }
+            overall_healthy = False
+        
+        # Circuit breaker status
+        circuit_breaker_status = {}
+        for name, breaker in _circuit_breakers.items():
+            state = breaker.get_state()
+            circuit_breaker_status[name] = {
+                'state': state['state'],
+                'failure_count': state['failure_count']
+            }
+            if state['state'] == 'open':
+                overall_healthy = False
+        
+        health_status['checks']['circuit_breakers'] = circuit_breaker_status
+        
+        # External services check (lightweight)
+        health_status['checks']['external_services'] = {}
+        
+        # Groq check (if configured)
+        try:
+            from app.groq_service import GroqService
+            groq_service = GroqService()
+            health_status['checks']['external_services']['groq'] = {
+                'status': 'configured' if groq_service.client else 'not_configured'
+            }
+        except Exception as e:
+            health_status['checks']['external_services']['groq'] = {
+                'status': 'error',
+                'error': str(e)
+            }
+        
+        # Azure Translator check
+        try:
+            from app.translation_service import TranslationService
+            translation_service = TranslationService()
+            health_status['checks']['external_services']['azure_translator'] = {
+                'status': 'available' if translation_service.is_available() else 'not_configured'
+            }
+        except Exception as e:
+            health_status['checks']['external_services']['azure_translator'] = {
+                'status': 'error',
+                'error': str(e)
+            }
+        
+        # Microsoft Graph check
+        try:
+            ms_graph_configured = all([
+                current_app.config.get('MS_GRAPH_TENANT_ID'),
+                current_app.config.get('MS_GRAPH_CLIENT_ID'),
+                current_app.config.get('MS_GRAPH_CLIENT_SECRET')
+            ])
+            health_status['checks']['external_services']['microsoft_graph'] = {
+                'status': 'configured' if ms_graph_configured else 'not_configured'
+            }
+        except Exception as e:
+            health_status['checks']['external_services']['microsoft_graph'] = {
+                'status': 'error',
+                'error': str(e)
+            }
+        
+        health_status['status'] = 'healthy' if overall_healthy else 'degraded'
+        
+        status_code = 200 if overall_healthy else 503
+        return health_status, status_code
     
     # Create database tables
     with app.app_context():

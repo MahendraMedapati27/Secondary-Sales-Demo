@@ -7,6 +7,7 @@ from app.database_service import DatabaseService
 from app.pricing_service import PricingService
 from app.llm_order_service import LLMOrderService
 from app.email_utils import send_email
+from app.db_utils import retry_on_transient_failure
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -282,15 +283,17 @@ class EnhancedOrderService:
                 'message': f"An error occurred while processing your order: {str(e)}"
             }
     
+    @retry_on_transient_failure()
     def place_order(self, user_id, placed_by_user_id=None, customer_id=None):
         """
         Place order from cart with distributor notification workflow
         Includes customer details for MR orders
+        Wrapped in single transaction for atomicity
         """
         try:
             from app.models import Customer
             
-            # Get user and cart items
+            # Get user and cart items (validation - no transaction needed)
             user = User.query.get(user_id)
             if not user:
                 return {
@@ -342,10 +345,9 @@ class EnhancedOrderService:
                 from sqlalchemy import func
                 today = date.today()
                 
-                # For MRs, check stock from dealer_wise_stock_details
-                # For other users, check Product table
+                # Check stock availability based on user role
                 if user.role == 'mr' and user.area:
-                    # Find dealers in the MR's area
+                    # For MRs, check stock from dealers in their area
                     dealers_in_area = User.query.filter_by(
                         role='distributor',
                         area=user.area
@@ -374,9 +376,25 @@ class EnhancedOrderService:
                         expired_qty = 0
                         non_expired_batches = []
                         expired_batches = []
+                elif user.role == 'distributor' and user.unique_id:
+                    # For distributors, check their own stock from dealer_wise_stock_details
+                    stock_details = DealerWiseStockDetails.query.filter(
+                        DealerWiseStockDetails.product_code == cart_item.product_code,
+                        DealerWiseStockDetails.status == 'confirmed',
+                        DealerWiseStockDetails.dealer_unique_id == user.unique_id
+                    ).all()
+                    
+                    # Check if any non-expired batches exist
+                    non_expired_batches = [s for s in stock_details if not s.expiry_date or s.expiry_date >= today]
+                    expired_batches = [s for s in stock_details if s.expiry_date and s.expiry_date < today]
+                    
+                    # Calculate available quantities from distributor's own stock
+                    non_expired_qty = sum(s.available_for_sale for s in non_expired_batches if s.available_for_sale > 0)
+                    expired_qty = sum(s.available_for_sale for s in expired_batches if s.available_for_sale > 0)
+                    
+                    self.logger.info(f"Distributor {user.unique_id} stock check for {cart_item.product_code}: non_expired={non_expired_qty}, expired={expired_qty}, requested={cart_item.quantity}")
                 else:
-                    # For non-MRs (distributors), stock info not applicable
-                    # Distributors don't place orders through this system
+                    # For other users or missing info, treat as no stock
                     non_expired_qty = 0
                     expired_qty = 0
                     non_expired_batches = []
@@ -536,6 +554,7 @@ You'll receive an email when any of these products become available."""
                 }
             
             # Now create the order since we have valid items
+            # Create order without explicit transaction (Flask-SQLAlchemy manages it)
             order = Order(
                 mr_id=user_id,
                 mr_unique_id=user.unique_id,
@@ -550,7 +569,7 @@ You'll receive an email when any of these products become available."""
             
             order.generate_order_id()
             db.session.add(order)
-            db.session.commit()
+            db.session.flush()  # Flush to get order.id without committing
             
             # Add order items and calculate totals only for valid cart items
             subtotal = 0
@@ -572,15 +591,32 @@ You'll receive an email when any of these products become available."""
                     free_quantity = foc_info.get('free_quantity', 0)
                     
                     # Create order item with FOC information
+                    # Ensure all required fields are populated before creating OrderItem
+                    if not order.id:
+                        self.logger.error("Order ID is missing")
+                        raise ValueError("Order ID is required")
+                    
+                    if not cart_item.product_id:
+                        self.logger.error(f"Product ID is missing for cart item {cart_item.id}")
+                        raise ValueError(f"Product ID is required for {cart_item.product_code}")
+                    
+                    if not cart_item.product_code or not cart_item.product_name:
+                        self.logger.error(f"Product code or name is missing for cart item {cart_item.id}")
+                        raise ValueError(f"Product code and name are required for cart item {cart_item.id}")
+                    
+                    if cart_item.quantity is None or cart_item.quantity < 0:
+                        self.logger.error(f"Invalid quantity for cart item {cart_item.id}: {cart_item.quantity}")
+                        raise ValueError(f"Invalid quantity for {cart_item.product_code}")
+                    
                     order_item = OrderItem(
-                        order_id=order.id,
-                        product_id=cart_item.product_id,
-                        product_code=cart_item.product_code,
-                        product_name=cart_item.product_name,
-                        quantity=cart_item.quantity,  # Paid quantity
-                        free_quantity=free_quantity,  # FOC quantity
-                        unit_price=sales_price,
-                        total_price=total_price
+                        order_id=int(order.id),
+                        product_id=int(cart_item.product_id),
+                        product_code=str(cart_item.product_code).strip(),
+                        product_name=str(cart_item.product_name).strip(),
+                        quantity=int(cart_item.quantity),  # Paid quantity
+                        free_quantity=int(free_quantity) if free_quantity else 0,  # FOC quantity
+                        unit_price=float(sales_price) if sales_price else 0.0,
+                        total_price=float(total_price) if total_price else 0.0
                     )
                     db.session.add(order_item)
                     
@@ -588,7 +624,7 @@ You'll receive an email when any of these products become available."""
                     
                     # Block quantity in dealer stock using FEFO (First Expiry, First Out)
                     if user.role == 'mr' and user.area:
-                        # Block quantity in dealer_wise_stock_details
+                        # For MRs, block quantity from dealers in their area
                         success = self._block_quantity_for_mr_order(
                             user=user,
                             product_code=cart_item.product_code,
@@ -600,6 +636,19 @@ You'll receive an email when any of these products become available."""
                             raise Exception(f"Failed to block quantity for {cart_item.product_code}")
                         
                         self.logger.info(f"Successfully blocked {cart_item.quantity} units of {cart_item.product_code} in dealer stock")
+                    elif user.role == 'distributor' and user.unique_id:
+                        # For distributors, block quantity from their own stock
+                        success = self._block_quantity_for_distributor_order(
+                            user=user,
+                            product_code=cart_item.product_code,
+                            quantity=cart_item.quantity
+                        )
+                        
+                        if not success:
+                            self.logger.error(f"Failed to block quantity for {cart_item.product_code}")
+                            raise Exception(f"Failed to block quantity for {cart_item.product_code}")
+                        
+                        self.logger.info(f"Successfully blocked {cart_item.quantity} units of {cart_item.product_code} from distributor's own stock")
             
             # Calculate tax (5%) and update order totals
             tax_rate = 0.05  # 5% tax
@@ -612,19 +661,40 @@ You'll receive an email when any of these products become available."""
             order.tax_rate = tax_rate
             order.total_amount = grand_total  # Grand total includes tax
             
-            # For MR orders, status should be 'pending' until dealer confirms
-            # For other users, status can be 'in_transit' after distributor notification
+            # Set order status based on user role
             if user.role == 'mr':
                 order.status = 'pending'  # MR orders start as pending until dealer confirms
                 order.order_stage = 'placed'  # Order is placed, waiting for dealer confirmation
+            elif user.role == 'distributor':
+                # Distributors place orders for their own stock management
+                # These orders are immediately confirmed (self-confirmed)
+                order.status = 'confirmed'  # Distributor orders are self-confirmed
+                order.order_stage = 'confirmed'
+                order.distributor_confirmed_at = datetime.utcnow()
+                order.distributor_confirmed_by = user.id
             else:
                 order.status = 'in_transit'  # First stage: in transit
                 order.order_stage = 'distributor_notified'
             
             # NOTE: Stock is now BLOCKED (not sold yet)
-            # It will move from blocked to sold when dealer confirms the order
-            
-            db.session.commit()
+            # For MR orders: It will move from blocked to sold when dealer confirms the order
+            # For distributor orders: Move stock immediately since order is self-confirmed
+            if user.role == 'distributor':
+                # Move blocked stock to sold immediately for distributor orders
+                # Create cart-like items from order items (we need to use order items, not cart items)
+                # But order items aren't created yet, so we'll move stock after commit
+                # Actually, we can move it now using the valid_cart_items
+                cart_items_for_movement = []
+                for cart_item in valid_cart_items:
+                    cart_items_for_movement.append(type('CartLikeItem', (), {
+                        'product_code': cart_item.product_code,
+                        'quantity': cart_item.quantity
+                    })())
+                
+                if cart_items_for_movement:
+                    # Move stock from blocked to sold for distributor's own stock
+                    self._move_blocked_to_sold_for_distributor_order(user, cart_items_for_movement)
+                    self.logger.info(f"Moved stock from blocked to sold for distributor order {order.order_id}")
             
             # Store all needed information BEFORE clearing cart
             # Store expired items details
@@ -689,13 +759,21 @@ You'll receive an email when any of these products become available."""
             # Clear cart
             self.db_service.clear_cart(user_id)
             
-            # Notify distributor (include expired products info)
-            self._notify_distributor(order, placed_by_user, expired_products_info)
+            # Commit all changes
+            db.session.commit()
             
-            # Generate enhanced confirmation message
-            from datetime import datetime
+            # Notify distributor (include expired products info) - non-critical, outside transaction
+            try:
+                self._notify_distributor(order, placed_by_user, expired_products_info)
+            except Exception as e:
+                self.logger.error(f"Error notifying distributor: {str(e)}")
+                # Don't fail the order if notification fails
+            
+            # Generate enhanced confirmation message (after transaction commits)
+            # datetime is already imported at module level
             
             # Get order items details from stored valid_items_details (already calculated)
+            # Note: These were calculated inside transaction but are used here
             order_items_details = valid_items_details
             # Total items (including FOC)
             total_items = sum(item['total_quantity'] for item in valid_items_details)
@@ -775,22 +853,30 @@ These products will be automatically ordered when new stock arrives. Track with 
             
         except Exception as e:
             self.logger.error(f"Error placing order: {str(e)}")
-            db.session.rollback()
+            # Transaction auto-rolls back, but ensure clean state
+            try:
+                db.session.rollback()
+            except Exception:
+                pass
             return {
                 'success': False,
                 'message': f"Error placing order: {str(e)}"
             }
     
+    @retry_on_transient_failure()
     def confirm_order_by_distributor(self, order_id, distributor_user_id, item_edits=None):
         """
         Confirm order by distributor with optional edits and stock discrepancy handling
         item_edits: dict of {item_id: {'quantity': int, 'expiry_date': date, 'reason': str}}
+        Wrapped in single transaction for atomicity
         """
         try:
             from app.models import PendingOrderProducts
             from datetime import date
             
-            order = Order.query.filter_by(order_id=order_id).first()
+            # Validation first (no transaction needed)
+            from app.db_locking import lock_order_for_update
+            order = lock_order_for_update(order_id, nowait=False)
             if not order:
                 return {
                     'success': False,
@@ -816,6 +902,7 @@ These products will be automatically ordered when new stock arrives. Track with 
             notifications = []
             cart_like_items = []
             
+            # Process order items (Flask-SQLAlchemy manages transactions)
             for item in order_items:
                 item_id = item.id
                 edit_data = item_edits.get(item_id, {})
@@ -825,6 +912,7 @@ These products will be automatically ordered when new stock arrives. Track with 
                 dealers_in_area = User.query.filter_by(role='distributor', area=order.mr.area).all()
                 dealer_unique_ids = [d.unique_id for d in dealers_in_area] if dealers_in_area else []
                 
+                # First, try to get blocked stock (stock that was reserved for this order)
                 stock_details = DealerWiseStockDetails.query.filter(
                     DealerWiseStockDetails.product_code == item.product_code,
                     DealerWiseStockDetails.status == 'confirmed',
@@ -832,28 +920,108 @@ These products will be automatically ordered when new stock arrives. Track with 
                     DealerWiseStockDetails.blocked_quantity > 0
                 ).all()
                 
-                total_available = sum(s.blocked_quantity for s in stock_details)
+                total_blocked = sum(s.blocked_quantity for s in stock_details)
                 requested_qty = item.quantity
                 
-                # Handle stock discrepancy
-                if total_available < requested_qty:
+                # Check if we need more stock (either no blocked stock, or not enough blocked stock)
+                if total_blocked < requested_qty:
+                    # Need to check for additional available stock
+                    shortfall = requested_qty - total_blocked
+                    self.logger.info(f"Blocked stock ({total_blocked}) is less than requested ({requested_qty}), checking for {shortfall} more units")
+                    
+                    available_stock_details = DealerWiseStockDetails.query.filter(
+                        DealerWiseStockDetails.product_code == item.product_code,
+                        DealerWiseStockDetails.status == 'confirmed',
+                        DealerWiseStockDetails.dealer_unique_id.in_(dealer_unique_ids),
+                        DealerWiseStockDetails.available_for_sale > 0
+                    ).order_by(DealerWiseStockDetails.expiry_date.asc()).all()  # FEFO: earliest expiry first
+                    
+                    total_available_stock = sum(s.available_for_sale for s in available_stock_details)
+                    
+                    if total_available_stock > 0:
+                        # Block additional stock to meet the requested quantity
+                        quantity_to_block = min(shortfall, total_available_stock)
+                        remaining_to_block = quantity_to_block
+                        
+                        self.logger.info(f"Found {total_available_stock} units of available stock, blocking {quantity_to_block} more units for {item.product_code}")
+                        
+                        for stock_detail in available_stock_details:
+                            if remaining_to_block <= 0:
+                                break
+                            
+                            available_in_stock = stock_detail.available_for_sale
+                            if available_in_stock <= 0:
+                                continue
+                            
+                            block_amount = min(remaining_to_block, available_in_stock)
+                            stock_detail.blocked_quantity += block_amount
+                            stock_detail.update_available_quantity()
+                            
+                            self.logger.info(f"Blocked {block_amount} additional units of {item.product_code} from stock ID {stock_detail.id}")
+                            remaining_to_block -= block_amount
+                        
+                        # Re-query to get all blocked stock (original + newly blocked)
+                        stock_details = DealerWiseStockDetails.query.filter(
+                            DealerWiseStockDetails.product_code == item.product_code,
+                            DealerWiseStockDetails.status == 'confirmed',
+                            DealerWiseStockDetails.dealer_unique_id.in_(dealer_unique_ids),
+                            DealerWiseStockDetails.blocked_quantity > 0
+                        ).all()
+                        
+                        total_blocked = sum(s.blocked_quantity for s in stock_details)
+                        total_available = total_blocked
+                        self.logger.info(f"Total blocked stock now: {total_blocked} units for {item.product_code} (requested: {requested_qty})")
+                    else:
+                        # No additional available stock, use what we have blocked
+                        total_available = total_blocked
+                        self.logger.warning(f"No additional available stock found for {item.product_code}, will dispatch only {total_blocked} units")
+                else:
+                    # We have enough or more blocked stock than requested
+                    total_available = total_blocked
+                
+                # CRITICAL: Ensure total_available is set correctly
+                if total_available <= 0:
+                    self.logger.error(f"No stock available (blocked or available) for {item.product_code}, cannot dispatch")
+                    # Still need to set dispatch_qty, but it will be 0
+                    dispatch_qty = 0
+                    pending_qty = requested_qty
+                elif total_available < requested_qty:
                     # Partial dispatch - dispatch available, move rest to pending
                     dispatch_qty = total_available
                     pending_qty = requested_qty - total_available
                     
-                    # Update order item
-                    item.adjusted_quantity = dispatch_qty
-                    item.pending_quantity = pending_qty
-                    item.adjustment_reason = f"Stock discrepancy: Only {dispatch_qty} units available. {pending_qty} units moved to pending orders."
+                    # Update order item - ensure all fields are properly set
+                    item.adjusted_quantity = int(dispatch_qty) if dispatch_qty is not None else None
+                    item.pending_quantity = int(pending_qty) if pending_qty is not None else 0
+                    adjustment_reason_text = f"Stock discrepancy: Only {dispatch_qty} units available. {pending_qty} units moved to pending orders."
+                    item.adjustment_reason = adjustment_reason_text.strip() if adjustment_reason_text else None
                     
-                    # Create pending order
+                    # Create pending order - ensure all required fields are populated
+                    if not item.product_code or not item.product_name:
+                        self.logger.error(f"Missing product_code or product_name for item {item.id}")
+                        continue
+                    
+                    if not order.mr_id:
+                        self.logger.error(f"Missing mr_id for order {order.order_id}")
+                        continue
+                    
+                    mr_email = order.mr.email if order.mr and order.mr.email else ''
+                    if not mr_email:
+                        # Try to get email from user object
+                        mr_user = User.query.get(order.mr_id)
+                        mr_email = mr_user.email if mr_user and mr_user.email else ''
+                    
+                    if not mr_email:
+                        self.logger.warning(f"No email found for MR {order.mr_id}, using placeholder")
+                        mr_email = 'no-email@placeholder.com'  # Ensure non-null value
+                    
                     pending_order = PendingOrderProducts(
-                        original_order_id=order.order_id,
-                        product_code=item.product_code,
-                        product_name=item.product_name,
-                        requested_quantity=pending_qty,
-                        user_id=order.mr_id,
-                        user_email=order.mr.email if order.mr else '',
+                        original_order_id=order.order_id or None,
+                        product_code=str(item.product_code).strip(),
+                        product_name=str(item.product_name).strip(),
+                        requested_quantity=int(pending_qty),
+                        user_id=int(order.mr_id),
+                        user_email=str(mr_email).strip(),
                         status='pending'
                     )
                     db.session.add(pending_order)
@@ -861,34 +1029,78 @@ These products will be automatically ordered when new stock arrives. Track with 
                     notifications.append(f"{item.product_name}: Dispatched {dispatch_qty} units. {pending_qty} units pending (will be dispatched when stock arrives).")
                     
                     # Use adjusted quantity for moving to sold
-                    cart_like_items.append(type('CartLikeItem', (), {
-                        'product_code': item.product_code,
-                        'quantity': dispatch_qty
-                    })())
+                    # Only add if dispatch_qty > 0
+                    if dispatch_qty > 0:
+                        cart_like_items.append(type('CartLikeItem', (), {
+                            'product_code': item.product_code,
+                            'quantity': dispatch_qty
+                        })())
+                    else:
+                        self.logger.warning(f"Skipping stock movement for item {item.id} (stock discrepancy case) - dispatch_qty is {dispatch_qty}")
                 else:
                     # Full dispatch possible - check if dealer adjusted quantity
-                    dispatch_qty = edit_data.get('quantity', requested_qty)
+                    # Get quantity from edits if provided, otherwise use requested
+                    if 'quantity' in edit_data and edit_data['quantity'] is not None:
+                        edit_qty = edit_data['quantity']
+                        # Convert to int and validate
+                        if isinstance(edit_qty, (int, float)):
+                            edit_qty_int = int(edit_qty)
+                            # If edit quantity is 0 or negative, use requested quantity (dealer can't dispatch 0)
+                            # If edit quantity is positive, use it (dealer may have reduced quantity)
+                            dispatch_qty = edit_qty_int if edit_qty_int > 0 else requested_qty
+                        else:
+                            # Invalid type, use requested quantity
+                            dispatch_qty = requested_qty
+                    else:
+                        # No quantity in edits, use requested quantity from database
+                        dispatch_qty = requested_qty
+                    
+                    # CRITICAL: Ensure dispatch_qty is never 0 or None when stock is available
+                    if dispatch_qty <= 0:
+                        self.logger.warning(f"dispatch_qty is {dispatch_qty} for item {item.id}, using requested_qty {requested_qty} instead")
+                        dispatch_qty = requested_qty
+                    
+                    # Always save adjusted_quantity when dealer confirms (even if same as requested)
+                    # This ensures we track what was actually dispatched
+                    item.adjusted_quantity = int(dispatch_qty) if dispatch_qty is not None else None
                     
                     # Handle quantity adjustment by dealer
                     if dispatch_qty != requested_qty:
                         if dispatch_qty < requested_qty:
                             # Dealer reduced quantity - move difference to pending
                             pending_qty = requested_qty - dispatch_qty
-                            item.adjusted_quantity = dispatch_qty
-                            item.pending_quantity = pending_qty
+                            item.pending_quantity = int(pending_qty) if pending_qty is not None else 0
                             
                             # Get reason from edits or use default
                             reason = edit_data.get('reason', f'Quantity adjusted: {dispatch_qty} units dispatched, {pending_qty} units moved to pending orders')
-                            item.adjustment_reason = reason
+                            item.adjustment_reason = str(reason).strip() if reason else None
                             
-                            # Create pending order
+                            # Create pending order - ensure all required fields are populated
+                            if not item.product_code or not item.product_name:
+                                self.logger.error(f"Missing product_code or product_name for item {item.id}")
+                                continue
+                            
+                            if not order.mr_id:
+                                self.logger.error(f"Missing mr_id for order {order.order_id}")
+                                continue
+                            
+                            mr_email = order.mr.email if order.mr and order.mr.email else ''
+                            if not mr_email:
+                                # Try to get email from user object
+                                mr_user = User.query.get(order.mr_id)
+                                mr_email = mr_user.email if mr_user and mr_user.email else ''
+                            
+                            if not mr_email:
+                                self.logger.warning(f"No email found for MR {order.mr_id}, using placeholder")
+                                mr_email = 'no-email@placeholder.com'  # Ensure non-null value
+                            
                             pending_order = PendingOrderProducts(
-                                original_order_id=order.order_id,
-                                product_code=item.product_code,
-                                product_name=item.product_name,
-                                requested_quantity=pending_qty,
-                                user_id=order.mr_id,
-                                user_email=order.mr.email if order.mr else '',
+                                original_order_id=order.order_id or None,
+                                product_code=str(item.product_code).strip(),
+                                product_name=str(item.product_name).strip(),
+                                requested_quantity=int(pending_qty),
+                                user_id=int(order.mr_id),
+                                user_email=str(mr_email).strip(),
                                 status='pending'
                             )
                             db.session.add(pending_order)
@@ -897,39 +1109,58 @@ These products will be automatically ordered when new stock arrives. Track with 
                         else:
                             # Dealer increased quantity - not allowed, use original
                             dispatch_qty = requested_qty
+                            item.adjusted_quantity = int(requested_qty) if requested_qty is not None else None  # Reset to original
                             notifications.append(f"{item.product_name}: Cannot increase quantity above ordered amount. Using original quantity {requested_qty}.")
                     else:
-                        # Quantity unchanged, but check if reason provided for notification
+                        # Quantity unchanged, but still save it as adjusted_quantity
+                        # Check if reason provided for notification
                         if 'reason' in edit_data and edit_data['reason']:
                             item.adjustment_reason = edit_data['reason']
+                        # If no edits were made, adjusted_quantity is already set to dispatch_qty (which equals requested_qty)
                     
-                    # Update expiry date if edited
+                    # Update expiry date if edited - ensure valid date
                     if 'expiry_date' in edit_data and edit_data['expiry_date']:
                         try:
-                            from datetime import datetime
-                            if isinstance(edit_data['expiry_date'], str):
-                                item.adjusted_expiry_date = datetime.strptime(edit_data['expiry_date'], '%Y-%m-%d').date()
-                            else:
+                            # datetime is already imported at module level
+                            if isinstance(edit_data['expiry_date'], str) and edit_data['expiry_date'].strip():
+                                item.adjusted_expiry_date = datetime.strptime(edit_data['expiry_date'].strip(), '%Y-%m-%d').date()
+                                self.logger.info(f"Updated expiry date for item {item.id}: {item.adjusted_expiry_date}")
+                            elif hasattr(edit_data['expiry_date'], 'date'):  # Already a date object
                                 item.adjusted_expiry_date = edit_data['expiry_date']
-                            self.logger.info(f"Updated expiry date for item {item.id}: {item.adjusted_expiry_date}")
-                        except Exception as e:
-                            self.logger.error(f"Error updating expiry date: {str(e)}")
+                                self.logger.info(f"Updated expiry date for item {item.id}: {item.adjusted_expiry_date}")
+                            else:
+                                self.logger.warning(f"Invalid expiry_date format for item {item.id}: {edit_data['expiry_date']}")
+                        except (ValueError, TypeError) as e:
+                            self.logger.error(f"Error parsing expiry date for item {item.id}: {str(e)}")
+                            # Don't set invalid date, leave as None
                     
-                    # Update lot number if edited (save to dedicated field)
+                    # Update lot number if edited (save to dedicated field) - ensure non-empty string
                     if 'lot_number' in edit_data and edit_data['lot_number']:
-                        item.adjusted_lot_number = edit_data['lot_number'].strip()
-                        self.logger.info(f"Updated lot number for item {item.id}: {item.adjusted_lot_number}")
-                        # Also add to adjustment_reason if not already there
-                        if item.adjustment_reason and 'lot number' not in item.adjustment_reason.lower():
-                            item.adjustment_reason = f"{item.adjustment_reason}. Lot Number: {item.adjusted_lot_number}"
-                        elif not item.adjustment_reason:
-                            item.adjustment_reason = f"Lot Number: {item.adjusted_lot_number}"
+                        lot_number = str(edit_data['lot_number']).strip()
+                        if lot_number:  # Only set if not empty after stripping
+                            item.adjusted_lot_number = lot_number
+                            self.logger.info(f"Updated lot number for item {item.id}: {item.adjusted_lot_number}")
+                            # Also add to adjustment_reason if not already there
+                            if item.adjustment_reason and 'lot number' not in item.adjustment_reason.lower():
+                                item.adjustment_reason = f"{item.adjustment_reason}. Lot Number: {item.adjusted_lot_number}"
+                            elif not item.adjustment_reason:
+                                item.adjustment_reason = f"Lot Number: {item.adjusted_lot_number}"
+                        else:
+                            self.logger.warning(f"Empty lot_number provided for item {item.id}, skipping")
                     
-                    cart_like_items.append(type('CartLikeItem', (), {
-                        'product_code': item.product_code,
-                        'quantity': dispatch_qty
-                    })())
-            
+                    # Ensure adjustment_reason is not empty string if set
+                    if item.adjustment_reason and not str(item.adjustment_reason).strip():
+                        item.adjustment_reason = None
+                    
+                    # Only add to cart_like_items if dispatch_qty > 0 (we have something to dispatch)
+                    if dispatch_qty > 0:
+                        cart_like_items.append(type('CartLikeItem', (), {
+                            'product_code': item.product_code,
+                            'quantity': dispatch_qty
+                        })())
+                    else:
+                        self.logger.warning(f"Skipping stock movement for item {item.id} - dispatch_qty is {dispatch_qty}")
+                
             # Update order status
             order.distributor_confirmed_at = datetime.utcnow()
             order.distributor_confirmed_by = distributor_user_id
@@ -940,7 +1171,19 @@ These products will be automatically ordered when new stock arrives. Track with 
             if order.mr and order.mr.area and cart_like_items:
                 self._move_blocked_to_sold_for_mr_order(order.mr, cart_like_items)
             
+            # Commit all changes
             db.session.commit()
+            
+            # Notify MR about order approval (non-critical, outside transaction)
+            try:
+                from app.notification_service import NotificationService
+                notification_service = NotificationService()
+                mr = User.query.get(order.mr_id)
+                if mr:
+                    notification_service.notify_order_approved(order, mr)
+                    notification_service.notify_order_status_change(order, mr, 'confirmed')
+            except Exception as e:
+                self.logger.error(f"Error sending order approval notification: {str(e)}")
             
             # Include notifications in response if there are stock discrepancies
             result_message = f"Order {order_id} confirmed and invoice generated"
@@ -1008,13 +1251,13 @@ These products will be automatically ordered when new stock arrives. Track with 
                 # Show recalculated totals if quantities were adjusted
                 if has_quantity_adjustments:
                     tax_html = f"""
-                        <div class='success-box'>
-                            <h3 style='margin-top: 0; color: #059669;'>💰 Payment Summary</h3>
+                    <div class='success-box'>
+                        <h3 style='margin-top: 0; color: #059669;'>💰 Payment Summary</h3>
                             <p style='margin: 5px 0;'><strong>Subtotal:</strong> {recalculated_subtotal:,.2f} MMK <small style='color:#856404;'>(adjusted from {order.subtotal:,.2f} MMK)</small></p>
                             <p style='margin: 5px 0;'><strong>Tax (5%):</strong> {recalculated_tax:,.2f} MMK</p>
                             <p style='margin: 5px 0; font-size: 1.2em;'><strong>Grand Total:</strong> {recalculated_grand_total:,.2f} MMK</p>
-                        </div>
-                    """
+                    </div>
+                """
                 else:
                     tax_html = f"""
                         <div class='success-box'>
@@ -1220,18 +1463,26 @@ These products will be automatically ordered when new stock arrives. Track with 
             }
         except Exception as e:
             self.logger.error(f"Error confirming order: {str(e)}")
-            db.session.rollback()
+            # Transaction auto-rolls back, but ensure clean state
+            try:
+                db.session.rollback()
+            except Exception:
+                pass
             return {
                 'success': False,
                 'message': f"Error confirming order: {str(e)}"
             }
     
+    @retry_on_transient_failure()
     def cancel_order_by_mr(self, order_id, mr_user_id):
         """
         Cancel order by MR - unblock stock and update order status
+        Wrapped in single transaction for atomicity
         """
         try:
-            order = Order.query.filter_by(order_id=order_id).first()
+            # Validation first (no transaction needed)
+            from app.db_locking import lock_order_for_update
+            order = lock_order_for_update(order_id, nowait=False)
             if not order:
                 return {
                     'success': False,
@@ -1258,7 +1509,7 @@ These products will be automatically ordered when new stock arrives. Track with 
                     'message': f"Cannot cancel order. Order status is '{order.status}'. Only pending orders can be cancelled."
                 }
             
-            # Unblock quantities
+            # Unblock quantities (Flask-SQLAlchemy manages transactions)
             order_items = OrderItem.query.filter_by(order_id=order.id).all()
             
             # Find dealers in MR's area
@@ -1312,6 +1563,7 @@ These products will be automatically ordered when new stock arrives. Track with 
             order.status = 'cancelled'
             order.order_stage = 'cancelled'
             
+            # Commit all changes
             db.session.commit()
             
             # Send email notifications
@@ -1481,12 +1733,16 @@ These products will be automatically ordered when new stock arrives. Track with 
                 'message': f"Error cancelling order: {str(e)}"
             }
     
+    @retry_on_transient_failure()
     def reject_order_by_distributor(self, order_id, distributor_user_id, rejection_reason=None):
         """
         Reject order by distributor and unblock stock
+        Wrapped in single transaction for atomicity
         """
         try:
-            order = Order.query.filter_by(order_id=order_id).first()
+            # Validation first (no transaction needed)
+            from app.db_locking import lock_order_for_update
+            order = lock_order_for_update(order_id, nowait=False)
             if not order:
                 return {
                     'success': False,
@@ -1506,7 +1762,7 @@ These products will be automatically ordered when new stock arrives. Track with 
                     'message': "This order doesn't belong to your area."
                 }
             
-            # Update order status
+            # Update order status (Flask-SQLAlchemy manages transactions)
             order.status = 'rejected'
             order.order_stage = 'rejected'
             
@@ -1561,6 +1817,7 @@ These products will be automatically ordered when new stock arrives. Track with 
                         
                         remaining_to_unblock -= quantity_to_unblock
             
+            # Commit all changes
             db.session.commit()
             
             # Send rejection notification to MR with enhanced template
@@ -1625,7 +1882,8 @@ These products will be automatically ordered when new stock arrives. Track with 
         Get order status and details
         """
         try:
-            order = Order.query.filter_by(order_id=order_id).first()
+            from app.db_locking import lock_order_for_update
+            order = lock_order_for_update(order_id, nowait=False)
             if not order:
                 return {
                     'success': False,
@@ -2171,6 +2429,152 @@ These products will be automatically ordered when new stock arrives. Track with 
         except Exception as e:
             self.logger.error(f"Error blocking quantity for MR order: {str(e)}")
             return False  # Return False on exception
+    
+    def _block_quantity_for_distributor_order(self, user, product_code, quantity):
+        """
+        Block quantity in dealer_wise_stock_details when distributor places an order
+        Uses FEFO (First Expiry First Out) to block from earliest expiring stock
+        """
+        try:
+            from datetime import date
+            today = date.today()
+            
+            if not user.unique_id:
+                self.logger.warning(f"No unique_id found for distributor {user.name}")
+                return False
+            
+            remaining_quantity = quantity
+            
+            # Get all confirmed stock details for this product from this distributor
+            # Ordered by expiration date (earliest first) for FEFO
+            from sqlalchemy import case
+            all_stock_details = DealerWiseStockDetails.query.filter(
+                DealerWiseStockDetails.product_code == product_code,
+                DealerWiseStockDetails.status == 'confirmed',
+                DealerWiseStockDetails.dealer_unique_id == user.unique_id
+            ).order_by(
+                case(
+                    (DealerWiseStockDetails.expiry_date.is_(None), 1),
+                    else_=0
+                ),
+                DealerWiseStockDetails.expiry_date.asc()
+            ).all()
+            
+            # Filter to only stock with available_for_sale > 0
+            available_stock = [s for s in all_stock_details if s.available_for_sale > 0]
+            
+            if not available_stock:
+                self.logger.warning(f"No available stock found for {product_code} from distributor {user.unique_id}")
+                return False
+            
+            # Block quantity using FEFO (earliest expiry first)
+            for stock_detail in available_stock:
+                if remaining_quantity <= 0:
+                    break
+                
+                available_in_this_stock = stock_detail.available_for_sale
+                if available_in_this_stock <= 0:
+                    continue
+                
+                # Calculate how much to block from this stock detail
+                quantity_to_block = min(remaining_quantity, available_in_this_stock)
+                
+                # Block the quantity
+                stock_detail.blocked_quantity += quantity_to_block
+                stock_detail.update_available_quantity()
+                
+                self.logger.info(
+                    f"Blocked {quantity_to_block} units of {product_code} from distributor {user.unique_id} "
+                    f"(Stock ID: {stock_detail.id}, Expiry: {stock_detail.expiry_date}, "
+                    f"Available now: {stock_detail.available_for_sale})"
+                )
+                
+                remaining_quantity -= quantity_to_block
+            
+            if remaining_quantity > 0:
+                self.logger.warning(
+                    f"Could only block {quantity - remaining_quantity} out of {quantity} units "
+                    f"for {product_code} (insufficient stock in dealer_wise_stock_details)"
+                )
+                return False  # Failed to block all requested quantity
+            
+            db.session.flush()  # Flush changes but don't commit yet (will be committed with order)
+            return True  # Successfully blocked all requested quantity
+            
+        except Exception as e:
+            self.logger.error(f"Error blocking quantity for distributor order: {str(e)}")
+            return False  # Return False on exception
+    
+    def _move_blocked_to_sold_for_distributor_order(self, user, cart_items):
+        """
+        Move blocked quantities to sold for distributor's own orders
+        Updates available_for_sale accordingly
+        """
+        try:
+            from app.models import DealerWiseStockDetails
+            
+            if not user.unique_id:
+                self.logger.warning(f"No unique_id found for distributor {user.name}")
+                return
+            
+            # Process each cart item
+            for cart_item in cart_items:
+                product_code = cart_item.product_code
+                quantity_to_move = cart_item.quantity
+                
+                # Get all stock details with blocked quantity for this product from this distributor
+                from sqlalchemy import case
+                stock_details = DealerWiseStockDetails.query.filter(
+                    DealerWiseStockDetails.product_code == product_code,
+                    DealerWiseStockDetails.status == 'confirmed',
+                    DealerWiseStockDetails.dealer_unique_id == user.unique_id,
+                    DealerWiseStockDetails.blocked_quantity > 0
+                ).order_by(
+                    case(
+                        (DealerWiseStockDetails.expiry_date.is_(None), 1),
+                        else_=0
+                    ),
+                    DealerWiseStockDetails.expiry_date.asc()
+                ).all()
+                
+                remaining_quantity = quantity_to_move
+                
+                # Move blocked to sold using FEFO (earliest expiry first)
+                for stock_detail in stock_details:
+                    if remaining_quantity <= 0:
+                        break
+                    
+                    blocked_in_this_stock = stock_detail.blocked_quantity
+                    if blocked_in_this_stock <= 0:
+                        continue
+                    
+                    # Calculate how much to move from this stock detail
+                    quantity_to_move_from_stock = min(remaining_quantity, blocked_in_this_stock)
+                    
+                    # Move from blocked to sold
+                    stock_detail.blocked_quantity -= quantity_to_move_from_stock
+                    stock_detail.sold_quantity += quantity_to_move_from_stock
+                    stock_detail.update_available_quantity()
+                    
+                    self.logger.info(
+                        f"Moved {quantity_to_move_from_stock} units of {product_code} from blocked to sold "
+                        f"(Stock ID: {stock_detail.id}, Dealer: {stock_detail.dealer_name}, "
+                        f"Blocked now: {stock_detail.blocked_quantity}, Sold now: {stock_detail.sold_quantity}, "
+                        f"Available now: {stock_detail.available_for_sale})"
+                    )
+                    
+                    remaining_quantity -= quantity_to_move_from_stock
+                
+                if remaining_quantity > 0:
+                    self.logger.warning(
+                        f"Could only move {quantity_to_move - remaining_quantity} out of {quantity_to_move} units "
+                        f"from blocked to sold for {product_code} (insufficient blocked quantity)"
+                    )
+            
+            db.session.flush()  # Flush changes
+            
+        except Exception as e:
+            self.logger.error(f"Error moving blocked to sold for distributor order: {str(e)}")
     
     def _move_blocked_to_sold_for_mr_order(self, user, cart_items):
         """

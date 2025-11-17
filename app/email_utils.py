@@ -1,6 +1,7 @@
 import logging
 import os
 import base64
+import requests
 from flask import current_app, render_template_string
 from flask_mail import Message
 from app import mail, db
@@ -8,6 +9,125 @@ from app.models import EmailLog
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+def get_microsoft_graph_token():
+    """Get access token for Microsoft Graph API"""
+    try:
+        tenant_id = current_app.config.get('MS_GRAPH_TENANT_ID')
+        client_id = current_app.config.get('MS_GRAPH_CLIENT_ID')
+        client_secret = current_app.config.get('MS_GRAPH_CLIENT_SECRET')
+        
+        if not all([tenant_id, client_id, client_secret]):
+            logger.warning("Microsoft Graph credentials not configured. Falling back to SMTP.")
+            return None
+        
+        token_url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+        
+        token_data = {
+            'client_id': client_id,
+            'scope': 'https://graph.microsoft.com/.default',
+            'client_secret': client_secret,
+            'grant_type': 'client_credentials'
+        }
+        
+        from app.timeout_utils import get_timeout
+        from app.circuit_breaker import get_circuit_breaker
+        
+        # Use circuit breaker for Microsoft Graph token
+        breaker = get_circuit_breaker('microsoft_graph_token', failure_threshold=3, recovery_timeout=60)
+        
+        def _get_token():
+            response = requests.post(token_url, data=token_data, timeout=get_timeout('email'))
+            response.raise_for_status()
+            return response.json()
+        
+        token_json = breaker.call(_get_token, fallback=lambda: None)
+        if token_json is None:
+            return None
+        
+        access_token = token_json.get('access_token')
+        
+        if access_token:
+            logger.debug("Successfully obtained Microsoft Graph access token")
+            return access_token
+        else:
+            logger.error("No access token in Microsoft Graph response")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error getting Microsoft Graph token: {str(e)}")
+        return None
+
+def send_email_via_graph(to_email, subject, html_content, sender_email=None):
+    """Send email using Microsoft Graph API"""
+    try:
+        access_token = get_microsoft_graph_token()
+        if not access_token:
+            return False
+        
+        sender_email = sender_email or current_app.config.get('MS_GRAPH_SENDER_EMAIL')
+        if not sender_email:
+            logger.error("MS_GRAPH_SENDER_EMAIL not configured")
+            return False
+        
+        # Microsoft Graph API endpoint for sending email
+        graph_url = f"https://graph.microsoft.com/v1.0/users/{sender_email}/sendMail"
+        
+        # Prepare email message
+        message = {
+            "message": {
+                "subject": subject,
+                "body": {
+                    "contentType": "HTML",
+                    "content": html_content
+                },
+                "toRecipients": [
+                    {
+                        "emailAddress": {
+                            "address": to_email
+                        }
+                    }
+                ]
+            }
+        }
+        
+        headers = {
+            'Authorization': f'Bearer {access_token}',
+            'Content-Type': 'application/json'
+        }
+        
+        from app.timeout_utils import get_timeout
+        from app.circuit_breaker import get_circuit_breaker
+        
+        # Use circuit breaker for Microsoft Graph email sending
+        breaker = get_circuit_breaker('microsoft_graph_email', failure_threshold=3, recovery_timeout=60)
+        
+        def _send_email():
+            response = requests.post(graph_url, json=message, headers=headers, timeout=get_timeout('email'))
+            response.raise_for_status()
+            return True
+        
+        try:
+            success = breaker.call(_send_email, fallback=lambda: False)
+            if success:
+                logger.info(f'Email sent via Microsoft Graph to {to_email}')
+            return success
+        except Exception as e:
+            logger.error(f'Microsoft Graph email sending failed: {str(e)}')
+            return False
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f'Microsoft Graph email sending failed: {str(e)}')
+        if hasattr(e, 'response') and e.response is not None:
+            try:
+                error_detail = e.response.json()
+                logger.error(f'Graph API error details: {error_detail}')
+            except:
+                logger.error(f'Graph API error response: {e.response.text}')
+        return False
+    except Exception as e:
+        logger.error(f'Unexpected error sending email via Graph: {str(e)}')
+        return False
 
 def get_logo_base64():
     """Get Quantum Blue logo as base64 for email embedding"""
@@ -129,7 +249,7 @@ def create_email_template(title, content, footer_text="This is an automated emai
     '''
 
 def send_email(to_email, subject, html_content, email_type='general', order_id=None, sender_email=None, sender_name=None, receiver_name=None):
-    """Send email via SMTP with detailed logging"""
+    """Send email via Microsoft Graph API (fallback to SMTP if Graph not configured)"""
     try:
         sender_config = current_app.config.get('MAIL_DEFAULT_SENDER', 'noreply@quantumblue.ai')
         if isinstance(sender_config, tuple):
@@ -139,6 +259,39 @@ def send_email(to_email, subject, html_content, email_type='general', order_id=N
             sender_email_config = sender_config
             sender_name_config = 'Quantum Blue AI'
         
+        # Try Microsoft Graph API first
+        graph_sender = sender_email or current_app.config.get('MS_GRAPH_SENDER_EMAIL') or sender_email_config
+        if send_email_via_graph(to_email, subject, html_content, graph_sender):
+            # Successfully sent via Graph API, log it
+            try:
+                email_log = EmailLog(
+                    recipient=to_email,
+                    email_type=email_type,
+                    status='sent',
+                    order_id=order_id,
+                    sender_email=graph_sender,
+                    sender_name=sender_name or sender_name_config,
+                    receiver_email=to_email,
+                    receiver_name=receiver_name,
+                    subject=subject,
+                    body_preview=html_content[:200] if html_content else None
+                )
+                db.session.add(email_log)
+                db.session.flush()
+                db.session.commit()
+                logger.debug(f'Email logged successfully: {email_type} to {to_email}, Order: {order_id}')
+            except Exception as log_e:
+                logger.warning(f'Failed to log email success: {str(log_e)}')
+                try:
+                    db.session.rollback()
+                except:
+                    pass
+            
+            logger.info(f'Email sent via Microsoft Graph to {to_email} (Order: {order_id})')
+            return True
+        
+        # Fallback to SMTP if Graph API is not configured or fails
+        logger.info("Falling back to SMTP for email sending")
         msg = Message(
             subject=subject,
             recipients=[to_email],
@@ -665,8 +818,95 @@ def send_quantity_discrepancy_email(dealer_name, dealer_email, product_code, pro
     )
 
 def send_email_with_attachment(to_email, subject, html_content, csv_data=None, filename='report.csv', email_type='report'):
-    """Send email with CSV attachment"""
+    """Send email with CSV attachment via Microsoft Graph API (fallback to SMTP)"""
     try:
+        # Try Microsoft Graph API first (with attachment support)
+        access_token = get_microsoft_graph_token()
+        sender_email = current_app.config.get('MS_GRAPH_SENDER_EMAIL') or current_app.config.get('MAIL_DEFAULT_SENDER')
+        
+        if access_token and sender_email and csv_data:
+            try:
+                import base64 as b64
+                graph_url = f"https://graph.microsoft.com/v1.0/users/{sender_email}/sendMail"
+                
+                # Encode CSV attachment
+                if isinstance(csv_data, str):
+                    csv_bytes = csv_data.encode('utf-8')
+                else:
+                    csv_bytes = csv_data
+                csv_base64 = b64.b64encode(csv_bytes).decode('utf-8')
+                
+                message = {
+                    "message": {
+                        "subject": subject,
+                        "body": {
+                            "contentType": "HTML",
+                            "content": html_content
+                        },
+                        "toRecipients": [
+                            {
+                                "emailAddress": {
+                                    "address": to_email
+                                }
+                            }
+                        ],
+                        "attachments": [
+                            {
+                                "@odata.type": "#microsoft.graph.fileAttachment",
+                                "name": filename,
+                                "contentType": "text/csv",
+                                "contentBytes": csv_base64
+                            }
+                        ]
+                    }
+                }
+                
+                headers = {
+                    'Authorization': f'Bearer {access_token}',
+                    'Content-Type': 'application/json'
+                }
+                
+                response = requests.post(graph_url, json=message, headers=headers, timeout=30)
+                response.raise_for_status()
+                
+                logger.info(f'Email with attachment sent via Microsoft Graph to {to_email}')
+                
+                # Log success
+                try:
+                    sender_config = current_app.config.get('MAIL_DEFAULT_SENDER', 'noreply@quantumblue.ai')
+                    if isinstance(sender_config, tuple):
+                        sender_email_config = sender_config[1] if len(sender_config) > 1 else sender_config[0]
+                        sender_name_config = sender_config[0] if len(sender_config) > 1 else 'Quantum Blue AI'
+                    else:
+                        sender_email_config = sender_config
+                        sender_name_config = 'Quantum Blue AI'
+                    
+                    email_log = EmailLog(
+                        recipient=to_email,
+                        email_type=email_type,
+                        status='sent',
+                        sender_email=sender_email,
+                        sender_name=sender_name_config,
+                        receiver_email=to_email,
+                        subject=subject,
+                        body_preview=html_content[:200] if html_content else None
+                    )
+                    db.session.add(email_log)
+                    db.session.flush()
+                    db.session.commit()
+                except Exception as log_e:
+                    logger.warning(f'Failed to log email success: {str(log_e)}')
+                    try:
+                        db.session.rollback()
+                    except:
+                        pass
+                
+                return True
+            except Exception as graph_e:
+                logger.warning(f"Microsoft Graph attachment email failed, falling back to SMTP: {str(graph_e)}")
+        
+        # Fallback to SMTP
+        logger.info("Using SMTP for email with attachment")
         msg = Message(
             subject=subject,
             recipients=[to_email],
