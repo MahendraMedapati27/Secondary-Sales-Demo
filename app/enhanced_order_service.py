@@ -764,7 +764,7 @@ You'll receive an email when any of these products become available."""
             
             # Notify distributor (include expired products info) - non-critical, outside transaction
             try:
-                self._notify_distributor(order, placed_by_user, expired_products_info)
+            self._notify_distributor(order, placed_by_user, expired_products_info)
             except Exception as e:
                 self.logger.error(f"Error notifying distributor: {str(e)}")
                 # Don't fail the order if notification fails
@@ -855,7 +855,7 @@ These products will be automatically ordered when new stock arrives. Track with 
             self.logger.error(f"Error placing order: {str(e)}")
             # Transaction auto-rolls back, but ensure clean state
             try:
-                db.session.rollback()
+            db.session.rollback()
             except Exception:
                 pass
             return {
@@ -1250,7 +1250,7 @@ These products will be automatically ordered when new stock arrives. Track with 
             if hasattr(order, 'subtotal') and order.subtotal:
                 # Show recalculated totals if quantities were adjusted
                 if has_quantity_adjustments:
-                    tax_html = f"""
+                tax_html = f"""
                     <div class='success-box'>
                         <h3 style='margin-top: 0; color: #059669;'>💰 Payment Summary</h3>
                             <p style='margin: 5px 0;'><strong>Subtotal:</strong> {recalculated_subtotal:,.2f} MMK <small style='color:#856404;'>(adjusted from {order.subtotal:,.2f} MMK)</small></p>
@@ -1258,7 +1258,7 @@ These products will be automatically ordered when new stock arrives. Track with 
                             <p style='margin: 5px 0; font-size: 1.2em;'><strong>Grand Total:</strong> {recalculated_grand_total:,.2f} MMK</p>
                     </div>
                 """
-                else:
+            else:
                     tax_html = f"""
                         <div class='success-box'>
                             <h3 style='margin-top: 0; color: #059669;'>💰 Payment Summary</h3>
@@ -1465,7 +1465,7 @@ These products will be automatically ordered when new stock arrives. Track with 
             self.logger.error(f"Error confirming order: {str(e)}")
             # Transaction auto-rolls back, but ensure clean state
             try:
-                db.session.rollback()
+            db.session.rollback()
             except Exception:
                 pass
             return {
