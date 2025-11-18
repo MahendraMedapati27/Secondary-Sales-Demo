@@ -12,14 +12,15 @@ from pathlib import Path
 project_root = Path(__file__).resolve().parent
 sys.path.insert(0, str(project_root))
 
+# Import and create the Flask app at module level for gunicorn
+from app import create_app
+app = create_app()
+
 def main():
     """Main application entry point"""
     try:
-        # Import and create the Flask app
-        from app import create_app
-        
-        # Create the Flask application instance
-        app = create_app()
+        # App is already created at module level
+        global app
         
         # Get configuration from environment
         debug_mode = os.getenv('FLASK_DEBUG', 'False').lower() == 'true'
