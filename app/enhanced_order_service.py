@@ -9,8 +9,23 @@ from app.llm_order_service import LLMOrderService
 from app.email_utils import send_email
 from app.db_utils import retry_on_transient_failure
 
-logging.basicConfig(level=logging.INFO)
+# Single logger initialization
 logger = logging.getLogger(__name__)
+
+# Valid order statuses and stages
+VALID_ORDER_STATUSES = ['pending', 'confirmed', 'in_transit', 'delivered', 'cancelled', 'completed']
+VALID_ORDER_STAGES = ['draft', 'placed', 'confirmed', 'distributor_notified', 'in_transit', 'delivered', 'completed', 'cancelled']
+
+# Valid status transitions
+# Note: 'confirmed' can go directly to 'delivered' when delivery partner marks it
+ORDER_STATUS_TRANSITIONS = {
+    'pending': ['confirmed', 'cancelled'],
+    'confirmed': ['in_transit', 'delivered', 'cancelled'],  # Added 'delivered' for direct delivery
+    'in_transit': ['delivered', 'cancelled'],
+    'delivered': ['completed'],
+    'cancelled': [],  # Terminal state
+    'completed': []  # Terminal state
+}
 
 class EnhancedOrderService:
     """Enhanced order service for HV (Powered by Quantum Blue AI) workflow"""
@@ -516,7 +531,8 @@ class EnhancedOrderService:
                             product_name=product.product_name,
                             requested_quantity=expired_item.quantity,
                             user_id=user.id,
-                            user_email=user.email
+                            user_email=user.email,
+                            original_order_item_id=None  # No order item yet
                         )
                         if pending_order:
                             pending_products_created.append(pending_order)
@@ -622,36 +638,46 @@ You'll receive an email when any of these products become available."""
                     
                     subtotal += total_price
                     
+                    # Calculate total quantity including FOC (paid + free)
+                    total_quantity_to_block = cart_item.quantity + free_quantity
+                    
                     # Block quantity in dealer stock using FEFO (First Expiry, First Out)
+                    # IMPORTANT: Block total quantity (paid + FOC) since both need to be reserved from stock
                     if user.role == 'mr' and user.area:
                         # For MRs, block quantity from dealers in their area
                         success = self._block_quantity_for_mr_order(
                             user=user,
                             product_code=cart_item.product_code,
-                            quantity=cart_item.quantity
+                            quantity=total_quantity_to_block  # Block paid + FOC quantity
                         )
                         
                         if not success:
                             self.logger.error(f"Failed to block quantity for {cart_item.product_code}")
                             raise Exception(f"Failed to block quantity for {cart_item.product_code}")
                         
-                        self.logger.info(f"Successfully blocked {cart_item.quantity} units of {cart_item.product_code} in dealer stock")
+                        self.logger.info(f"Successfully blocked {total_quantity_to_block} units ({cart_item.quantity} paid + {free_quantity} FOC) of {cart_item.product_code} in dealer stock")
                     elif user.role == 'distributor' and user.unique_id:
                         # For distributors, block quantity from their own stock
                         success = self._block_quantity_for_distributor_order(
                             user=user,
                             product_code=cart_item.product_code,
-                            quantity=cart_item.quantity
+                            quantity=total_quantity_to_block  # Block paid + FOC quantity
                         )
                         
                         if not success:
                             self.logger.error(f"Failed to block quantity for {cart_item.product_code}")
                             raise Exception(f"Failed to block quantity for {cart_item.product_code}")
                         
-                        self.logger.info(f"Successfully blocked {cart_item.quantity} units of {cart_item.product_code} from distributor's own stock")
+                        self.logger.info(f"Successfully blocked {total_quantity_to_block} units ({cart_item.quantity} paid + {free_quantity} FOC) of {cart_item.product_code} from distributor's own stock")
             
-            # Calculate tax (5%) and update order totals
-            tax_rate = 0.05  # 5% tax
+            # Calculate tax and update order totals
+            tax_rate = 0.05  # Default tax rate
+            try:
+                from flask import has_app_context
+                if has_app_context():
+                    tax_rate = current_app.config.get('TAX_RATE', 0.05)  # Get from config, default 5%
+            except (RuntimeError, AttributeError):
+                pass
             tax_amount = subtotal * tax_rate
             grand_total = subtotal + tax_amount
             
@@ -661,7 +687,7 @@ You'll receive an email when any of these products become available."""
             order.tax_rate = tax_rate
             order.total_amount = grand_total  # Grand total includes tax
             
-            # Set order status based on user role
+            # Set order status based on user role with validation
             if user.role == 'mr':
                 order.status = 'pending'  # MR orders start as pending until dealer confirms
                 order.order_stage = 'placed'  # Order is placed, waiting for dealer confirmation
@@ -676,25 +702,20 @@ You'll receive an email when any of these products become available."""
                 order.status = 'in_transit'  # First stage: in transit
                 order.order_stage = 'distributor_notified'
             
+            # Validate order status and stage
+            if order.status not in VALID_ORDER_STATUSES:
+                self.logger.warning(f"Invalid order status '{order.status}', defaulting to 'pending'")
+                order.status = 'pending'
+            if order.order_stage not in VALID_ORDER_STAGES:
+                self.logger.warning(f"Invalid order stage '{order.order_stage}', defaulting to 'placed'")
+                order.order_stage = 'placed'
+            
             # NOTE: Stock is now BLOCKED (not sold yet)
-            # For MR orders: It will move from blocked to sold when dealer confirms the order
-            # For distributor orders: Move stock immediately since order is self-confirmed
-            if user.role == 'distributor':
-                # Move blocked stock to sold immediately for distributor orders
-                # Create cart-like items from order items (we need to use order items, not cart items)
-                # But order items aren't created yet, so we'll move stock after commit
-                # Actually, we can move it now using the valid_cart_items
-                cart_items_for_movement = []
-                for cart_item in valid_cart_items:
-                    cart_items_for_movement.append(type('CartLikeItem', (), {
-                        'product_code': cart_item.product_code,
-                        'quantity': cart_item.quantity
-                    })())
-                
-                if cart_items_for_movement:
-                    # Move stock from blocked to sold for distributor's own stock
-                    self._move_blocked_to_sold_for_distributor_order(user, cart_items_for_movement)
-                    self.logger.info(f"Moved stock from blocked to sold for distributor order {order.order_id}")
+            # For MR orders: It will move from blocked to out_for_delivery when dealer confirms and assigns delivery partner
+            # Stock will then move from out_for_delivery to sold when delivery partner marks as delivered
+            # For distributor orders: Move stock immediately since order is self-confirmed (blocked to sold directly)
+            # IMPORTANT: Wait until order items are created to get FOC quantities
+            # Stock movement will happen after order items are added (see below)
             
             # Store all needed information BEFORE clearing cart
             # Store expired items details
@@ -748,7 +769,8 @@ You'll receive an email when any of these products become available."""
                         product_name=product.product_name,
                         requested_quantity=expired_item.quantity,
                         user_id=user.id,
-                        user_email=user.email
+                        user_email=user.email,
+                        original_order_item_id=None  # Expired items don't have order items yet
                     )
                     if pending_order:
                         pending_products_created.append(pending_order)
@@ -758,6 +780,25 @@ You'll receive an email when any of these products become available."""
 
             # Clear cart
             self.db_service.clear_cart(user_id)
+            
+            # For distributor orders: Move stock from blocked to sold after order items are created
+            # IMPORTANT: Include FOC quantities in stock movement
+            if user.role == 'distributor':
+                cart_items_for_movement = []
+                # Get order items to include FOC quantities
+                order_items_created = OrderItem.query.filter_by(order_id=order.id).all()
+                for order_item in order_items_created:
+                    # Include both paid and FOC quantities
+                    total_quantity = order_item.quantity + (order_item.free_quantity or 0)
+                    cart_items_for_movement.append(type('CartLikeItem', (), {
+                        'product_code': order_item.product_code,
+                        'quantity': total_quantity  # Move paid + FOC quantity
+                    })())
+                
+                if cart_items_for_movement:
+                    # Move stock from blocked to sold for distributor's own stock
+                    self._move_blocked_to_sold_for_distributor_order(user, cart_items_for_movement)
+                    self.logger.info(f"Moved stock from blocked to sold for distributor order {order.order_id} (including FOC quantities)")
             
             # Commit all changes
             db.session.commit()
@@ -864,10 +905,11 @@ These products will be automatically ordered when new stock arrives. Track with 
             }
     
     @retry_on_transient_failure()
-    def confirm_order_by_distributor(self, order_id, distributor_user_id, item_edits=None):
+    def confirm_order_by_distributor(self, order_id, distributor_user_id, item_edits=None, delivery_partner_id=None):
         """
         Confirm order by distributor with optional edits and stock discrepancy handling
         item_edits: dict of {item_id: {'quantity': int, 'expiry_date': date, 'reason': str}}
+        delivery_partner_id: ID of delivery partner to assign for delivery
         Wrapped in single transaction for atomicity
         """
         try:
@@ -887,6 +929,12 @@ These products will be automatically ordered when new stock arrives. Track with 
                 return {
                     'success': False,
                     'message': "Invalid distributor"
+                }
+            # Check if order has MR and area before comparing
+            if not order.mr or not order.mr.area:
+                return {
+                    'success': False,
+                    'message': "Order is missing MR information or area."
                 }
             if order.mr.area != distributor.area:
                 return {
@@ -922,12 +970,17 @@ These products will be automatically ordered when new stock arrives. Track with 
                 
                 total_blocked = sum(s.blocked_quantity for s in stock_details)
                 requested_qty = item.quantity
+                # CRITICAL: total_blocked includes FOC, but requested_qty is only paid quantity
+                # We need to account for FOC when comparing blocked vs requested
+                original_foc_qty = item.free_quantity or 0
+                total_requested_with_foc = requested_qty + original_foc_qty
                 
                 # Check if we need more stock (either no blocked stock, or not enough blocked stock)
-                if total_blocked < requested_qty:
+                # Compare total_blocked with total_requested_with_foc to properly account for FOC
+                if total_blocked < total_requested_with_foc:
                     # Need to check for additional available stock
-                    shortfall = requested_qty - total_blocked
-                    self.logger.info(f"Blocked stock ({total_blocked}) is less than requested ({requested_qty}), checking for {shortfall} more units")
+                    shortfall = total_requested_with_foc - total_blocked
+                    self.logger.info(f"Blocked stock ({total_blocked}) is less than total requested including FOC ({total_requested_with_foc} = {requested_qty} paid + {original_foc_qty} FOC), checking for {shortfall} more units")
                     
                     available_stock_details = DealerWiseStockDetails.query.filter(
                         DealerWiseStockDetails.product_code == item.product_code,
@@ -970,25 +1023,29 @@ These products will be automatically ordered when new stock arrives. Track with 
                         
                         total_blocked = sum(s.blocked_quantity for s in stock_details)
                         total_available = total_blocked
-                        self.logger.info(f"Total blocked stock now: {total_blocked} units for {item.product_code} (requested: {requested_qty})")
+                        self.logger.info(f"Total blocked stock now: {total_blocked} units for {item.product_code} (requested: {total_requested_with_foc} = {requested_qty} paid + {original_foc_qty} FOC)")
                     else:
                         # No additional available stock, use what we have blocked
                         total_available = total_blocked
                         self.logger.warning(f"No additional available stock found for {item.product_code}, will dispatch only {total_blocked} units")
                 else:
-                    # We have enough or more blocked stock than requested
+                    # We have enough or more blocked stock than total requested (including FOC)
                     total_available = total_blocked
                 
                 # CRITICAL: Ensure total_available is set correctly
+                # Note: total_available may include FOC, but we only dispatch based on paid quantity requested
                 if total_available <= 0:
                     self.logger.error(f"No stock available (blocked or available) for {item.product_code}, cannot dispatch")
                     # Still need to set dispatch_qty, but it will be 0
                     dispatch_qty = 0
                     pending_qty = requested_qty
-                elif total_available < requested_qty:
-                    # Partial dispatch - dispatch available, move rest to pending
-                    dispatch_qty = total_available
-                    pending_qty = requested_qty - total_available
+                elif total_available < total_requested_with_foc:
+                    # Partial dispatch - dispatch only the paid portion that's available
+                    # Calculate how much paid quantity we can dispatch
+                    # total_available might include FOC, but we only dispatch paid portion
+                    # Remaining paid + FOC goes to pending
+                    dispatch_qty = min(total_available, requested_qty)  # Only dispatch paid portion, not more
+                    pending_qty = requested_qty - dispatch_qty
                     
                     # Update order item - ensure all fields are properly set
                     item.adjusted_quantity = int(dispatch_qty) if dispatch_qty is not None else None
@@ -1015,26 +1072,64 @@ These products will be automatically ordered when new stock arrives. Track with 
                         self.logger.warning(f"No email found for MR {order.mr_id}, using placeholder")
                         mr_email = 'no-email@placeholder.com'  # Ensure non-null value
                     
+                    # CRITICAL: Preserve original FOC information
+                    # When quantity is split due to stock discrepancy, FOC goes with PENDING portion
+                    # This ensures FOC is given when the full order (including pending) is complete
+                    original_foc_qty = item.free_quantity or 0
+                    original_total_qty = requested_qty + original_foc_qty
+                    
+                    # Remove FOC from dispatched quantity (FOC will go with pending)
+                    item.free_quantity = 0  # No FOC for dispatched portion
+                    
+                    # IMPORTANT: Store original_order_item_id and FOC info to track which item this came from
                     pending_order = PendingOrderProducts(
                         original_order_id=order.order_id or None,
+                        original_order_item_id=item.id,  # Link to original OrderItem
                         product_code=str(item.product_code).strip(),
                         product_name=str(item.product_name).strip(),
-                        requested_quantity=int(pending_qty),
+                        requested_quantity=int(pending_qty),  # Pending quantity (paid)
+                        original_foc_quantity=int(original_foc_qty),  # FOC goes with pending order
+                        original_total_quantity=original_total_qty,  # Store original total for reference
                         user_id=int(order.mr_id),
                         user_email=str(mr_email).strip(),
                         status='pending'
                     )
                     db.session.add(pending_order)
                     
-                    notifications.append(f"{item.product_name}: Dispatched {dispatch_qty} units. {pending_qty} units pending (will be dispatched when stock arrives).")
+                    # CRITICAL: Unblock the pending portion (pending_qty + FOC) so it becomes available again
+                    # When pending order is fulfilled, it will block again (which is correct)
+                    # This prevents double-blocking issue
+                    pending_total_qty = pending_qty + original_foc_qty  # Total pending (paid + FOC)
+                    if pending_total_qty > 0:
+                        try:
+                            self._unblock_quantity_for_mr_order(
+                                user=order.mr,
+                                product_code=item.product_code,
+                                quantity=pending_total_qty
+                            )
+                            self.logger.info(f"Unblocked {pending_total_qty} units ({pending_qty} paid + {original_foc_qty} FOC) for pending order (stock discrepancy) - will be blocked again when pending order is fulfilled")
+                        except Exception as unblock_e:
+                            self.logger.error(f"Error unblocking pending quantity: {str(unblock_e)}")
+                            # Don't fail the entire operation, but log the error
+                    
+                    # FOC goes with pending portion
+                    # User gets: dispatch_qty paid + 0 FOC = total dispatched
+                    # Pending: pending_qty paid + original_foc_qty FOC = total when fulfilled
+                    notifications.append(f"{item.product_name}: Dispatched {dispatch_qty} units (no FOC). {pending_qty} units + {original_foc_qty} FOC moved to pending orders (will be dispatched when stock arrives).")
                     
                     # Use adjusted quantity for moving to sold
+                    # IMPORTANT: Include FOC quantity when moving to sold (both paid and free items come from stock)
+                    # CRITICAL: FOC went to pending, so dispatched has 0 FOC
                     # Only add if dispatch_qty > 0
                     if dispatch_qty > 0:
+                        # FOC went to pending, so dispatched has 0 FOC
+                        dispatched_foc_qty = 0  # FOC went to pending
+                        total_quantity_to_move = dispatch_qty + dispatched_foc_qty
                         cart_like_items.append(type('CartLikeItem', (), {
                             'product_code': item.product_code,
-                            'quantity': dispatch_qty
+                            'quantity': total_quantity_to_move  # Move paid only (FOC went to pending)
                         })())
+                        self.logger.info(f"Preparing to move {total_quantity_to_move} units ({dispatch_qty} paid + {dispatched_foc_qty} FOC) of {item.product_code} from blocked to out_for_delivery. FOC ({original_foc_qty}) went to pending order.")
                     else:
                         self.logger.warning(f"Skipping stock movement for item {item.id} (stock discrepancy case) - dispatch_qty is {dispatch_qty}")
                 else:
@@ -1064,12 +1159,27 @@ These products will be automatically ordered when new stock arrives. Track with 
                     # This ensures we track what was actually dispatched
                     item.adjusted_quantity = int(dispatch_qty) if dispatch_qty is not None else None
                     
+                    # CRITICAL: Preserve original FOC - when dealer adjusts due to stock shortage,
+                    # FOC should go with the PENDING portion, not the dispatched portion
+                    # This ensures FOC is given when the full order is complete
+                    # Example: Order 10 → Get 1 FOC. If dealer adjusts to 8, FOC (1) goes with pending (2)
+                    original_foc_qty = item.free_quantity or 0  # Original FOC from order
+                    original_total_qty = requested_qty + original_foc_qty  # Original total (paid + FOC)
+                    
                     # Handle quantity adjustment by dealer
                     if dispatch_qty != requested_qty:
                         if dispatch_qty < requested_qty:
                             # Dealer reduced quantity - move difference to pending
                             pending_qty = requested_qty - dispatch_qty
                             item.pending_quantity = int(pending_qty) if pending_qty is not None else 0
+                            
+                            # CRITICAL: When quantity is split due to stock shortage, FOC goes with PENDING portion
+                            # Strategy: Dispatched gets NO FOC, pending gets the original FOC
+                            # This ensures FOC is given when the full order (including pending) is complete
+                            # Example: Order 10 + 1 FOC. Dispatched 8 (no FOC), Pending 2 + 1 FOC = 3 total
+                            
+                            # Remove FOC from dispatched quantity (FOC will go with pending)
+                            item.free_quantity = 0  # No FOC for dispatched portion
                             
                             # Get reason from edits or use default
                             reason = edit_data.get('reason', f'Quantity adjusted: {dispatch_qty} units dispatched, {pending_qty} units moved to pending orders')
@@ -1094,18 +1204,45 @@ These products will be automatically ordered when new stock arrives. Track with 
                                 self.logger.warning(f"No email found for MR {order.mr_id}, using placeholder")
                                 mr_email = 'no-email@placeholder.com'  # Ensure non-null value
                             
+                            # IMPORTANT: Store original FOC with pending order
+                            # Pending order gets the FOC (it will be dispatched when stock arrives)
+                            # This ensures FOC is given when the full order is complete
                             pending_order = PendingOrderProducts(
                                 original_order_id=order.order_id or None,
+                                original_order_item_id=item.id,  # Link to original OrderItem
                                 product_code=str(item.product_code).strip(),
                                 product_name=str(item.product_name).strip(),
-                                requested_quantity=int(pending_qty),
+                                requested_quantity=int(pending_qty),  # Pending quantity (paid)
+                                original_foc_quantity=int(original_foc_qty),  # FOC goes with pending order
+                                original_total_quantity=original_total_qty,  # Store original total for reference
                                 user_id=int(order.mr_id),
                                 user_email=str(mr_email).strip(),
                                 status='pending'
                             )
                             db.session.add(pending_order)
                             
-                            notifications.append(f"{item.product_name}: Dispatched {dispatch_qty} units (reduced from {requested_qty}). {pending_qty} units moved to pending orders.")
+                            # CRITICAL: Unblock the pending portion (pending_qty + FOC) so it becomes available again
+                            # When pending order is fulfilled, it will block again (which is correct)
+                            # This prevents double-blocking issue
+                            pending_total_qty = pending_qty + original_foc_qty  # Total pending (paid + FOC)
+                            if pending_total_qty > 0:
+                                try:
+                                    self._unblock_quantity_for_mr_order(
+                                        user=order.mr,
+                                        product_code=item.product_code,
+                                        quantity=pending_total_qty
+                                    )
+                                    self.logger.info(f"Unblocked {pending_total_qty} units ({pending_qty} paid + {original_foc_qty} FOC) for pending order - will be blocked again when pending order is fulfilled")
+                                except Exception as unblock_e:
+                                    self.logger.error(f"Error unblocking pending quantity: {str(unblock_e)}")
+                                    # Don't fail the entire operation, but log the error
+                            
+                            # FOC goes with pending portion
+                            # User gets: 8 paid + 0 FOC = 8 total dispatched
+                            # Pending: 2 paid + 1 FOC = 3 total when fulfilled
+                            # Total: 8 + 3 = 11 (matching original 10 paid + 1 FOC)
+                            self.logger.info(f"FOC allocation: Original order {requested_qty} paid + {original_foc_qty} FOC. Dispatched {dispatch_qty} gets 0 FOC. Pending {pending_qty} gets {original_foc_qty} FOC (will be dispatched when stock arrives).")
+                            notifications.append(f"{item.product_name}: Dispatched {dispatch_qty} units (no FOC). {pending_qty} units + {original_foc_qty} FOC moved to pending orders (will be dispatched when stock arrives).")
                         else:
                             # Dealer increased quantity - not allowed, use original
                             dispatch_qty = requested_qty
@@ -1154,36 +1291,64 @@ These products will be automatically ordered when new stock arrives. Track with 
                     
                     # Only add to cart_like_items if dispatch_qty > 0 (we have something to dispatch)
                     if dispatch_qty > 0:
+                        # IMPORTANT: Include FOC quantity in stock movement
+                        # CRITICAL: When quantity is unchanged, FOC stays with dispatched
+                        # When quantity is adjusted, FOC goes to pending (handled above)
+                        dispatched_foc_qty = item.free_quantity or 0  # FOC for dispatched
+                        total_quantity_to_move = dispatch_qty + dispatched_foc_qty
                         cart_like_items.append(type('CartLikeItem', (), {
                             'product_code': item.product_code,
-                            'quantity': dispatch_qty
+                            'quantity': total_quantity_to_move  # Move paid + FOC
                         })())
+                        self.logger.info(f"Preparing to move {total_quantity_to_move} units ({dispatch_qty} paid + {dispatched_foc_qty} FOC) of {item.product_code} from blocked to out_for_delivery")
                     else:
                         self.logger.warning(f"Skipping stock movement for item {item.id} - dispatch_qty is {dispatch_qty}")
                 
-            # Update order status
+            # Validate delivery partner FIRST before making any changes (mandatory for new flow)
+            if not delivery_partner_id:
+                return {
+                    'success': False,
+                    'message': 'Delivery partner selection is required to confirm the order. Please select a delivery partner.'
+                }
+            
+            delivery_partner = User.query.get(delivery_partner_id)
+            if not delivery_partner or delivery_partner.role != 'delivery_partner':
+                return {
+                    'success': False,
+                    'message': 'Invalid delivery partner selected. Please select a valid delivery partner.'
+                }
+            
+            # Verify delivery partner is in the same area as distributor/MR
+            if order.mr and order.mr.area and delivery_partner.area and delivery_partner.area != order.mr.area:
+                self.logger.warning(f"Delivery partner {delivery_partner.unique_id} area {delivery_partner.area} doesn't match order area {order.mr.area}")
+                # Still allow assignment but log warning
+            
+            # Now update order status with validation (after delivery partner validation passes)
+            current_status = order.status
+            if current_status not in ORDER_STATUS_TRANSITIONS:
+                self.logger.warning(f"Order {order.order_id} has invalid status '{current_status}', allowing transition to 'confirmed'")
+            elif 'confirmed' not in ORDER_STATUS_TRANSITIONS.get(current_status, []):
+                self.logger.warning(f"Invalid status transition from '{current_status}' to 'confirmed' for order {order.order_id}")
+                # Allow transition anyway but log warning
+            
+            # Update order fields
             order.distributor_confirmed_at = datetime.utcnow()
             order.distributor_confirmed_by = distributor_user_id
             order.status = 'confirmed'
             order.order_stage = 'confirmed'
+            order.delivery_partner_id = delivery_partner_id
+            order.delivery_partner_unique_id = delivery_partner.unique_id
+            self.logger.info(f"Order {order_id} assigned to delivery partner {delivery_partner.unique_id}")
             
-            # Move blocked quantities to sold
+            # Move blocked quantities to out_for_delivery (not sold yet - will be sold when delivery partner marks as delivered)
             if order.mr and order.mr.area and cart_like_items:
-                self._move_blocked_to_sold_for_mr_order(order.mr, cart_like_items)
+                self._move_blocked_to_out_for_delivery_for_mr_order(order.mr, cart_like_items)
             
             # Commit all changes
             db.session.commit()
             
-            # Notify MR about order approval (non-critical, outside transaction)
-            try:
-                from app.notification_service import NotificationService
-                notification_service = NotificationService()
-                mr = User.query.get(order.mr_id)
-                if mr:
-                    notification_service.notify_order_approved(order, mr)
-                    notification_service.notify_order_status_change(order, mr, 'confirmed')
-            except Exception as e:
-                self.logger.error(f"Error sending order approval notification: {str(e)}")
+            # NOTE: Notification service removed - notifications tables have been dropped
+            # Order approval notifications are now handled via email only
             
             # Include notifications in response if there are stock discrepancies
             result_message = f"Order {order_id} confirmed and invoice generated"
@@ -1192,10 +1357,28 @@ These products will be automatically ordered when new stock arrives. Track with 
             
             # Generate invoice (for records only - not stored in Order model)
             invoice_number = self._generate_invoice(order)
+            
+            # Send notification email to delivery partner if assigned
+            if order.delivery_partner_id:
+                try:
+                    delivery_partner = User.query.get(order.delivery_partner_id)
+                    if delivery_partner and delivery_partner.email:
+                        self._send_delivery_assignment_email(order, delivery_partner)
+                except Exception as email_e:
+                    self.logger.error(f"Error sending delivery assignment email: {str(email_e)}")
 
             # Send enhanced confirmation email to MR or customer
             mr = User.query.get(order.mr_id)
-            admin_email = current_app.config.get('ADMIN_EMAIL') if current_app else None
+            
+            # Get admin email safely (check for Flask application context)
+            admin_email = None
+            try:
+                from flask import has_app_context
+                if has_app_context():
+                    admin_email = current_app.config.get('ADMIN_EMAIL')
+            except (RuntimeError, AttributeError):
+                pass
+            
             order_items_list = OrderItem.query.filter_by(order_id=order.id).all()
             
             # Build items table with FOC - show adjusted quantities if available
@@ -1212,13 +1395,14 @@ These products will be automatically ordered when new stock arrives. Track with 
             recalculated_subtotal = 0.0
             for item in order_items_list:
                 # Use adjusted quantity if available, otherwise use original
+                # IMPORTANT: Only paid quantity is used for pricing (FOC is free, not charged)
                 quantity = item.adjusted_quantity if item.adjusted_quantity is not None else (item.quantity or 0)
                 foc_qty = item.free_quantity or 0
                 foc_display = f"<strong>+{foc_qty}</strong>" if foc_qty > 0 else "-"
                 
-                # Calculate total based on adjusted quantity
+                # Calculate total based on adjusted quantity (only paid quantity, FOC is free)
                 unit_price = item.unit_price or 0.0
-                item_total = quantity * unit_price
+                item_total = quantity * unit_price  # Only charge for paid quantity, FOC is free
                 recalculated_subtotal += item_total
                 
                 # Show original quantity if different from adjusted
@@ -1238,7 +1422,14 @@ These products will be automatically ordered when new stock arrives. Track with 
             # Tax information - recalculate based on adjusted quantities
             tax_html = ""
             # Recalculate tax based on adjusted quantities
-            recalculated_tax = recalculated_subtotal * 0.05
+            tax_rate = 0.05  # Default tax rate
+            try:
+                from flask import has_app_context
+                if has_app_context():
+                    tax_rate = current_app.config.get('TAX_RATE', 0.05)  # Get from config, default 5%
+            except (RuntimeError, AttributeError):
+                pass
+            recalculated_tax = recalculated_subtotal * tax_rate
             recalculated_grand_total = recalculated_subtotal + recalculated_tax
             
             # Check if totals need to be updated (if quantities were adjusted)
@@ -1246,6 +1437,17 @@ These products will be automatically ordered when new stock arrives. Track with 
                 item.adjusted_quantity is not None and item.adjusted_quantity != item.quantity 
                 for item in order_items_list
             )
+            
+            # IMPORTANT: Update order totals in database if quantities were adjusted
+            if has_quantity_adjustments:
+                # Update order record with recalculated totals
+                order.subtotal = recalculated_subtotal
+                order.tax_amount = recalculated_tax
+                order.total_amount = recalculated_grand_total
+                order.updated_at = datetime.utcnow()
+                # Commit the order total updates
+                db.session.flush()  # Flush to ensure totals are saved
+                self.logger.info(f"Updated order {order.order_id} totals: subtotal={recalculated_subtotal:.2f}, tax={recalculated_tax:.2f}, total={recalculated_grand_total:.2f}")
             
             if hasattr(order, 'subtotal') and order.subtotal:
                 # Show recalculated totals if quantities were adjusted
@@ -1364,8 +1566,23 @@ These products will be automatically ordered when new stock arrives. Track with 
                         if detail['type'] == 'quantity':
                             adj_info += f"• Quantity: {detail['value']}"
                             if detail['pending']:
-                                adj_info += f" ({detail['pending']} units moved to pending orders)"
-                            adj_info += "<br>"
+                                # Get FOC information for pending order
+                                pending_foc = 0
+                                if item.pending_quantity:
+                                    # Try to find pending order to get FOC
+                                    from app.models import PendingOrderProducts
+                                    pending_order = PendingOrderProducts.query.filter_by(
+                                        original_order_item_id=item.id,
+                                        status='pending'
+                                    ).first()
+                                    if pending_order:
+                                        pending_foc = pending_order.original_foc_quantity or 0
+                                
+                                if pending_foc > 0:
+                                    adj_info += f" ({detail['pending']} units + {pending_foc} FOC moved to pending orders)"
+                                else:
+                                    adj_info += f" ({detail['pending']} units moved to pending orders)"
+                                adj_info += "<br>"
                         elif detail['type'] == 'expiry':
                             adj_info += f"• Expiry Date: {detail['value']}<br>"
                         elif detail['type'] == 'lot_number':
@@ -1569,7 +1786,6 @@ These products will be automatically ordered when new stock arrives. Track with 
             # Send email notifications
             try:
                 from app.email_utils import create_email_template, send_email
-                from flask import current_app
                 
                 # Prepare order items list for email
                 items_html = ""
@@ -1615,6 +1831,8 @@ These products will be automatically ordered when new stock arrives. Track with 
                                 <tr style='background-color: #f8f9fa;'>
                                     <th style='padding: 10px; text-align: left; border-bottom: 2px solid #dee2e6;'>Product Name</th>
                                     <th style='padding: 10px; text-align: center; border-bottom: 2px solid #dee2e6;'>Quantity</th>
+                                    <th style='padding: 10px; text-align: center; border-bottom: 2px solid #dee2e6;'>FOC</th>
+                                    <th style='padding: 10px; text-align: center; border-bottom: 2px solid #dee2e6;'>Total Qty</th>
                                     <th style='padding: 10px; text-align: right; border-bottom: 2px solid #dee2e6;'>Unit Price</th>
                                     <th style='padding: 10px; text-align: right; border-bottom: 2px solid #dee2e6;'>Total</th>
                                 </tr>
@@ -1624,7 +1842,7 @@ These products will be automatically ordered when new stock arrives. Track with 
                             </tbody>
                             <tfoot>
                                 <tr style='background-color: #f8f9fa; font-weight: bold;'>
-                                    <td colspan='3' style='padding: 10px; text-align: right; border-top: 2px solid #dee2e6;'>Total Amount:</td>
+                                    <td colspan='5' style='padding: 10px; text-align: right; border-top: 2px solid #dee2e6;'>Total Amount:</td>
                                     <td style='padding: 10px; text-align: right; border-top: 2px solid #dee2e6;'>{total_amount:,.2f} MMK</td>
                                 </tr>
                             </tfoot>
@@ -1756,10 +1974,22 @@ These products will be automatically ordered when new stock arrives. Track with 
                     'message': "Invalid distributor"
                 }
             
+            if not order.mr or not order.mr.area:
+                return {
+                    'success': False,
+                    'message': "Order is missing MR information or area."
+                }
             if order.mr.area != distributor.area:
                 return {
                     'success': False,
                     'message': "This order doesn't belong to your area."
+                }
+            
+            # Check if order can be rejected (only pending orders)
+            if order.status != 'pending':
+                return {
+                    'success': False,
+                    'message': f"Cannot reject order. Order status is '{order.status}'. Only pending orders can be rejected."
                 }
             
             # Update order status (Flask-SQLAlchemy manages transactions)
@@ -1825,6 +2055,51 @@ These products will be automatically ordered when new stock arrives. Track with 
             if mr:
                 reason_text = f"<strong>Reason:</strong> {rejection_reason}" if rejection_reason else "No specific reason was provided."
                 
+                # Get order items with FOC information
+                order_items = OrderItem.query.filter_by(order_id=order.id).all()
+                items_table = ""
+                if order_items:
+                    items_table = """
+                    <table style='width:100%;border-collapse:collapse;margin:20px 0;'>
+                        <tr style='background:#dc3545;color:white;'>
+                            <th style='padding:12px;text-align:left;'>PRODUCT</th>
+                            <th style='padding:12px;text-align:center;'>QUANTITY</th>
+                            <th style='padding:12px;text-align:center;'>FOC</th>
+                            <th style='padding:12px;text-align:center;'>TOTAL QTY</th>
+                            <th style='padding:12px;text-align:right;'>UNIT PRICE</th>
+                            <th style='padding:12px;text-align:right;'>TOTAL</th>
+                        </tr>
+                    """
+                    for item in order_items:
+                        quantity = item.quantity or 0
+                        foc_qty = item.free_quantity or 0
+                        total_qty = quantity + foc_qty
+                        foc_display = f"+{foc_qty}" if foc_qty > 0 else "-"
+                        items_table += f"""
+                        <tr style='background:#f7f8fa;'>
+                            <td style='padding:10px;'>{item.product_name}<br><small style='color:#666;'>({item.product_code})</small></td>
+                            <td style='padding:10px;text-align:center;'>{quantity}</td>
+                            <td style='padding:10px;text-align:center;color:#10b981;font-weight:bold;'>{foc_display}</td>
+                            <td style='padding:10px;text-align:center;font-weight:bold;'>{total_qty}</td>
+                            <td style='padding:10px;text-align:right;'>{item.unit_price:,.2f} MMK</td>
+                            <td style='padding:10px;text-align:right;'>{item.total_price:,.2f} MMK</td>
+                        </tr>"""
+                    items_table += "</table>"
+                
+                # Payment summary
+                payment_summary = ""
+                if hasattr(order, 'subtotal') and order.subtotal:
+                    payment_summary = f"""
+                    <div class='info-box' style='margin-top:20px;'>
+                        <h3 style='margin-top: 0;'>💰 Payment Summary</h3>
+                        <p style='margin: 5px 0;'><strong>Subtotal:</strong> {order.subtotal:,.2f} MMK</p>
+                        <p style='margin: 5px 0;'><strong>Tax (5%):</strong> {order.tax_amount:,.2f} MMK</p>
+                        <p style='margin: 5px 0; font-size: 1.2em;'><strong>Grand Total:</strong> {order.total_amount:,.2f} MMK</p>
+                    </div>
+                    """
+                else:
+                    payment_summary = f"<p style='margin-top:20px; font-size:1.2em;'><strong>Total Amount:</strong> {order.total_amount:,.2f} MMK</p>"
+                
                 content = f"""
                     <h2 style='color:#dc3545; margin-top:0;'>❌ Order Rejected</h2>
                     <p>Dear <strong>{mr.name}</strong>,</p>
@@ -1835,7 +2110,12 @@ These products will be automatically ordered when new stock arrives. Track with 
                         <p style='margin: 5px 0;'>{reason_text}</p>
                         <p style='margin: 5px 0;'><strong>Order ID:</strong> {order.order_id}</p>
                         <p style='margin: 5px 0;'><strong>Date:</strong> {order.created_at.strftime('%B %d, %Y at %I:%M %p')}</p>
+                        <p style='margin: 5px 0;'><strong>Area:</strong> {order.mr.area if order.mr else 'N/A'}</p>
                     </div>
+                    
+                    {items_table}
+                    
+                    {payment_summary}
                     
                     <div class='info-box'>
                         <h3 style='margin-top: 0;'>Distributor Contact</h3>
@@ -1960,6 +2240,11 @@ These products will be automatically ordered when new stock arrives. Track with 
                 'success': False,
                 'message': "Order not found"
             }
+        if not order.mr or not order.mr.area:
+            return {
+                'success': False,
+                'message': "Order is missing MR information or area."
+            }
         if order.mr.area != distributor.area:
             return {
                 'success': False,
@@ -2020,14 +2305,32 @@ These products will be automatically ordered when new stock arrives. Track with 
                 self.logger.warning(f"No distributor found for area {order.mr.area if order.mr else 'N/A'}")
                 return
             order_items = OrderItem.query.filter_by(order_id=order.id).all()
-            # --- Table ---
+            # --- Table with FOC information ---
             table = """
             <table style='width:100%;border-collapse:collapse;margin-bottom:16px;'>
-                <tr style='background:#175DDC;color:white;'><th>PRODUCT</th><th>QUANTITY</th><th>UNIT PRICE</th><th>TOTAL</th></tr>
+                <tr style='background:#175DDC;color:white;'>
+                    <th style='padding:12px;text-align:left;'>PRODUCT</th>
+                    <th style='padding:12px;text-align:center;'>QUANTITY</th>
+                    <th style='padding:12px;text-align:center;'>FOC</th>
+                    <th style='padding:12px;text-align:center;'>TOTAL QTY</th>
+                    <th style='padding:12px;text-align:right;'>UNIT PRICE</th>
+                    <th style='padding:12px;text-align:right;'>TOTAL</th>
+                </tr>
             """
             for item in order_items:
                 quantity = item.quantity or 0
-                table += f"<tr style='background:#f7f8fa;'><td>{item.product.product_name}</td><td>{quantity}</td><td>{item.unit_price:,.2f} MMK</td><td>{item.total_price:,.2f} MMK</td></tr>"
+                foc_qty = item.free_quantity or 0
+                total_qty = quantity + foc_qty
+                foc_display = f"+{foc_qty}" if foc_qty > 0 else "-"
+                table += f"""
+                <tr style='background:#f7f8fa;'>
+                    <td style='padding:10px;'>{item.product.product_name}<br><small style='color:#666;'>({item.product_code})</small></td>
+                    <td style='padding:10px;text-align:center;'>{quantity}</td>
+                    <td style='padding:10px;text-align:center;color:#10b981;font-weight:bold;'>{foc_display}</td>
+                    <td style='padding:10px;text-align:center;font-weight:bold;'>{total_qty}</td>
+                    <td style='padding:10px;text-align:right;'>{item.unit_price:,.2f} MMK</td>
+                    <td style='padding:10px;text-align:right;'>{item.total_price:,.2f} MMK</td>
+                </tr>"""
             table += "</table>"
             # --- LLM summary ---
             llm = self.llm_service.groq_service.client if hasattr(self.llm_service, 'groq_service') else None
@@ -2208,13 +2511,14 @@ These products will be automatically ordered when new stock arrives. Track with 
     def _send_invoice_emails(self, order, distributor):
         """Send invoice emails to all parties"""
         try:
-            # Get order details
+            # Get order details with FOC information
             order_items = []
             for item in order.order_items:
                 order_items.append({
                     'product_code': item.product_code,
                     'product_name': item.product.product_name,
                     'quantity': item.quantity,
+                    'free_quantity': item.free_quantity or 0,
                     'unit_price': item.unit_price,
                     'total_price': item.total_price
                 })
@@ -2247,7 +2551,14 @@ These products will be automatically ordered when new stock arrives. Track with 
                 )
             
             # Email to company
-            admin_email = current_app.config.get('ADMIN_EMAIL')
+            admin_email = None
+            try:
+                from flask import has_app_context
+                if has_app_context():
+                    admin_email = current_app.config.get('ADMIN_EMAIL')
+            except (RuntimeError, AttributeError):
+                pass
+            
             if admin_email:
                 subject = f"Order Invoice - {order.order_id}"
                 html_content = self._generate_invoice_html(order, order_items, customer, distributor, is_admin=True)
@@ -2265,17 +2576,273 @@ These products will be automatically ordered when new stock arrives. Track with 
         except Exception as e:
             self.logger.error(f"Error sending invoice emails: {str(e)}")
     
+    def _send_delivery_assignment_email(self, order, delivery_partner):
+        """Send email notification to delivery partner when order is assigned"""
+        try:
+            from app.email_utils import create_email_template, send_email
+            
+            # Get customer details
+            customer = None
+            if order.customer_id:
+                from app.models import Customer
+                customer = Customer.query.get(order.customer_id)
+            
+            # Get order items
+            order_items = OrderItem.query.filter_by(order_id=order.id).all()
+            
+            # Build order details
+            items_html = ""
+            for item in order_items:
+                quantity = item.adjusted_quantity if item.adjusted_quantity else item.quantity
+                foc_qty = item.free_quantity or 0
+                total_qty = quantity + foc_qty
+                items_html += f"""
+                <tr style="border-bottom: 1px solid #e5e7eb;">
+                    <td style="padding: 10px;">{item.product_name} ({item.product_code})</td>
+                    <td style="padding: 10px; text-align: center;">{total_qty} units</td>
+                </tr>
+                """
+            
+            customer_address = customer.address if customer and customer.address else "Address not provided"
+            customer_name = customer.name if customer else "Customer"
+            customer_phone = customer.phone if customer and customer.phone else "Phone not provided"
+            
+            content = f"""
+            <div class="info-box">
+                <h3 style="margin-top: 0; color: #1e40af;">📦 New Delivery Assignment</h3>
+                <p>You have been assigned a new order for delivery. Please review the details below and proceed with the delivery.</p>
+            </div>
+            
+            <div style="background-color: #f9fafb; padding: 20px; border-radius: 8px; margin: 20px 0;">
+                <h3 style="margin-top: 0; color: #1e40af;">Order Details</h3>
+                <p><strong>Order ID:</strong> {order.order_id}</p>
+                <p><strong>Order Date:</strong> {order.created_at.strftime('%Y-%m-%d %H:%M:%S') if order.created_at else 'N/A'}</p>
+                <p><strong>Total Amount:</strong> ₹{order.total_amount:.2f}</p>
+            </div>
+            
+            <div style="background-color: #f9fafb; padding: 20px; border-radius: 8px; margin: 20px 0;">
+                <h3 style="margin-top: 0; color: #1e40af;">Items to Deliver</h3>
+                <table style="width: 100%; border-collapse: collapse; margin-top: 10px;">
+                    <thead>
+                        <tr style="background-color: #3b82f6; color: white;">
+                            <th style="padding: 10px; text-align: left;">Product</th>
+                            <th style="padding: 10px; text-align: center;">Quantity</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {items_html}
+                    </tbody>
+                </table>
+            </div>
+            
+            <div style="background-color: #eff6ff; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #3b82f6;">
+                <h3 style="margin-top: 0; color: #1e40af;">📍 Delivery Address</h3>
+                <p><strong>Customer Name:</strong> {customer_name}</p>
+                <p><strong>Phone:</strong> {customer_phone}</p>
+                <p><strong>Address:</strong> {customer_address}</p>
+            </div>
+            
+            <div class="warning-box">
+                <p><strong>⚠️ Important:</strong> Please log in to your delivery partner dashboard to track this order and update the delivery status once completed.</p>
+            </div>
+            """
+            
+            html_content = create_email_template(
+                title="New Delivery Assignment",
+                content=content,
+                footer_text="Please complete the delivery and update the status in your dashboard."
+            )
+            
+            send_email(
+                delivery_partner.email,
+                f"New Delivery Assignment - Order {order.order_id}",
+                html_content,
+                'delivery_assignment',
+                order_id=order.order_id,
+                receiver_name=delivery_partner.name
+            )
+            
+            self.logger.info(f"Delivery assignment email sent to {delivery_partner.email} for order {order.order_id}")
+            
+        except Exception as e:
+            self.logger.error(f"Error sending delivery assignment email: {str(e)}")
+    
+    def mark_order_as_delivered(self, order_id, delivery_partner_id):
+        """
+        Mark order as delivered by delivery partner
+        Moves stock from out_for_delivery to sold
+        """
+        try:
+            from app.db_locking import lock_order_for_update
+            from datetime import datetime
+            
+            # Lock order for update
+            order = lock_order_for_update(order_id, nowait=False)
+            if not order:
+                return {
+                    'success': False,
+                    'message': "Order not found"
+                }
+            
+            # Verify delivery partner
+            delivery_partner = User.query.get(delivery_partner_id)
+            if not delivery_partner or delivery_partner.role != 'delivery_partner':
+                return {
+                    'success': False,
+                    'message': "Invalid delivery partner"
+                }
+            
+            # Verify order is assigned to this delivery partner
+            if order.delivery_partner_id != delivery_partner_id:
+                return {
+                    'success': False,
+                    'message': "This order is not assigned to you"
+                }
+            
+            # Check if already delivered
+            if order.status == 'delivered':
+                return {
+                    'success': False,
+                    'message': "Order is already marked as delivered"
+                }
+            
+            # Check if order is confirmed (must be confirmed before delivery)
+            if order.status != 'confirmed':
+                return {
+                    'success': False,
+                    'message': f"Order must be confirmed before marking as delivered. Current status: {order.status}"
+                }
+            
+            # Move stock from out_for_delivery to sold
+            self._move_out_for_delivery_to_sold_for_order(order)
+            
+            # Update order status
+            order.status = 'delivered'
+            order.order_stage = 'delivered'
+            order.delivered_at = datetime.utcnow()
+            order.delivered_by = delivery_partner_id
+            
+            # Commit changes
+            db.session.commit()
+            
+            # Send notification email to MR and dealer
+            try:
+                self._send_delivery_completion_email(order, delivery_partner)
+            except Exception as email_e:
+                self.logger.error(f"Error sending delivery completion email: {str(email_e)}")
+            
+            self.logger.info(f"Order {order_id} marked as delivered by delivery partner {delivery_partner.unique_id}")
+            
+            return {
+                'success': True,
+                'message': f"Order {order_id} has been marked as delivered successfully. Stock has been moved from out_for_delivery to sold."
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error marking order as delivered: {str(e)}")
+            db.session.rollback()
+            return {
+                'success': False,
+                'message': f"Error marking order as delivered: {str(e)}"
+            }
+    
+    def _send_delivery_completion_email(self, order, delivery_partner):
+        """Send email notification when order is delivered"""
+        try:
+            from app.email_utils import create_email_template, send_email
+            
+            # Get MR
+            mr = User.query.get(order.mr_id) if order.mr_id else None
+            
+            # Get customer
+            customer = None
+            if order.customer_id:
+                from app.models import Customer
+                customer = Customer.query.get(order.customer_id)
+            
+            # Send to MR
+            if mr and mr.email:
+                content = f"""
+                <div class="success-box">
+                    <h3 style="margin-top: 0; color: #059669;">✅ Order Delivered Successfully!</h3>
+                    <p>Your order <strong>{order.order_id}</strong> has been successfully delivered to the customer.</p>
+                </div>
+                
+                <div style="background-color: #f9fafb; padding: 20px; border-radius: 8px; margin: 20px 0;">
+                    <p><strong>Order ID:</strong> {order.order_id}</p>
+                    <p><strong>Delivered By:</strong> {delivery_partner.name} ({delivery_partner.unique_id})</p>
+                    <p><strong>Delivery Date:</strong> {order.delivered_at.strftime('%Y-%m-%d %H:%M:%S') if order.delivered_at else 'N/A'}</p>
+                    <p><strong>Customer:</strong> {customer.name if customer else 'N/A'}</p>
+                </div>
+                """
+                
+                html_content = create_email_template(
+                    title="Order Delivered",
+                    content=content,
+                    footer_text="Thank you for using HV (Powered by Quantum Blue AI)."
+                )
+                
+                send_email(
+                    mr.email,
+                    f"Order {order.order_id} Delivered Successfully",
+                    html_content,
+                    'order_delivered',
+                    order_id=order.order_id,
+                    receiver_name=mr.name
+                )
+            
+            # Send to dealer
+            if order.distributor_confirmed_by:
+                distributor = User.query.get(order.distributor_confirmed_by)
+                if distributor and distributor.email:
+                    content = f"""
+                    <div class="success-box">
+                        <h3 style="margin-top: 0; color: #059669;">✅ Order Delivered Successfully!</h3>
+                        <p>Order <strong>{order.order_id}</strong> has been successfully delivered.</p>
+                    </div>
+                    
+                    <div style="background-color: #f9fafb; padding: 20px; border-radius: 8px; margin: 20px 0;">
+                        <p><strong>Order ID:</strong> {order.order_id}</p>
+                        <p><strong>Delivered By:</strong> {delivery_partner.name} ({delivery_partner.unique_id})</p>
+                        <p><strong>Delivery Date:</strong> {order.delivered_at.strftime('%Y-%m-%d %H:%M:%S') if order.delivered_at else 'N/A'}</p>
+                        <p><strong>Stock Status:</strong> Stock has been moved from out_for_delivery to sold.</p>
+                    </div>
+                    """
+                    
+                    html_content = create_email_template(
+                        title="Order Delivered",
+                        content=content,
+                        footer_text="Stock has been updated in your inventory."
+                    )
+                    
+                    send_email(
+                        distributor.email,
+                        f"Order {order.order_id} Delivered",
+                        html_content,
+                        'order_delivered_distributor',
+                        order_id=order.order_id,
+                        receiver_name=distributor.name
+                    )
+            
+        except Exception as e:
+            self.logger.error(f"Error sending delivery completion email: {str(e)}")
+    
     def _generate_invoice_html(self, order, order_items, customer, distributor, is_distributor=False, is_admin=False):
         """Generate HTML invoice content"""
         recipient = "Distributor" if is_distributor else ("Admin" if is_admin else "Customer")
         
         items_html = ""
         for item in order_items:
+            foc_qty = item.get('free_quantity', 0) or 0
+            foc_display = f"+{foc_qty}" if foc_qty > 0 else "-"
+            total_qty = item['quantity'] + foc_qty
             items_html += f"""
             <tr>
                 <td>{item['product_code']}</td>
                 <td>{item['product_name']}</td>
-                <td>{item['quantity']}</td>
+                <td style='text-align:center;'>{item['quantity']}</td>
+                <td style='text-align:center;color:#10b981;font-weight:bold;'>{foc_display}</td>
+                <td style='text-align:center;font-weight:bold;'>{total_qty}</td>
                 <td>{item['unit_price']:,.2f} MMK</td>
                 <td>{item['total_price']:,.2f} MMK</td>
             </tr>
@@ -2324,6 +2891,8 @@ These products will be automatically ordered when new stock arrives. Track with 
                                 <th>Product Code</th>
                                 <th>Product Name</th>
                                 <th>Quantity</th>
+                                <th>FOC</th>
+                                <th>Total Qty</th>
                                 <th>Unit Price</th>
                                 <th>Total</th>
                             </tr>
@@ -2577,10 +3146,192 @@ These products will be automatically ordered when new stock arrives. Track with 
         except Exception as e:
             self.logger.error(f"Error moving blocked to sold for distributor order: {str(e)}")
     
+    def _move_blocked_to_out_for_delivery_for_mr_order(self, user, cart_items):
+        """
+        Move blocked quantities to out_for_delivery when dealer confirms order and assigns delivery partner
+        Updates available_for_sale accordingly
+        Stock will move to sold when delivery partner marks order as delivered
+        """
+        try:
+            from app.models import DealerWiseStockDetails
+            
+            # Find dealers in the MR's area
+            dealers_in_area = User.query.filter_by(
+                role='distributor',
+                area=user.area
+            ).all()
+            
+            if not dealers_in_area:
+                self.logger.warning(f"No dealers found in area {user.area} for MR {user.name}")
+                return
+            
+            dealer_unique_ids = [d.unique_id for d in dealers_in_area]
+            
+            # Process each cart item
+            for cart_item in cart_items:
+                product_code = cart_item.product_code
+                # cart_item.quantity already contains paid + FOC (total_quantity_to_move from order confirmation)
+                # This was set when creating cart_like_items in confirm_order_by_distributor
+                total_quantity_to_move = cart_item.quantity
+                
+                # Get all stock details with blocked quantity for this product
+                # SQL Server doesn't support NULLS LAST, so we use CASE
+                from sqlalchemy import case
+                stock_details = DealerWiseStockDetails.query.filter(
+                    DealerWiseStockDetails.product_code == product_code,
+                    DealerWiseStockDetails.status == 'confirmed',
+                    DealerWiseStockDetails.dealer_unique_id.in_(dealer_unique_ids),
+                    DealerWiseStockDetails.blocked_quantity > 0
+                ).order_by(
+                    case(
+                        (DealerWiseStockDetails.expiry_date.is_(None), 1),
+                        else_=0
+                    ),
+                    DealerWiseStockDetails.expiry_date.asc()
+                ).all()
+                
+                remaining_quantity = total_quantity_to_move
+                
+                # Move blocked to out_for_delivery using FEFO (earliest expiry first)
+                # This moves both paid quantity and FOC quantity that were blocked together
+                for stock_detail in stock_details:
+                    if remaining_quantity <= 0:
+                        break
+                    
+                    blocked_in_this_stock = stock_detail.blocked_quantity
+                    if blocked_in_this_stock <= 0:
+                        continue
+                    
+                    # Calculate how much to move from this stock detail
+                    quantity_to_move_from_stock = min(remaining_quantity, blocked_in_this_stock)
+                    
+                    # Move from blocked to out_for_delivery (not sold yet)
+                    stock_detail.blocked_quantity -= quantity_to_move_from_stock
+                    stock_detail.out_for_delivery_quantity += quantity_to_move_from_stock
+                    stock_detail.update_available_quantity()
+                    
+                    self.logger.info(
+                        f"Moved {quantity_to_move_from_stock} units of {product_code} from blocked to out_for_delivery "
+                        f"(Stock ID: {stock_detail.id}, Dealer: {stock_detail.dealer_name}, "
+                        f"Blocked now: {stock_detail.blocked_quantity}, Out for delivery now: {stock_detail.out_for_delivery_quantity}, "
+                        f"Available now: {stock_detail.available_for_sale})"
+                    )
+                    
+                    remaining_quantity -= quantity_to_move_from_stock
+                
+                if remaining_quantity > 0:
+                    self.logger.warning(
+                        f"Could only move {total_quantity_to_move - remaining_quantity} out of {total_quantity_to_move} units "
+                        f"from blocked to out_for_delivery for {product_code} (insufficient blocked quantity)"
+                    )
+            
+            db.session.flush()  # Flush changes
+            
+        except Exception as e:
+            self.logger.error(f"Error moving blocked to out_for_delivery for MR order: {str(e)}")
+            # Don't raise - allow order to proceed even if this fails
+    
+    def _move_out_for_delivery_to_sold_for_order(self, order):
+        """
+        Move out_for_delivery quantities to sold when delivery partner marks order as delivered
+        Updates available_for_sale accordingly
+        """
+        try:
+            from app.models import DealerWiseStockDetails
+            
+            # Get order items
+            order_items = OrderItem.query.filter_by(order_id=order.id).all()
+            
+            if not order_items:
+                self.logger.warning(f"No order items found for order {order.order_id}")
+                return
+            
+            # Find dealers in the MR's area
+            if not order.mr or not order.mr.area:
+                self.logger.warning(f"Order {order.order_id} missing MR or area information")
+                return
+            
+            dealers_in_area = User.query.filter_by(
+                role='distributor',
+                area=order.mr.area
+            ).all()
+            
+            if not dealers_in_area:
+                self.logger.warning(f"No dealers found in area {order.mr.area} for order {order.order_id}")
+                return
+            
+            dealer_unique_ids = [d.unique_id for d in dealers_in_area]
+            
+            # Process each order item
+            for item in order_items:
+                product_code = item.product_code
+                # Use adjusted_quantity if available, otherwise use quantity
+                quantity_to_move = item.adjusted_quantity if item.adjusted_quantity else item.quantity
+                # Include FOC quantity
+                foc_quantity = item.free_quantity or 0
+                total_quantity_to_move = quantity_to_move + foc_quantity
+                
+                # Get all stock details with out_for_delivery quantity for this product
+                from sqlalchemy import case
+                stock_details = DealerWiseStockDetails.query.filter(
+                    DealerWiseStockDetails.product_code == product_code,
+                    DealerWiseStockDetails.status == 'confirmed',
+                    DealerWiseStockDetails.dealer_unique_id.in_(dealer_unique_ids),
+                    DealerWiseStockDetails.out_for_delivery_quantity > 0
+                ).order_by(
+                    case(
+                        (DealerWiseStockDetails.expiry_date.is_(None), 1),
+                        else_=0
+                    ),
+                    DealerWiseStockDetails.expiry_date.asc()
+                ).all()
+                
+                remaining_quantity = total_quantity_to_move
+                
+                # Move out_for_delivery to sold using FEFO (earliest expiry first)
+                for stock_detail in stock_details:
+                    if remaining_quantity <= 0:
+                        break
+                    
+                    out_for_delivery_in_this_stock = stock_detail.out_for_delivery_quantity
+                    if out_for_delivery_in_this_stock <= 0:
+                        continue
+                    
+                    # Calculate how much to move from this stock detail
+                    quantity_to_move_from_stock = min(remaining_quantity, out_for_delivery_in_this_stock)
+                    
+                    # Move from out_for_delivery to sold
+                    stock_detail.out_for_delivery_quantity -= quantity_to_move_from_stock
+                    stock_detail.sold_quantity += quantity_to_move_from_stock
+                    stock_detail.update_available_quantity()
+                    
+                    self.logger.info(
+                        f"Moved {quantity_to_move_from_stock} units of {product_code} from out_for_delivery to sold "
+                        f"(Stock ID: {stock_detail.id}, Dealer: {stock_detail.dealer_name}, "
+                        f"Out for delivery now: {stock_detail.out_for_delivery_quantity}, Sold now: {stock_detail.sold_quantity}, "
+                        f"Available now: {stock_detail.available_for_sale})"
+                    )
+                    
+                    remaining_quantity -= quantity_to_move_from_stock
+                
+                if remaining_quantity > 0:
+                    self.logger.warning(
+                        f"Could only move {total_quantity_to_move - remaining_quantity} out of {total_quantity_to_move} units "
+                        f"from out_for_delivery to sold for {product_code} (insufficient out_for_delivery quantity)"
+                    )
+            
+            db.session.flush()  # Flush changes
+            
+        except Exception as e:
+            self.logger.error(f"Error moving out_for_delivery to sold for order: {str(e)}")
+            raise  # Raise error as this is critical for order completion
+    
     def _move_blocked_to_sold_for_mr_order(self, user, cart_items):
         """
         Move blocked quantities to sold when MR confirms order
         Updates available_for_sale accordingly
+        NOTE: This is kept for backward compatibility but should not be used for new orders
+        New orders should use _move_blocked_to_out_for_delivery_for_mr_order
         """
         try:
             from app.models import DealerWiseStockDetails
@@ -2730,8 +3481,8 @@ These products will be automatically ordered when new stock arrives. Track with 
                     f"for {product_code} (insufficient blocked quantity in dealer_wise_stock_details)"
                 )
             
-            db.session.flush()  # Flush changes
-            db.session.commit()  # Commit unblocking
+            db.session.flush()  # Flush changes but don't commit yet (will be committed with order confirmation)
+            # Note: Commit is handled by the calling function (confirm_order_by_distributor)
             
         except Exception as e:
             self.logger.error(f"Error unblocking quantity for MR order: {str(e)}")

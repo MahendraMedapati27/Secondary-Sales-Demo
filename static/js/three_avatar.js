@@ -1872,24 +1872,41 @@ function startSpeakingAnimation() {
     }
     
     // Mouth/lip sync animation (if morph targets available)
+    // Enhanced lip sync with more realistic mouth movements
     avatarObject.traverse((child) => {
         if (child.isMesh && child.morphTargetDictionary) {
-            const mouthTargets = ['mouthOpen', 'MouthOpen', 'Aa', 'aa', 'vocal', 'Vocal'];
+            const mouthTargets = ['mouthOpen', 'MouthOpen', 'Aa', 'aa', 'vocal', 'Vocal', 'mouth_open', 'Mouth_Open'];
             for (const targetName of mouthTargets) {
                 const index = child.morphTargetDictionary[targetName];
                 if (index !== undefined) {
-                    // Subtle mouth opening animation
+                    // Enhanced mouth opening animation - more realistic lip sync
+                    let animationStartTime = Date.now();
                     const mouthAnimation = setInterval(() => {
                         if (!isSpeaking) {
                             clearInterval(mouthAnimation);
-                            animateProperty(child.morphTargetInfluences, index, child.morphTargetInfluences[index], 0, 200);
+                            // Smoothly close mouth
+                            animateProperty(child.morphTargetInfluences, index, child.morphTargetInfluences[index], 0, 300);
                             return;
                         }
                         
-                        // Oscillate mouth opening
-                        const target = 0.2 + Math.sin(Date.now() / 200) * 0.1;
-                        animateProperty(child.morphTargetInfluences, index, child.morphTargetInfluences[index], target, 100);
-                    }, 100);
+                        // More realistic lip sync: varying mouth opening based on time
+                        // Creates natural speaking rhythm (faster oscillation for more natural look)
+                        const time = (Date.now() - animationStartTime) / 1000;
+                        // Use multiple sine waves for more natural variation
+                        const base = 0.4; // Base mouth opening (increased for more visibility)
+                        const variation1 = Math.sin(time * 8) * 0.2; // Fast variation (phonemes) - increased amplitude
+                        const variation2 = Math.sin(time * 2.5) * 0.15; // Slower variation (words) - increased amplitude
+                        const variation3 = Math.sin(time * 15) * 0.1; // Very fast (syllables) - increased amplitude
+                        const target = Math.max(0.15, Math.min(0.8, base + variation1 + variation2 + variation3));
+                        
+                        // Directly set the value for smoother animation (no animateProperty delay)
+                        child.morphTargetInfluences[index] = target;
+                        
+                        // Force material update to ensure changes are visible
+                        if (child.material) {
+                            child.material.needsUpdate = true;
+                        }
+                    }, 50); // Update every 50ms for smoother animation
                     
                     // Store interval for cleanup
                     if (!window.mouthAnimationInterval) {

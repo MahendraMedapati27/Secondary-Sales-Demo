@@ -4,7 +4,7 @@ import re
 from flask import current_app
 from tavily import TavilyClient
 
-logging.basicConfig(level=logging.INFO)
+# Single logger initialization - logging.basicConfig should only be called once in __init__.py
 logger = logging.getLogger(__name__)
 
 class WebSearchService:

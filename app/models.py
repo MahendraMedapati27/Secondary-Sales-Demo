@@ -15,7 +15,7 @@ class User(UserMixin, db.Model):
     discount = db.Column(db.Float, nullable=False, default=0.0)
     email = db.Column(db.String(120), nullable=True, index=True)
     phone = db.Column(db.String(50), nullable=False)
-    role = db.Column(db.String(50), nullable=True)  # 'distributor' or 'mr'
+    role = db.Column(db.String(50), nullable=True)  # 'distributor', 'mr', or 'delivery_partner'
     is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -30,10 +30,19 @@ class User(UserMixin, db.Model):
     # Orders as MR
     mr_orders = db.relationship('Order', foreign_keys='Order.mr_id', backref='mr', lazy='dynamic')
     
+    # NOTE: Notification and NotificationPreference models removed - tables will be dropped
+    
     def generate_unique_id(self):
         """Generate unique ID for user"""
         if not self.unique_id:
-            prefix = 'MR' if self.role == 'mr' else 'DIST'
+            if self.role == 'mr':
+                prefix = 'MR'
+            elif self.role == 'distributor':
+                prefix = 'DIST'
+            elif self.role == 'delivery_partner':
+                prefix = 'DP'
+            else:
+                prefix = 'USER'
             timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')
             random_part = uuid.uuid4().hex[:6].upper()
             self.unique_id = f"{prefix}_{timestamp}_{random_part}"
@@ -194,6 +203,7 @@ class DealerWiseStockDetails(db.Model):
     quantity = db.Column(db.Integer, nullable=False, default=0)
     sales_price = db.Column(db.Float, nullable=False, default=0.0)
     blocked_quantity = db.Column(db.Integer, nullable=False, default=0)
+    out_for_delivery_quantity = db.Column(db.Integer, nullable=False, default=0)
     available_for_sale = db.Column(db.Integer, nullable=False, default=0)
     sold_quantity = db.Column(db.Integer, nullable=False, default=0)
     status = db.Column(db.String(50), nullable=False, default='blocked')
@@ -229,6 +239,7 @@ class DealerWiseStockDetails(db.Model):
             'quantity': self.quantity,
             'sales_price': self.sales_price,
             'blocked_quantity': self.blocked_quantity,
+            'out_for_delivery_quantity': self.out_for_delivery_quantity,
             'available_for_sale': self.available_for_sale,
             'sold_quantity': self.sold_quantity,
             'status': self.status,
@@ -240,9 +251,9 @@ class DealerWiseStockDetails(db.Model):
         }
     
     def update_available_quantity(self):
-        """Update available_for_sale based on received_quantity, blocked_quantity, and sold_quantity"""
+        """Update available_for_sale based on received_quantity, blocked_quantity, out_for_delivery_quantity, and sold_quantity"""
         if self.received_quantity is not None:
-            self.available_for_sale = max(0, self.received_quantity - self.blocked_quantity - self.sold_quantity)
+            self.available_for_sale = max(0, self.received_quantity - self.blocked_quantity - self.out_for_delivery_quantity - self.sold_quantity)
         else:
             self.available_for_sale = 0
 
@@ -264,12 +275,18 @@ class Order(db.Model):
     status = db.Column(db.String(50), default='pending')
     distributor_confirmed_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     distributor_confirmed_at = db.Column(db.DateTime, nullable=True)
+    delivery_partner_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    delivery_partner_unique_id = db.Column(db.String(50), nullable=True, index=True)
+    delivered_at = db.Column(db.DateTime, nullable=True)
+    delivered_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     # Relationships
     order_items = db.relationship('OrderItem', backref='order', lazy='dynamic', cascade='all, delete-orphan')
     distributor_user = db.relationship('User', foreign_keys=[distributor_confirmed_by], backref='confirmed_orders')
+    delivery_partner = db.relationship('User', foreign_keys=[delivery_partner_id], backref='assigned_orders')
+    delivered_by_user = db.relationship('User', foreign_keys=[delivered_by], backref='delivered_orders')
     
     def generate_order_id(self):
         """Generate unique order ID"""
@@ -290,8 +307,13 @@ class Order(db.Model):
             'total_amount': self.total_amount,
             'status': self.status,
             'order_stage': self.order_stage,
-            'created_at': self.created_at.isoformat(),
-            'updated_at': self.updated_at.isoformat()
+            'delivery_partner_id': self.delivery_partner_id,
+            'delivery_partner_unique_id': self.delivery_partner_unique_id,
+            'delivered_at': self.delivered_at.isoformat() if self.delivered_at else None,
+            'delivered_by': self.delivered_by,
+            'distributor_confirmed_at': self.distributor_confirmed_at.isoformat() if self.distributor_confirmed_at else None,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None
         }
 
 class OrderItem(db.Model):
@@ -328,17 +350,23 @@ class PendingOrderProducts(db.Model):
     
     id = db.Column(db.Integer, primary_key=True)
     original_order_id = db.Column(db.String(50), nullable=True, index=True)
+    original_order_item_id = db.Column(db.Integer, db.ForeignKey('order_items.id'), nullable=True, index=True)  # Link to original OrderItem
     product_code = db.Column(db.String(50), nullable=False, index=True)
     product_name = db.Column(db.String(200), nullable=False)
     requested_quantity = db.Column(db.Integer, nullable=False)
+    original_foc_quantity = db.Column(db.Integer, default=0)  # Original FOC from the original order (to preserve FOC entitlement)
+    original_total_quantity = db.Column(db.Integer, nullable=True)  # Original total quantity (paid + FOC) from the order
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
     user_email = db.Column(db.String(120), nullable=False)
     status = db.Column(db.String(50), default='pending')
-    fulfilled_order_id = db.Column(db.String(50), nullable=True)
+    fulfilled_order_id = db.Column(db.String(50), nullable=True, index=True)  # New order created when fulfilled
     user_notified = db.Column(db.Boolean, default=False)
     distributor_notified = db.Column(db.Boolean, default=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
     fulfilled_at = db.Column(db.DateTime, nullable=True)
+    
+    # Relationship to original order item
+    original_order_item = db.relationship('OrderItem', foreign_keys=[original_order_item_id], backref='pending_orders')
     
     def __repr__(self):
         return f'<PendingOrderProducts {self.product_code} - {self.status}>'
@@ -348,11 +376,14 @@ class PendingOrderProducts(db.Model):
         return {
             'id': self.id,
             'original_order_id': self.original_order_id,
+            'original_order_item_id': self.original_order_item_id,
             'product_code': self.product_code,
             'product_name': self.product_name,
             'requested_quantity': self.requested_quantity,
             'status': self.status,
-            'created_at': self.created_at.isoformat() if self.created_at else None
+            'fulfilled_order_id': self.fulfilled_order_id,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'fulfilled_at': self.fulfilled_at.isoformat() if self.fulfilled_at else None
         }
 
 class Conversation(db.Model):
@@ -464,113 +495,6 @@ class EmailLog(db.Model):
             'created_at': self.created_at.isoformat() if self.created_at else None
         }
 
-class Notification(db.Model):
-    """Notification model for real-time notifications"""
-    __tablename__ = 'notifications'
-    
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
-    notification_type = db.Column(db.String(50), nullable=False, index=True)  # 'new_order', 'order_approved', 'order_rejected', 'stock_arrival', 'low_stock', 'payment_reminder', 'order_status_change'
-    title = db.Column(db.String(200), nullable=False)
-    message = db.Column(db.Text, nullable=False)
-    data = db.Column(db.Text, nullable=True)  # JSON string for additional data (order_id, product_code, etc.)
-    is_read = db.Column(db.Boolean, default=False, nullable=False, index=True)
-    read_at = db.Column(db.DateTime, nullable=True)
-    action_url = db.Column(db.String(500), nullable=True)  # URL to navigate when notification is clicked
-    priority = db.Column(db.String(20), default='normal')  # 'low', 'normal', 'high', 'urgent'
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
-    
-    # Relationships
-    user = db.relationship('User', backref='notifications', lazy=True)
-    
-    def __repr__(self):
-        return f'<Notification {self.id} - {self.notification_type} for User {self.user_id}>'
-    
-    def to_dict(self):
-        """Convert to dictionary"""
-        return {
-            'id': self.id,
-            'user_id': self.user_id,
-            'notification_type': self.notification_type,
-            'title': self.title,
-            'message': self.message,
-            'data': self.data,
-            'is_read': self.is_read,
-            'read_at': self.read_at.isoformat() if self.read_at else None,
-            'action_url': self.action_url,
-            'priority': self.priority,
-            'created_at': self.created_at.isoformat() if self.created_at else None
-        }
-    
-    def mark_as_read(self):
-        """Mark notification as read"""
-        self.is_read = True
-        self.read_at = datetime.utcnow()
-        db.session.commit()
-
-class NotificationPreference(db.Model):
-    """User notification preferences"""
-    __tablename__ = 'notification_preferences'
-    
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, unique=True, index=True)
-    
-    # Notification type preferences (True = enabled, False = disabled)
-    new_order_enabled = db.Column(db.Boolean, default=True)
-    order_approved_enabled = db.Column(db.Boolean, default=True)
-    order_rejected_enabled = db.Column(db.Boolean, default=True)
-    stock_arrival_enabled = db.Column(db.Boolean, default=True)
-    low_stock_enabled = db.Column(db.Boolean, default=True)
-    payment_reminder_enabled = db.Column(db.Boolean, default=True)
-    order_status_change_enabled = db.Column(db.Boolean, default=True)
-    
-    # Delivery preferences
-    in_app_enabled = db.Column(db.Boolean, default=True)
-    push_enabled = db.Column(db.Boolean, default=True)
-    email_enabled = db.Column(db.Boolean, default=False)  # Optional email notifications
-    
-    # Push notification subscription (stored as JSON)
-    push_subscription = db.Column(db.Text, nullable=True)  # JSON string for browser push subscription
-    
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
-    # Relationships
-    user = db.relationship('User', backref='notification_preference', uselist=False, lazy=True)
-    
-    def __repr__(self):
-        return f'<NotificationPreference for User {self.user_id}>'
-    
-    def to_dict(self):
-        """Convert to dictionary"""
-        return {
-            'id': self.id,
-            'user_id': self.user_id,
-            'new_order_enabled': self.new_order_enabled,
-            'order_approved_enabled': self.order_approved_enabled,
-            'order_rejected_enabled': self.order_rejected_enabled,
-            'stock_arrival_enabled': self.stock_arrival_enabled,
-            'low_stock_enabled': self.low_stock_enabled,
-            'payment_reminder_enabled': self.payment_reminder_enabled,
-            'order_status_change_enabled': self.order_status_change_enabled,
-            'in_app_enabled': self.in_app_enabled,
-            'push_enabled': self.push_enabled,
-            'email_enabled': self.email_enabled,
-            'push_subscription': self.push_subscription,
-            'created_at': self.created_at.isoformat() if self.created_at else None,
-            'updated_at': self.updated_at.isoformat() if self.updated_at else None
-        }
-    
-    def is_type_enabled(self, notification_type):
-        """Check if a specific notification type is enabled"""
-        type_map = {
-            'new_order': self.new_order_enabled,
-            'order_approved': self.order_approved_enabled,
-            'order_rejected': self.order_rejected_enabled,
-            'stock_arrival': self.stock_arrival_enabled,
-            'low_stock': self.low_stock_enabled,
-            'payment_reminder': self.payment_reminder_enabled,
-            'order_status_change': self.order_status_change_enabled
-        }
-        return type_map.get(notification_type, True)  # Default to enabled if type not found
+# NOTE: Notification and NotificationPreference models removed
+# These tables will be dropped from the database as they are no longer needed
 

@@ -7,7 +7,7 @@ from app.database_service import DatabaseService
 from app.pricing_service import PricingService
 from app.models import Product
 
-logging.basicConfig(level=logging.INFO)
+# Single logger initialization - removed duplicate
 logger = logging.getLogger(__name__)
 
 class LLMOrderService:
@@ -443,8 +443,10 @@ If the user's message is unclear or doesn't contain specific order details, set 
                         })
                     else:
                         # Fallback: try to get product name from database
-                        from app.models import Product
-                        product = Product.query.filter_by(product_code=code).first()
+                        # Product model doesn't have product_code, so use database service which handles both code and name
+                        from app.database_service import DatabaseService
+                        db_service = DatabaseService()
+                        product = db_service.get_product_by_code(code)
                         if product:
                             filtered.append({
                                 "product_code": code,
@@ -611,8 +613,9 @@ User Information:
             # Count how many rows should be in the table
             row_count = len(pricing_details)
             
-            # Calculate tax (5%) and grand total
-            tax_rate = 0.05  # 5%
+            # Calculate tax and grand total
+            from flask import current_app
+            tax_rate = current_app.config.get('TAX_RATE', 0.05)  # Get from config, default 5%
             tax_amount = total_amount * tax_rate
             grand_total = total_amount + tax_amount
 

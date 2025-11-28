@@ -6,7 +6,7 @@ import json
 from typing import List, Dict, Any
 from flask import current_app
 
-logging.basicConfig(level=logging.INFO)
+# Single logger initialization - logging.basicConfig should only be called once in __init__.py
 logger = logging.getLogger(__name__)
 
 class MCPExtractionService:

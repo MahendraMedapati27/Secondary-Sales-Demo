@@ -244,6 +244,11 @@
                 <div class="p-3 border-top">
                     <div class="position-relative">
                         <div class="input-group">
+                            <!-- Voice button DISABLED -->
+                            <!-- <button class="btn btn-outline-secondary" id="voiceButton" type="button" 
+                                    onclick="toggleVoiceInput()" title="Voice Input (Click and hold to speak)">
+                                <i class="fas fa-microphone" id="voiceIcon"></i>
+                            </button> -->
                             <input type="text" id="messageInput" class="form-control" 
                                    data-i18n-placeholder="placeholders.typeMessage"
                                    placeholder="Type your message..." autocomplete="off" />
@@ -260,6 +265,15 @@
                     <div class="form-text small text-muted mt-1">
                         Press Enter to send • Shift+Enter for new line
                     </div>
+                    <!-- Voice Status Indicator - DISABLED -->
+                    <!-- <div id="voiceStatus" class="text-muted small mt-2" style="display: none;">
+                        <div class="d-flex align-items-center">
+                            <div class="spinner-border spinner-border-sm me-2 text-primary" role="status">
+                                <span class="visually-hidden">Listening...</span>
+                            </div>
+                            <span id="voiceStatusText">Listening...</span>
+                        </div>
+                    </div> -->
                     <div id="typingIndicator" class="text-muted small mt-2" style="display: none;">
                         <div class="d-flex align-items-center">
                             <div class="spinner-border spinner-border-sm me-2" role="status">
@@ -373,8 +387,12 @@ document.head.appendChild(script);
 -->
 
 <!-- Avatar Functions (for chat integration) - Using three_avatar.js instead of avatar.js -->
+<!-- Azure Speech SDK (for voice recognition) - DISABLED -->
+<!-- <script src="https://unpkg.com/microsoft-cognitiveservices-speech-sdk@latest/distrib/browser/microsoft.cognitiveservices.speech.sdk.bundle-min.js" onerror="console.error('Failed to load Azure Speech SDK from CDN')"></script> -->
 <!-- i18n initialization must load before enhanced_chat.js -->
 <script src="{{ url_for('static', filename='js/i18n.js') }}?v={{ cache_buster if cache_buster else range(1000, 9999) | random }}&t={{ range(1000, 9999) | random }}"></script>
+<!-- Voice interaction module - DISABLED -->
+<!-- <script src="{{ url_for('static', filename='js/voice_interaction.js') }}?v={{ cache_buster if cache_buster else range(1000, 9999) | random }}&t={{ range(1000, 9999) | random }}"></script> -->
 <script src="{{ url_for('static', filename='js/enhanced_chat.js') }}?v={{ cache_buster if cache_buster else range(1000, 9999) | random }}&t={{ range(1000, 9999) | random }}"></script>
 
 <!-- User Info Panel Toggle Function -->

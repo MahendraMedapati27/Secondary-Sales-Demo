@@ -291,7 +291,7 @@ body {
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    background: url('/static/Images/Phoenix_10_A_modern_welllit_pharmacy_store_interior_wide_angle_2.jpg') center center / cover no-repeat fixed;
+    background: url('/static/Images/background.png') center center / cover no-repeat fixed;
     background-size: cover;
     background-position: center center;
     background-repeat: no-repeat;
@@ -345,7 +345,7 @@ main {
     height: 100vh;
     width: 100%;
     overflow: hidden;
-    background: url('/static/Images/Phoenix_10_A_modern_welllit_pharmacy_store_interior_wide_angle_2.jpg') center center / cover no-repeat;
+    background: url('/static/Images/background.png') center center / cover no-repeat;
     background-attachment: fixed;
     background-size: cover;
     background-position: center center;
@@ -717,15 +717,15 @@ main {
     border-radius: 24px;
     display: flex;
     flex-direction: column;
-    background: rgba(255, 255, 255, 0.85);
-    backdrop-filter: blur(20px);
-    -webkit-backdrop-filter: blur(20px);
-    border: 1px solid rgba(255, 255, 255, 0.5);
-    box-shadow: 0 8px 32px rgba(37, 99, 235, 0.2), 
-                0 0 0 1px rgba(255, 255, 255, 0.7) inset;
+    background: rgba(255, 255, 255, 0.25);
+    backdrop-filter: blur(30px);
+    -webkit-backdrop-filter: blur(30px);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    box-shadow: 0 8px 32px rgba(37, 99, 235, 0.15), 
+                0 0 0 1px rgba(255, 255, 255, 0.2) inset;
     overflow: hidden;
     transition: all 0.3s ease;
-    opacity: 0.95;
+    opacity: 1;
 }
 
 .chat-section .card:hover {
@@ -735,12 +735,12 @@ main {
 }
 
 .chat-messages {
-    background: rgba(255, 255, 255, 0.7);
-    backdrop-filter: blur(10px);
-    -webkit-backdrop-filter: blur(10px);
+    background: rgba(255, 255, 255, 0.15);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
     border-radius: 16px;
     padding: 20px;
-    border: 1px solid rgba(255, 255, 255, 0.4);
+    border: 1px solid rgba(255, 255, 255, 0.2);
     min-height: 0; /* Important for flex scrolling */
     max-height: 100%; /* Constrain height for scrolling */
     overflow-y: auto; /* Enable scrolling */
@@ -819,13 +819,14 @@ main {
     line-height: 1.5 !important; /* Increased line height for better spacing */
     letter-spacing: 0.3px !important; /* Add letter spacing for readability */
     word-spacing: 0.5px !important; /* Add word spacing for better readability */
-    background: linear-gradient(135deg, rgba(37, 99, 235, 0.9) 0%, rgba(30, 64, 175, 0.9) 100%);
-    backdrop-filter: blur(10px);
-    -webkit-backdrop-filter: blur(10px);
+    background: linear-gradient(135deg, rgba(37, 99, 235, 0.6) 0%, rgba(30, 64, 175, 0.6) 100%);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
     color: white;
-    border: 1px solid rgba(255, 255, 255, 0.2);
-    box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25);
     margin-left: auto !important; /* Align to right */
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
 }
 
 .message.user .message-bubble > div {
@@ -907,12 +908,13 @@ main {
 .message.bot .message-bubble {
     width: 85% !important; /* Fixed width for consistent bot messages */
     max-width: 85% !important; /* Set max-width for bot messages outer container */
-    background: rgba(117, 157, 245, 0.15);
-    backdrop-filter: blur(10px);
-    -webkit-backdrop-filter: blur(10px);
+    background: rgba(117, 157, 245, 0.25);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
     color: #1e40af;
-    border: 1px solid rgba(37, 99, 235, 0.3);
-    box-shadow: 0 2px 8px rgba(37, 99, 235, 0.15);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    box-shadow: 0 2px 8px rgba(37, 99, 235, 0.2);
+    text-shadow: 0 1px 2px rgba(255, 255, 255, 0.5);
 }
 
 .message.bot .message-bubble > div > div {
@@ -1107,22 +1109,23 @@ table {
 .card {
     border: none;
     border-radius: 24px;
-    background: rgba(255, 255, 255, 0.85);
-    backdrop-filter: blur(20px);
-    -webkit-backdrop-filter: blur(20px);
-    opacity: 0.95;
+    background: rgba(255, 255, 255, 0.25);
+    backdrop-filter: blur(30px);
+    -webkit-backdrop-filter: blur(30px);
+    opacity: 1;
 }
 
 .card-header {
-    background: linear-gradient(135deg, rgba(37, 99, 235, 0.95) 0%, rgba(30, 64, 175, 0.95) 100%) !important;
-    backdrop-filter: blur(20px);
-    -webkit-backdrop-filter: blur(20px);
-    border: 1px solid rgba(255, 255, 255, 0.3);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.2) !important;
+    background: linear-gradient(135deg, rgba(37, 99, 235, 0.4) 0%, rgba(30, 64, 175, 0.4) 100%) !important;
+    backdrop-filter: blur(30px);
+    -webkit-backdrop-filter: blur(30px);
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.15) !important;
     border-radius: 24px 24px 0 0 !important;
     color: white !important;
     padding: 0.05rem 0.05rem;
     opacity: 1;
+    text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
 }
 
 .bg-gradient-primary {
@@ -1139,10 +1142,10 @@ table {
 }
 
 .bg-light {
-    background: rgba(255, 255, 255, 0.4) !important;
-    backdrop-filter: blur(10px);
-    -webkit-backdrop-filter: blur(10px);
-    border: 1px solid rgba(255, 255, 255, 0.2);
+    background: rgba(255, 255, 255, 0.2) !important;
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(255, 255, 255, 0.15);
 }
 
 .border-top {
@@ -1247,23 +1250,30 @@ table {
 }
 
 #messageInput {
-    background: rgba(255, 255, 255, 0.95);
-    backdrop-filter: blur(10px);
-    -webkit-backdrop-filter: blur(10px);
-    border: 1px solid rgba(37, 99, 235, 0.3);
+    background: rgba(255, 255, 255, 0.3);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(255, 255, 255, 0.3);
     border-radius: 12px;
     transition: all 0.3s ease;
     padding: 10px 15px;
     font-size: 0.9rem;
     height: auto;
     max-height: 120px;
+    color: #1e40af;
+    text-shadow: 0 1px 2px rgba(255, 255, 255, 0.5);
 }
 
 #messageInput:focus {
-    background: rgba(255, 255, 255, 0.95);
-    border-color: var(--primary-color);
-    box-shadow: 0 0 0 0.2rem rgba(37, 99, 235, 0.25), 0 4px 12px rgba(37, 99, 235, 0.15);
+    background: rgba(255, 255, 255, 0.4);
+    border-color: rgba(255, 255, 255, 0.5);
+    box-shadow: 0 0 0 0.2rem rgba(37, 99, 235, 0.2), 0 4px 12px rgba(37, 99, 235, 0.15);
     outline: none;
+}
+
+#messageInput::placeholder {
+    color: rgba(30, 64, 175, 0.6);
+    text-shadow: none;
 }
 
 /* Light blue search bar placeholder styling */
@@ -1312,7 +1322,7 @@ table {
 @media (max-width: 768px) {
     .chat-container {
         flex-direction: column;
-        background: url('/static/Images/Phoenix_10_A_modern_welllit_pharmacy_store_interior_wide_angle_2.jpg') center center / cover no-repeat;
+        background: url('/static/Images/background.png') center center / cover no-repeat;
         background-attachment: fixed;
         background-size: cover;
         background-position: center center;
@@ -1371,12 +1381,12 @@ table {
 
 /* Welcome message styling */
 .chat-messages .text-center {
-    background: rgba(255, 255, 255, 0.8);
-    backdrop-filter: blur(10px);
-    -webkit-backdrop-filter: blur(10px);
+    background: rgba(255, 255, 255, 0.2);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
     border-radius: 16px;
     padding: 30px;
-    border: 1px solid rgba(37, 99, 235, 0.2);
+    border: 1px solid rgba(255, 255, 255, 0.25);
 }
 
 .chat-messages .text-center i {
@@ -1436,25 +1446,26 @@ table {
 
 /* Form improvements */
 .form-control {
-    background: rgba(255, 255, 255, 0.8);
-    backdrop-filter: blur(10px);
-    -webkit-backdrop-filter: blur(10px);
-    border: 1px solid rgba(37, 99, 235, 0.2);
+    background: rgba(255, 255, 255, 0.3);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(255, 255, 255, 0.3);
     transition: all 0.3s ease;
+    color: #1e40af;
 }
 
 .form-control:focus {
-    background: rgba(255, 255, 255, 0.95);
-    border-color: var(--primary-color);
-    box-shadow: 0 0 0 0.2rem rgba(37, 99, 235, 0.25);
+    background: rgba(255, 255, 255, 0.4);
+    border-color: rgba(255, 255, 255, 0.5);
+    box-shadow: 0 0 0 0.2rem rgba(37, 99, 235, 0.2);
     outline: none;
 }
 
 .input-group-text {
-    background: rgba(255, 255, 255, 0.6);
-    backdrop-filter: blur(10px);
-    -webkit-backdrop-filter: blur(10px);
-    border-color: rgba(37, 99, 235, 0.2);
+    background: rgba(255, 255, 255, 0.3);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border-color: rgba(255, 255, 255, 0.3);
     color: var(--primary-color);
 }
 

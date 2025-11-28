@@ -7,7 +7,7 @@ from app.database_service import DatabaseService
 from app.pricing_service import PricingService
 from app.email_utils import send_email
 
-logging.basicConfig(level=logging.INFO)
+# Single logger initialization - logging.basicConfig should only be called once in __init__.py
 logger = logging.getLogger(__name__)
 
 class StockCheckService:
@@ -50,11 +50,16 @@ class StockCheckService:
                     self.logger.warning(f"User or area not found for pending product {pending.id}")
                     continue
                 
-                # Check if product is now available in dealer stock for this area
+                # CRITICAL: Check availability for BOTH paid quantity AND FOC quantity
+                # FOC is stored with pending order and needs to be included in stock check
+                original_foc_qty = pending.original_foc_quantity or 0
+                total_quantity_needed = pending.requested_quantity + original_foc_qty
+                
+                # Check if product is now available in dealer stock for this area (including FOC)
                 availability_result = self._check_product_availability(
                     pending.product_code,
                     user.area,
-                    pending.requested_quantity
+                    total_quantity_needed  # Check for paid + FOC quantity
                 )
                 
                 if availability_result['available']:
@@ -164,10 +169,29 @@ class StockCheckService:
                     'message': "User not found"
                 }
             
-            # Get product by product_code
-            product = Product.query.filter_by(
-                product_name=pending_product.product_name
+            # Get product by product_code or product_name
+            # Method 1: Try to find via DealerWiseStockDetails by product_code, then get Product
+            product = None
+            stock_detail = DealerWiseStockDetails.query.filter_by(
+                product_code=pending_product.product_code,
+                status='confirmed'
             ).first()
+            
+            if stock_detail and stock_detail.product_id:
+                product = Product.query.get(stock_detail.product_id)
+            
+            # Method 2: If not found, try to find Product by product_name (exact match)
+            if not product:
+                product = Product.query.filter_by(
+                    product_name=pending_product.product_name
+                ).first()
+            
+            # Method 3: If still not found, try case-insensitive partial match
+            if not product:
+                from sqlalchemy import func
+                product = Product.query.filter(
+                    func.lower(Product.product_name).contains(func.lower(pending_product.product_name))
+                ).first()
             
             if not product:
                 return {
@@ -175,18 +199,37 @@ class StockCheckService:
                     'message': "Product not found"
                 }
             
+            # CRITICAL: Get original order to copy customer details
+            original_order = None
+            if pending_product.original_order_id:
+                original_order = Order.query.filter_by(order_id=pending_product.original_order_id).first()
+            
             # Create order (for MR users)
+            # Note: This order will need distributor confirmation, but stock is blocked immediately
             order = Order(
                 mr_id=user.id,
                 mr_unique_id=user.unique_id,
                 status='pending',
                 order_stage='placed'
             )
+            
+            # CRITICAL: Copy customer details from original order if available
+            if original_order:
+                if original_order.customer_id:
+                    order.customer_id = original_order.customer_id
+                    order.customer_unique_id = original_order.customer_unique_id
+                    self.logger.info(f"Copied customer details from original order {original_order.order_id} to new order (customer_id: {original_order.customer_id}, customer_unique_id: {original_order.customer_unique_id})")
+            
             order.generate_order_id()
             db.session.add(order)
             db.session.flush()  # Get order.id
             
-            # Calculate pricing
+            # CRITICAL: Use original FOC from pending order, don't recalculate
+            # FOC is stored with pending order and will be dispatched when stock arrives
+            # Example: Original order 10 → 1 FOC. If 2 is pending, it gets 1 FOC (stored with pending)
+            original_foc_qty = pending_product.original_foc_quantity or 0
+            
+            # Calculate pricing for the pending quantity (paid only, FOC is separate)
             pricing = self.pricing_service.calculate_product_pricing(
                 product.id,
                 pending_product.requested_quantity
@@ -198,11 +241,15 @@ class StockCheckService:
                     'message': f"Pricing error: {pricing['error']}"
                 }
             
-            # Create order item with FOC
+            # Create order item - use original FOC stored with pending order
             sales_price = pricing['pricing']['final_price']
-            total_price = pricing['pricing']['total_amount']
-            foc_info = pricing.get('scheme', {})  # FOC info is in 'scheme' key
-            free_quantity = foc_info.get('free_quantity', 0)
+            # Total price is based on paid quantity only (FOC is free)
+            total_price = sales_price * pending_product.requested_quantity
+            
+            # Use original FOC from pending order (stored when order was split)
+            free_quantity = original_foc_qty
+            
+            self.logger.info(f"Fulfilling pending order: {pending_product.requested_quantity} paid + {free_quantity} FOC (from original order, stored with pending). Total: {pending_product.requested_quantity + free_quantity}")
             
             order_item = OrderItem(
                 order_id=order.id,
@@ -210,14 +257,64 @@ class StockCheckService:
                 product_code=pending_product.product_code,
                 product_name=pending_product.product_name,
                 quantity=pending_product.requested_quantity,
-                free_quantity=free_quantity,
+                free_quantity=free_quantity,  # Use original FOC stored with pending order
                 unit_price=sales_price,
                 total_price=total_price
             )
             db.session.add(order_item)
             
-            # Update order total
-            order.total_amount = pricing['pricing']['total_amount']
+            # CRITICAL: Calculate order totals including tax (consistent with place_order)
+            # pricing['pricing']['total_amount'] is subtotal only, we need to add tax
+            from flask import current_app
+            subtotal = pricing['pricing']['total_amount']  # This is the subtotal (paid quantity * unit price)
+            tax_rate = current_app.config.get('TAX_RATE', 0.05)  # Get from config, default 5%
+            tax_amount = subtotal * tax_rate
+            grand_total = subtotal + tax_amount
+            
+            # Update order totals (consistent with place_order logic)
+            order.subtotal = subtotal
+            order.tax_amount = tax_amount
+            order.tax_rate = tax_rate
+            order.total_amount = grand_total  # Grand total includes tax
+            
+            # CRITICAL: Block stock for the fulfilled pending order (including FOC)
+            # Stock needs to be blocked for both paid quantity and FOC quantity
+            total_quantity_to_block = pending_product.requested_quantity + free_quantity
+            
+            # Block stock using the same logic as place_order
+            from app.enhanced_order_service import EnhancedOrderService
+            order_service = EnhancedOrderService()
+            
+            if user.role == 'mr' and user.area:
+                # For MRs, block quantity from dealers in their area
+                success = order_service._block_quantity_for_mr_order(
+                    user=user,
+                    product_code=pending_product.product_code,
+                    quantity=total_quantity_to_block  # Block paid + FOC quantity
+                )
+                if not success:
+                    self.logger.error(f"Failed to block stock for fulfilled pending order {pending_product.product_code}")
+                    db.session.rollback()
+                    return {
+                        'success': False,
+                        'message': f"Failed to block stock for {pending_product.product_code}"
+                    }
+                self.logger.info(f"Blocked {total_quantity_to_block} units ({pending_product.requested_quantity} paid + {free_quantity} FOC) for fulfilled pending order")
+            elif user.role == 'distributor' and user.unique_id:
+                # For distributors, block quantity from their own stock
+                success = order_service._block_quantity_for_distributor_order(
+                    user=user,
+                    product_code=pending_product.product_code,
+                    quantity=total_quantity_to_block  # Block paid + FOC quantity
+                )
+                if not success:
+                    self.logger.error(f"Failed to block stock for fulfilled pending order {pending_product.product_code}")
+                    db.session.rollback()
+                    return {
+                        'success': False,
+                        'message': f"Failed to block stock for {pending_product.product_code}"
+                    }
+                self.logger.info(f"Blocked {total_quantity_to_block} units ({pending_product.requested_quantity} paid + {free_quantity} FOC) for fulfilled pending order")
             
             db.session.commit()
             
@@ -227,6 +324,12 @@ class StockCheckService:
                 status='fulfilled',
                 fulfilled_order_id=order.order_id
             )
+            
+            # Update fulfilled_at timestamp
+            pending_product.fulfilled_at = datetime.utcnow()
+            db.session.commit()
+            
+            self.logger.info(f"Pending order {pending_product.id} fulfilled and linked to new order {order.order_id} (original: {pending_product.original_order_id})")
             
             # Send notifications
             self._send_fulfillment_notifications(pending_product, order, pricing, user)
@@ -306,19 +409,29 @@ class StockCheckService:
                 <tr>
                     <th>Product Name</th>
                     <th>Quantity</th>
+                    <th>FOC</th>
+                    <th>Total Qty</th>
                     <th>Unit Price</th>
                     <th>Total</th>
                 </tr>
                 <tr>
                     <td>{pending_product.product_name}<br><small>({pending_product.product_code})</small></td>
                     <td>{pending_product.requested_quantity}</td>
-                    <td>${pricing['pricing']['final_price']:.2f}</td>
-                    <td>${pricing['pricing']['total_amount']:.2f}</td>
+                    <td style='color:#10b981;font-weight:bold;'>{pending_product.original_foc_quantity or 0}</td>
+                    <td style='font-weight:bold;'>{pending_product.requested_quantity + (pending_product.original_foc_quantity or 0)}</td>
+                    <td>{pricing['pricing']['final_price']:,.2f} MMK</td>
+                    <td>{pricing['pricing']['total_amount']:,.2f} MMK</td>
                 </tr>
             </table>
             
             <p style="margin-top: 20px;"><strong>Order ID:</strong> {new_order.order_id}</p>
-            <p><strong>Total Amount:</strong> <span style="font-size: 18px; font-weight: bold; color: #007bff;">${new_order.total_amount:.2f}</span></p>
+            <p><strong>Total Amount:</strong> <span style="font-size: 18px; font-weight: bold; color: #007bff;">{new_order.total_amount:,.2f} MMK</span></p>
+            
+            <div class="highlight" style="margin-top: 15px;">
+                <strong>🎁 FOC Information:</strong><br>
+                This order includes <strong>{pending_product.original_foc_quantity or 0} FREE</strong> units as part of the original order's FOC benefit.
+                The FOC was preserved from your original order and will be dispatched along with the paid quantity.
+            </div>
         </div>
         
         <div class="highlight">
@@ -412,15 +525,23 @@ class StockCheckService:
                     <th>Product Name</th>
                     <th>Product Code</th>
                     <th>Quantity</th>
+                    <th>FOC</th>
+                    <th>Total Qty</th>
                 </tr>
                 <tr>
                     <td>{pending_product.product_name}</td>
                     <td>{pending_product.product_code}</td>
                     <td>{pending_product.requested_quantity} units</td>
+                    <td style='color:#10b981;font-weight:bold;'>{pending_product.original_foc_quantity or 0} units</td>
+                    <td style='font-weight:bold;'>{pending_product.requested_quantity + (pending_product.original_foc_quantity or 0)} units</td>
                 </tr>
             </table>
             
-            <p><strong>Total Amount:</strong> ${new_order.total_amount:.2f}</p>
+            <p><strong>Total Amount:</strong> {new_order.total_amount:,.2f} MMK</p>
+            
+            <div class="info-box" style="margin-top: 15px;">
+                <p style="margin: 5px 0;"><strong>Note:</strong> This order includes {pending_product.original_foc_quantity or 0} FOC (Free of Cost) units that were part of the original order.</p>
+            </div>
             
             <div class="info-box">
                 <strong>⚠️ Important:</strong><br>

@@ -11,7 +11,7 @@ from app import db
 from app.models import DealerWiseStockDetails, Product, User
 from app.email_utils import send_stock_arrival_notification, send_quantity_discrepancy_email
 
-logging.basicConfig(level=logging.INFO)
+# Single logger initialization - removed duplicate
 logger = logging.getLogger(__name__)
 
 class StockManagementService:
@@ -157,8 +157,8 @@ class StockManagementService:
                 except Exception as e:
                     self.logger.error(f"Error sending quantity discrepancy email: {str(e)}")
             
-            # Calculate available_for_sale
-            available_for_sale = max(0, actual_received - stock_detail.blocked_quantity - stock_detail.sold_quantity)
+            # Calculate available_for_sale (including out_for_delivery_quantity)
+            available_for_sale = max(0, actual_received - stock_detail.blocked_quantity - stock_detail.out_for_delivery_quantity - stock_detail.sold_quantity)
             
             # Use direct SQL UPDATE to ensure fields persist correctly
             # This avoids ORM issues with BIT and nullable fields
@@ -295,33 +295,28 @@ class StockManagementService:
             return {'success': False, 'message': f'Error: {str(e)}'}
     
     def _update_product_quantity(self, stock_detail, old_quantity, new_quantity):
-        """Update product quantity after adjustment"""
+        """
+        Update product quantity after adjustment
+        NOTE: Product model doesn't store quantity - quantities are stored in DealerWiseStockDetails
+        This method is kept for compatibility but doesn't update Product model (which doesn't have quantity fields)
+        The actual quantity is already updated in DealerWiseStockDetails in adjust_stock_quantity method
+        """
         try:
-            dealer = User.query.filter_by(unique_id=stock_detail.dealer_unique_id).first()
-            if not dealer:
-                return
+            # Product model doesn't have product_code, warehouse_id, batch_number, expiry_date, 
+            # product_quantity, or available_for_sale fields
+            # All stock information is stored in DealerWiseStockDetails, which is already updated
+            # in the adjust_stock_quantity method
             
-            # Get warehouse by area
-            from app.database_service import DatabaseService
-            db_service = DatabaseService()
-            warehouse = db_service.get_warehouse_by_area(dealer.area)
-            if not warehouse:
-                return
+            # Log the adjustment for tracking
+            quantity_diff = new_quantity - old_quantity
+            self.logger.info(
+                f"Stock quantity adjusted in DealerWiseStockDetails (ID: {stock_detail.id}): "
+                f"{old_quantity} -> {new_quantity} (diff: {quantity_diff} units)"
+            )
             
-            product = Product.query.filter_by(
-                product_code=stock_detail.product_code,
-                warehouse_id=warehouse.id,
-                batch_number=stock_detail.lot_number,
-                expiry_date=stock_detail.expiration_date
-            ).first()
-            
-            if product:
-                quantity_diff = new_quantity - old_quantity
-                product.product_quantity += quantity_diff
-                product.available_for_sale += quantity_diff
-                self.logger.info(f"Adjusted product quantity: {quantity_diff} units")
+            # No Product model update needed - stock is tracked in DealerWiseStockDetails
             
         except Exception as e:
-            self.logger.error(f"Error updating product quantity: {str(e)}")
-            raise
+            self.logger.error(f"Error in _update_product_quantity: {str(e)}")
+            # Don't raise - this is a non-critical operation
 

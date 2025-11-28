@@ -1,6 +1,7 @@
-from flask import Flask, redirect, url_for, request, jsonify, g
+from flask import Flask, redirect, url_for, request, jsonify, g, current_app
 from flask_sqlalchemy import SQLAlchemy
-from flask_login import LoginManager
+# LOGIN MANAGER DISABLED - Authentication not used
+# from flask_login import LoginManager
 from flask_cors import CORS
 from flask_mail import Mail
 from config import Config
@@ -12,7 +13,8 @@ import os
 from datetime import datetime
 
 db = SQLAlchemy()
-login_manager = LoginManager()
+# LOGIN MANAGER DISABLED - Authentication not used
+# login_manager = LoginManager()
 mail = Mail()
 
 def create_app(config_class=Config):
@@ -66,8 +68,9 @@ def create_app(config_class=Config):
     
     # Initialize extensions
     db.init_app(app)
-    login_manager.init_app(app)
-    login_manager.login_view = 'auth.login'
+    # LOGIN MANAGER DISABLED - Authentication not used
+    # login_manager.init_app(app)
+    # login_manager.login_view = 'auth.login'
     mail.init_app(app)
     CORS(app)
     
@@ -155,10 +158,11 @@ def create_app(config_class=Config):
         return jsonify(get_metrics_summary()), 200
     
     # Register blueprints
-    from app.auth import auth_bp
+    # AUTH BLUEPRINT DISABLED - Authentication not used
+    # from app.auth import auth_bp
     from app.enhanced_chatbot import chatbot_bp as enhanced_chatbot_bp
     
-    app.register_blueprint(auth_bp, url_prefix='/auth')
+    # app.register_blueprint(auth_bp, url_prefix='/auth')  # DISABLED
     app.register_blueprint(enhanced_chatbot_bp, url_prefix='/enhanced-chat')
     
     # Root route
@@ -323,7 +327,7 @@ def create_app(config_class=Config):
     with app.app_context():
         def _mssql_maintenance():
             try:
-                # Expand otp_secret and phone columns if too small (idempotent)
+                # Expand phone column if too small (idempotent) - OTP removed
                 from sqlalchemy import text
                 engine = db.get_engine()
                 with engine.connect() as conn:
@@ -336,15 +340,16 @@ BEGIN
     ALTER TABLE dbo.users ALTER COLUMN phone NVARCHAR(50) NOT NULL;
 END
 """))
-                    # Increase otp_secret column to NVARCHAR(255)
-                    conn.execute(text("""
-IF EXISTS (SELECT 1 FROM sys.columns c
-           JOIN sys.objects o ON o.object_id = c.object_id
-           WHERE o.name = 'users' AND c.name = 'otp_secret' AND c.max_length < 510)
-BEGIN
-    ALTER TABLE dbo.users ALTER COLUMN otp_secret NVARCHAR(255) NULL;
-END
-"""))
+                    # OTP columns removed - authentication not used
+                    # Increase otp_secret column to NVARCHAR(255) - DISABLED
+                    # conn.execute(text("""
+# IF EXISTS (SELECT 1 FROM sys.columns c
+#            JOIN sys.objects o ON o.object_id = c.object_id
+#            WHERE o.name = 'users' AND c.name = 'otp_secret' AND c.max_length < 510)
+# BEGIN
+#     ALTER TABLE dbo.users ALTER COLUMN otp_secret NVARCHAR(255) NULL;
+# END
+# """))
                     # Add sales_price column to products table if it doesn't exist
                     conn.execute(text("""
 IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'dbo.products') AND type in (N'U'))
@@ -442,9 +447,78 @@ END
         logging.warning(f"Failed to start stock checker background thread: {str(e)}")
         logging.warning("Pending orders will not be auto-fulfilled.")
     
+    # Start stock extracter background thread
+    # PAUSED: Stock extracter is currently disabled
+    # To re-enable, change the condition below to: if app.config.get('EXTRACTER_ENABLED', True):
+    if False:  # Stock extracter paused
+        try:
+            from app.stock_extracter.graph_service import MicrosoftGraphService
+            from app.stock_extracter.excel_extractor import ExcelExtractor
+            from app.stock_extracter.stock_importer import StockImporter
+            from app.stock_extracter.scheduler import StockExtractionScheduler
+            
+            def stock_extracter_worker():
+                """Background worker thread for extracting stock from OneDrive"""
+                logger = logging.getLogger(__name__)
+                
+                # Initialize services
+                try:
+                    graph_service = MicrosoftGraphService(
+                        tenant_id=app.config.get('MS_GRAPH_TENANT_ID'),
+                        client_id=app.config.get('MS_GRAPH_CLIENT_ID'),
+                        client_secret=app.config.get('MS_GRAPH_CLIENT_SECRET')
+                    )
+                    
+                    excel_extractor = ExcelExtractor()
+                    
+                    stock_importer = StockImporter(db=db)
+                    
+                    scheduler = StockExtractionScheduler(
+                        graph_service=graph_service,
+                        excel_extractor=excel_extractor,
+                        stock_importer=stock_importer,
+                        site_url=app.config.get('SHAREPOINT_SITE_URL'),
+                        folder_path=app.config.get('SHAREPOINT_FOLDER_PATH'),
+                        check_interval_minutes=app.config.get('EXTRACTER_CHECK_INTERVAL_MINUTES', 60),
+                        app=app
+                    )
+                    
+                    # Run initial extraction
+                    with app.app_context():
+                        logger.info("Running initial stock extraction...")
+                        scheduler.run_once()
+                    
+                    # Start scheduler
+                    scheduler.start()
+                    logger.info(f"✅ Stock extracter started (checking every {app.config.get('EXTRACTER_CHECK_INTERVAL_MINUTES', 60)} minutes)")
+                    
+                    # Keep thread alive
+                    while True:
+                        import time
+                        time.sleep(60)  # Check every minute if still running
+                        
+                except Exception as e:
+                    logger.error(f"❌ Stock extracter initialization error: {str(e)}")
+                    import traceback
+                    logger.error(traceback.format_exc())
+            
+            # Start the background thread as daemon
+            stock_extracter_thread = threading.Thread(target=stock_extracter_worker, daemon=True, name="StockExtracter")
+            stock_extracter_thread.start()
+            logging.info("🚀 Stock extracter background thread started")
+            
+        except Exception as e:
+            logging.warning(f"Failed to start stock extracter background thread: {str(e)}")
+            logging.warning("Stock extraction from OneDrive will not be available.")
+            import traceback
+            logging.warning(traceback.format_exc())
+    else:
+        logging.info("⏸️ Stock extracter is paused (disabled)")
+    
     return app
 
-@login_manager.user_loader
-def load_user(user_id):
-    from app.models import User
-    return User.query.get(int(user_id))
+# LOGIN MANAGER DISABLED - Authentication not used
+# @login_manager.user_loader
+# def load_user(user_id):
+#     from app.models import User
+#     return User.query.get(int(user_id))

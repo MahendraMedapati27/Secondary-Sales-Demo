@@ -1,6 +1,6 @@
 from flask import Blueprint, render_template, request, jsonify, session, current_app, make_response, send_file
 from app import db 
-from app.models import Conversation, User, Product, Order, ChatSession, CartItem, DealerWiseStockDetails, Customer, FOC
+from app.models import Conversation, User, Product, Order, OrderItem, ChatSession, CartItem, DealerWiseStockDetails, Customer, FOC
 from app.database_service import DatabaseService
 from app.llm_classification_service import LLMClassificationService
 from app.web_search_service import WebSearchService
@@ -8,10 +8,13 @@ from app.enhanced_order_service import EnhancedOrderService
 from app.llm_order_service import LLMOrderService
 from app.pricing_service import PricingService
 from app.groq_service import GroqService 
-from app.email_utils import send_otp_email, send_conversation_email
+from app.email_utils import send_conversation_email
+# OTP email removed - authentication not used
+# from app.email_utils import send_otp_email
 from app.stock_management_service import StockManagementService
 from app.azure_search_service import get_search_service
 from app.translation_service import get_translation_service
+from app.azure_speech_service import get_speech_service
 import logging
 import time
 from datetime import datetime
@@ -22,8 +25,7 @@ import re
 
 chatbot_bp = Blueprint('enhanced_chatbot', __name__)
 
-# Initialize logging
-logging.basicConfig(level=logging.INFO)
+# Single logger initialization - logging.basicConfig should only be called once in __init__.py
 logger = logging.getLogger(__name__)
 
 # Initialize services
@@ -335,6 +337,13 @@ def get_default_action_buttons(user):
     if user and user.role == 'company':
         return [
             {'text': 'Generate Report', 'action': 'generate_report'},
+            {'text': 'Help', 'action': 'help'}
+        ]
+    
+    # Delivery partners get delivery-specific buttons
+    if user and user.role == 'delivery_partner':
+        return [
+            {'text': 'Track Orders', 'action': 'delivery_dashboard'},
             {'text': 'Help', 'action': 'help'}
         ]
     
@@ -819,16 +828,36 @@ Respond with ONLY a JSON object:
         
         # Check for "select customer", "change customer", and "add new customer" messages BEFORE LLM classification
         # This prevents misclassification when user has items in cart
-        if message_lower == 'select customer' or message_lower == 'select existing customer':
+        # Use more flexible matching for voice input variations
+        select_customer_patterns = [
+            'select customer', 'select existing customer', 'select a customer',
+            'select the customer', 'choose customer', 'pick customer',
+            'show customers', 'show customer list', 'customer selection',
+            'select an existing customer', 'i want to select customer',
+            'i want to select a customer', 'select customer please'
+        ]
+        change_customer_patterns = [
+            'change customer', 'change the customer', 'change my customer',
+            'switch customer', 'change to another customer', 'different customer'
+        ]
+        add_customer_patterns = [
+            'add new customer', 'add customer', 'create customer',
+            'new customer', 'add a new customer', 'create new customer'
+        ]
+        
+        # Check if message matches any pattern (using 'in' for partial matching)
+        message_lower_clean = ' '.join(message_lower.split())  # Normalize whitespace
+        
+        if any(pattern in message_lower_clean for pattern in select_customer_patterns):
             logger.info(f"Detected select customer message: {user_message}")
             return handle_select_customer(user, context_data)
-        elif message_lower == 'change customer' or message_lower == 'change the customer' or message_lower == 'change my customer':
+        elif any(pattern in message_lower_clean for pattern in change_customer_patterns):
             logger.info(f"Detected change customer message: {user_message}")
             # Clear the current selected customer from session
             session.pop('selected_customer_id', None)
             session.pop('selected_customer_unique_id', None)
             return handle_select_customer(user, context_data)
-        elif message_lower == 'add new customer' or message_lower == 'add customer':
+        elif any(pattern in message_lower_clean for pattern in add_customer_patterns):
             logger.info(f"Detected add new customer message: {user_message}")
             return handle_add_new_customer(user, context_data)
 
@@ -3025,6 +3054,22 @@ def confirm_order_action():
         if not order_id:
             return jsonify({'error': 'Invalid order ID format'}), 400
         
+        # Validate and sanitize delivery_partner_id if provided
+        delivery_partner_id = None
+        delivery_partner_id_raw = data.get('delivery_partner_id')
+        if delivery_partner_id_raw is not None:
+            try:
+                delivery_partner_id = int(delivery_partner_id_raw)
+                if delivery_partner_id <= 0:
+                    delivery_partner_id = None
+                else:
+                    # Verify delivery partner exists and is valid
+                    delivery_partner = User.query.get(delivery_partner_id)
+                    if not delivery_partner or delivery_partner.role != 'delivery_partner':
+                        return jsonify({'error': 'Invalid delivery partner selected'}), 400
+            except (ValueError, TypeError):
+                delivery_partner_id = None
+        
         # Validate and sanitize item_edits
         item_edits_raw = data.get('item_edits')  # {item_id: {'quantity': int, 'expiry_date': str, 'reason': str}}
         
@@ -3095,9 +3140,9 @@ def confirm_order_action():
                     pass
             item_edits = converted_edits
         
-        # Confirm order with edits
+        # Confirm order with edits and delivery partner
         enhanced_order_service = get_enhanced_order_service()
-        result = enhanced_order_service.confirm_order_by_distributor(order_id, user.id, item_edits)
+        result = enhanced_order_service.confirm_order_by_distributor(order_id, user.id, item_edits, delivery_partner_id)
         
         return jsonify(result), 200 if result['success'] else 400
         
@@ -3867,9 +3912,10 @@ def get_cart():
                 'total_quantity': total_quantity
             })
         
-        # Calculate subtotal, tax (5%), and grand total
+        # Calculate subtotal, tax, and grand total
+        from flask import current_app
         subtotal = sum(item['total_price'] for item in cart_data)
-        tax_rate = 0.05  # 5% tax
+        tax_rate = current_app.config.get('TAX_RATE', 0.05)  # Get from config, default 5%
         tax_amount = subtotal * tax_rate
         grand_total = subtotal + tax_amount
         
@@ -3954,7 +4000,9 @@ def remove_from_cart(item_id):
             
             # Calculate totals
             subtotal = sum(item.get('total_price', 0) for item in cart_data)
-            tax_amount = subtotal * 0.05  # 5% tax
+            from flask import current_app
+            tax_rate = current_app.config.get('TAX_RATE', 0.05)  # Get from config, default 5%
+            tax_amount = subtotal * tax_rate
             grand_total = subtotal + tax_amount
             
             return jsonify({
@@ -4240,8 +4288,16 @@ def distributor_confirm_order():
         if not user or user.role != 'distributor':
             return jsonify({'error': 'Access denied. Distributor access required.'}), 403
         
+        # Get delivery partner ID from request if provided
+        delivery_partner_id = data.get('delivery_partner_id')
+        if delivery_partner_id:
+            try:
+                delivery_partner_id = int(delivery_partner_id)
+            except (ValueError, TypeError):
+                delivery_partner_id = None
+        
         enhanced_order_service = get_enhanced_order_service()
-        result = enhanced_order_service.confirm_order_by_distributor(order_id, distributor_user_id)
+        result = enhanced_order_service.confirm_order_by_distributor(order_id, distributor_user_id, item_edits=None, delivery_partner_id=delivery_partner_id)
         
         if result['success']:
             return jsonify({
@@ -4657,3 +4713,379 @@ Would you like to generate another report?"""
             'error': str(e),
             'response': 'Sorry, there was an error generating your report. Please try again.'
         }), 500
+
+
+# ============================================================================
+# VOICE INTERACTION ENDPOINTS
+# ============================================================================
+
+@chatbot_bp.route('/api/voice/token', methods=['GET'])
+def get_voice_token():
+    """
+    Get Azure Speech Service access token for client-side STT
+    VOICE FEATURE IS DISABLED
+    """
+    # Voice feature disabled - always return error
+    return jsonify({
+        'error': 'Voice feature is currently disabled'
+    }), 503
+    
+    # Original code commented out
+    # try:
+    #     speech_service = get_speech_service()
+    #     
+    #     if not speech_service.is_enabled():
+    #         return jsonify({
+    #             'error': 'Azure Speech Service is not configured'
+    #         }), 503
+    #     
+    #     token = speech_service.get_access_token()
+    #     
+    #     if not token:
+    #         return jsonify({
+    #             'error': 'Failed to obtain access token'
+    #         }), 500
+    #     
+    #     return jsonify({
+    #         'token': token,
+    #         'region': speech_service.speech_region
+    #     }), 200
+    #     
+    # except Exception as e:
+    #     logger.error(f"Error getting voice token: {str(e)}")
+    #     return jsonify({
+    #         'error': str(e)
+    #     }), 500
+
+
+@chatbot_bp.route('/api/voice/tts', methods=['POST'])
+def text_to_speech():
+    """
+    Convert text to speech using Azure TTS
+    VOICE FEATURE IS DISABLED
+    """
+    # Voice feature disabled - always return error
+    return jsonify({
+        'error': 'Voice feature is currently disabled'
+    }), 503
+    
+    # Original code commented out - unreachable after return above
+    # try:
+    #     # Get JSON data
+    #     try:
+    #         data = request.get_json(force=True)
+    #     except Exception as json_error:
+    #         logger.error(f"Failed to parse JSON: {json_error}")
+    #         return jsonify({
+    #             'error': 'Invalid JSON data'
+    #         }), 400
+    #         
+    #     if not data:
+    #         return jsonify({
+    #             'error': 'No JSON data provided'
+    #         }), 400
+    #         
+    #     text = data.get('text', '')
+    #     language = data.get('language', 'en')
+    #     
+    #     if not text or not text.strip():
+    #         return jsonify({
+    #             'error': 'No text provided'
+    #         }), 400
+    #     
+    #     # Clean and limit text length (Azure TTS has limits)
+    #     text = text.strip()
+    #     if len(text) > 4000:
+    #         text = text[:4000] + '...'
+    #     
+    #     # Get speech service
+    #     try:
+    #         speech_service = get_speech_service()
+    #     except Exception as service_error:
+    #         logger.error(f"Failed to get speech service: {service_error}")
+    #         import traceback
+    #         logger.error(traceback.format_exc())
+    #         return jsonify({
+    #             'error': f'Failed to initialize speech service: {str(service_error)}'
+    #         }), 500
+    #     
+    #     if not speech_service or not speech_service.is_enabled():
+    #         logger.warning("TTS requested but Azure Speech Service is not enabled")
+    #         return jsonify({
+    #             'error': 'Azure Speech Service is not configured'
+    #         }), 503
+    #     
+    #     # Convert text to speech
+    #     logger.info(f"Generating TTS for {len(text)} characters in language {language}")
+    #     try:
+    #         audio_data = speech_service.text_to_speech(text, language)
+    #     except Exception as tts_error:
+    #         logger.error(f"TTS generation failed: {tts_error}")
+    #         import traceback
+    #         logger.error(traceback.format_exc())
+    #         return jsonify({
+    #             'error': f'TTS generation failed: {str(tts_error)}'
+    #         }), 500
+    #     
+    #     if not audio_data:
+    #         logger.error("TTS generation returned None")
+    #         return jsonify({
+    #             'error': 'Failed to generate speech'
+    #         }), 500
+    #     
+    #     # Ensure audio_data is at the beginning
+    #     try:
+    #         audio_data.seek(0)
+    #     except Exception as seek_error:
+    #         logger.error(f"Failed to seek audio data: {seek_error}")
+    #         return jsonify({
+    #             'error': f'Failed to process audio data: {str(seek_error)}'
+    #         }), 500
+    #     
+    #     # Read all audio data into bytes (this is safe since we know it's not huge)
+    #     try:
+    #         audio_bytes = audio_data.read()
+    #         audio_size = len(audio_bytes)
+    #     except Exception as read_error:
+    #         logger.error(f"Failed to read audio data: {read_error}")
+    #         import traceback
+    #         logger.error(traceback.format_exc())
+    #         return jsonify({
+    #             'error': f'Failed to read audio data: {str(read_error)}'
+    #         }), 500
+    #     
+    #     if audio_size == 0:
+    #         logger.error("TTS generated empty audio data")
+    #         return jsonify({
+    #             'error': 'Generated audio is empty'
+    #         }), 500
+    #     
+    #     # Create response with audio data directly
+    #     try:
+    #         response = make_response(audio_bytes)
+    #         response.headers['Content-Type'] = 'audio/mpeg'
+    #         response.headers['Content-Length'] = str(audio_size)
+    #         response.headers['Content-Disposition'] = 'inline; filename=speech.mp3'
+    #         response.headers['Access-Control-Allow-Origin'] = '*'
+    #         response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    #         response.headers['Pragma'] = 'no-cache'
+    #         response.headers['Expires'] = '0'
+    #         
+    #         logger.info(f"TTS audio generated successfully, size: {audio_size} bytes")
+    #         return response
+    #     except Exception as response_error:
+    #         logger.error(f"Failed to create response: {response_error}")
+    #         import traceback
+    #         logger.error(traceback.format_exc())
+    #         return jsonify({
+    #             'error': f'Failed to create response: {str(response_error)}'
+    #         }), 500
+    #     
+    # except Exception as e:
+    #     logger.error(f"Unexpected error in TTS endpoint: {str(e)}")
+    #     import traceback
+    #     error_trace = traceback.format_exc()
+    #     logger.error(error_trace)
+    #     
+    #     # Return detailed error for debugging
+    #     return jsonify({
+    #         'error': str(e),
+    #         'error_type': type(e).__name__,
+    #         'details': error_trace.split('\n')[-10:] if len(error_trace) > 0 else []
+    #     }), 500
+
+
+@chatbot_bp.route('/api/voice/config', methods=['GET'])
+def get_voice_config():
+    """
+    Get voice configuration (voices, languages, etc.)
+    VOICE FEATURE IS DISABLED
+    """
+    # Voice feature disabled - always return disabled
+    return jsonify({
+        'enabled': False,
+        'error': 'Voice feature is currently disabled'
+    }), 200
+    
+    # Original code commented out
+    # try:
+    #     speech_service = get_speech_service()
+    #     
+    #     if not speech_service or not speech_service.is_enabled():
+    #         return jsonify({
+    #             'enabled': False,
+    #             'error': 'Azure Speech Service is not configured'
+    #         }), 200
+    #     
+    #     # Safely get attributes
+    #     region = getattr(speech_service, 'speech_region', 'eastus')
+    #     voice_map = getattr(speech_service, 'voice_map', {})
+    #     
+    #     return jsonify({
+    #         'enabled': True,
+    #         'region': region,
+    #         'voices': voice_map,
+    #         'languages': list(voice_map.keys()) if voice_map else []
+    #     }), 200
+    #     
+    # except Exception as e:
+    #     logger.error(f"Error getting voice config: {str(e)}")
+    #     import traceback
+    #     logger.error(traceback.format_exc())
+    #     return jsonify({
+    #         'enabled': False,
+    #         'error': str(e)
+    #     }), 200  # Return 200 instead of 500 to prevent frontend errors
+
+
+@chatbot_bp.route('/api/delivery-partners', methods=['GET'])
+def get_delivery_partners():
+    """Get delivery partners for a given area (for dealer to select)"""
+    try:
+        user_id = session.get('user_id')
+        if not user_id:
+            return jsonify({'error': 'User not logged in'}), 401
+        
+        user = User.query.get(user_id)
+        if not user or user.role != 'distributor':
+            return jsonify({'error': 'Only distributors can view delivery partners'}), 403
+        
+        # Get delivery partners in the same area as the distributor
+        area = user.area
+        if not area:
+            return jsonify({'error': 'Distributor area not set'}), 400
+        
+        logger.info(f"Fetching delivery partners for area: '{area}' (distributor: {user.name}, user_id: {user_id})")
+        
+        delivery_partners = User.query.filter_by(
+            role='delivery_partner',
+            area=area,
+            is_active=True
+        ).all()
+        
+        logger.info(f"Found {len(delivery_partners)} delivery partners in area '{area}'")
+        
+        partners_list = [{
+            'id': dp.id,
+            'unique_id': dp.unique_id,
+            'name': dp.name,
+            'email': dp.email,
+            'phone': dp.phone,
+            'area': dp.area
+        } for dp in delivery_partners]
+        
+        if not partners_list:
+            logger.warning(f"No delivery partners found for area '{area}'. Available areas: {[dp.area for dp in User.query.filter_by(role='delivery_partner', is_active=True).all()]}")
+        
+        return jsonify({
+            'success': True,
+            'delivery_partners': partners_list,
+            'area': area  # Include area in response for debugging
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting delivery partners: {str(e)}")
+        return jsonify({'error': 'Error getting delivery partners'}), 500
+
+
+@chatbot_bp.route('/api/delivery-partner/orders', methods=['GET'])
+def get_delivery_partner_orders():
+    """Get all orders assigned to the logged-in delivery partner"""
+    try:
+        user_id = session.get('user_id')
+        if not user_id:
+            return jsonify({'error': 'User not logged in'}), 401
+        
+        user = User.query.get(user_id)
+        if not user or user.role != 'delivery_partner':
+            return jsonify({'error': 'Only delivery partners can view assigned orders'}), 403
+        
+        # Get orders assigned to this delivery partner that are not yet delivered
+        # Include both confirmed and in_transit orders (but not delivered/cancelled)
+        from sqlalchemy import or_, not_
+        excluded_statuses = ['delivered', 'cancelled', 'completed']
+        orders = Order.query.filter(
+            or_(
+                Order.delivery_partner_id == user_id,
+                Order.delivery_partner_unique_id == user.unique_id
+            )
+        ).filter(
+            ~Order.status.in_(excluded_statuses)
+        ).order_by(Order.created_at.desc()).all()
+        
+        orders_list = []
+        for order in orders:
+            # Get customer details
+            customer = None
+            if order.customer_id:
+                customer = Customer.query.get(order.customer_id)
+            
+            # Get order items
+            order_items = OrderItem.query.filter_by(order_id=order.id).all()
+            items = [{
+                'product_code': item.product_code,
+                'product_name': item.product_name,
+                'quantity': item.adjusted_quantity if item.adjusted_quantity else item.quantity,
+                'free_quantity': item.free_quantity or 0,
+                'unit_price': item.unit_price
+            } for item in order_items]
+            
+            orders_list.append({
+                'order_id': order.order_id,
+                'order_date': order.created_at.isoformat() if order.created_at else None,
+                'total_amount': order.total_amount,
+                'status': order.status or 'confirmed',
+                'status_display': (order.status or 'confirmed').replace('_', ' ').title(),
+                'customer': {
+                    'name': customer.name if customer else 'N/A',
+                    'phone': customer.phone if customer else 'N/A',
+                    'address': customer.address if customer else 'Address not provided'
+                },
+                'items': items
+            })
+        
+        return jsonify({
+            'success': True,
+            'orders': orders_list
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting delivery partner orders: {str(e)}")
+        return jsonify({'error': 'Error getting orders'}), 500
+
+
+@chatbot_bp.route('/api/delivery-partner/mark-delivered', methods=['POST'])
+def mark_order_delivered():
+    """Mark an order as delivered by delivery partner"""
+    try:
+        user_id = session.get('user_id')
+        if not user_id:
+            return jsonify({'error': 'User not logged in'}), 401
+        
+        user = User.query.get(user_id)
+        if not user or user.role != 'delivery_partner':
+            return jsonify({'error': 'Only delivery partners can mark orders as delivered'}), 403
+        
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'Invalid JSON or missing Content-Type header'}), 400
+        
+        order_id = data.get('order_id')
+        if not order_id:
+            return jsonify({'error': 'Order ID is required'}), 400
+        
+        # Validate order ID
+        from app.input_validation import validate_and_sanitize_order_id
+        order_id = validate_and_sanitize_order_id(order_id)
+        if not order_id:
+            return jsonify({'error': 'Invalid order ID format'}), 400
+        
+        # Mark order as delivered
+        enhanced_order_service = get_enhanced_order_service()
+        result = enhanced_order_service.mark_order_as_delivered(order_id, user_id)
+        
+        return jsonify(result), 200 if result['success'] else 400
+        
+    except Exception as e:
+        logger.error(f"Error marking order as delivered: {str(e)}")
+        return jsonify({'error': 'Error marking order as delivered'}), 500

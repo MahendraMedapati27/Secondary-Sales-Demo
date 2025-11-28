@@ -4,7 +4,7 @@ from datetime import datetime
 from app import db
 from app.models import Product, FOC
 
-logging.basicConfig(level=logging.INFO)
+# Single logger initialization - removed duplicate
 logger = logging.getLogger(__name__)
 
 class PricingService:

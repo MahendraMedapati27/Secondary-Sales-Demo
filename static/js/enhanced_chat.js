@@ -1,9 +1,11 @@
 let isProcessing = false;
 let messageHistory = [];
+let typingTimeout = null;
 let currentUser = null;
 let cartItems = [];
 let currentOrderSummary = null;
-let typingTimeout = null;
+let productRecommendations = [];
+let recommendationTimeout = null;
 
 // Initialize chat
 document.addEventListener('DOMContentLoaded', function() {
@@ -11,9 +13,6 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 
 // Voice functionality disabled
-
-let productRecommendations = [];
-let recommendationTimeout = null;
 
 // Initialize language on page load
 function initializeLanguage() {
@@ -491,6 +490,55 @@ async function sendMessage(messageText = null) {
     }
 }
 
+// Clean text for TTS (remove markdown, tables, special characters)
+function cleanTextForTTS(text) {
+    if (!text) return '';
+    
+    // Remove markdown headers
+    text = text.replace(/^#{1,6}\s+/gm, '');
+    
+    // Remove markdown bold/italic
+    text = text.replace(/\*\*(.*?)\*\*/g, '$1');
+    text = text.replace(/\*(.*?)\*/g, '$1');
+    text = text.replace(/__(.*?)__/g, '$1');
+    text = text.replace(/_(.*?)_/g, '$1');
+    
+    // Remove markdown links
+    text = text.replace(/\[([^\]]+)\]\([^\)]+\)/g, '$1');
+    
+    // Remove markdown code blocks
+    text = text.replace(/```[\s\S]*?```/g, '');
+    text = text.replace(/`([^`]+)`/g, '$1');
+    
+    // Remove markdown tables (lines with |)
+    const lines = text.split('\n');
+    const cleanedLines = lines.filter(line => {
+        const trimmed = line.trim();
+        // Skip table rows (lines with multiple |)
+        if (trimmed.includes('|') && trimmed.split('|').length > 2) {
+            return false;
+        }
+        // Skip table separators
+        if (trimmed.match(/^[\s\|\-:]+$/)) {
+            return false;
+        }
+        return true;
+    });
+    text = cleanedLines.join('\n');
+    
+    // Remove extra whitespace
+    text = text.replace(/\n{3,}/g, '\n\n');
+    text = text.replace(/[ \t]+/g, ' ');
+    text = text.trim();
+    
+    // Limit length (TTS has character limits)
+    if (text.length > 4000) {
+        text = text.substring(0, 4000) + '...';
+    }
+    
+    return text;
+}
+
 function addMessage(message, sender, type = 'normal') {
     const messagesDiv = document.getElementById('chatMessages');
     
@@ -549,14 +597,30 @@ function addMessage(message, sender, type = 'normal') {
     messageHistory.push({ message, sender, timestamp: new Date() });
     
     // Trigger avatar speaking for bot messages (if avatar is loaded)
-    if (sender === 'bot' && typeof avatarSpeak === 'function' && type !== 'error') {
-        // Small delay to ensure message is displayed first
-        setTimeout(() => {
-            const wordCount = message.split(/\s+/).length;
-            // Convert seconds to milliseconds for avatarSpeak
-            const estimatedDuration = Math.max(1000, Math.min(10000, (wordCount / 2.5) * 1000));
-            avatarSpeak(estimatedDuration);
-        }, 100);
+    if (sender === 'bot' && type !== 'error') {
+        // Get current language for TTS
+        const languageSelector = document.getElementById('languageSelector');
+        const currentLanguage = languageSelector ? languageSelector.value : (localStorage.getItem('preferredLanguage') || 'en');
+        
+        // Clean message text for TTS (remove markdown, tables, etc.)
+        const cleanText = cleanTextForTTS(message);
+        
+        // Voice/Speech feature DISABLED
+        // TTS calls disabled - no voice output
+        // if (typeof speakText === 'function' && cleanText) {
+        //     // Small delay to ensure message is displayed first
+        //     setTimeout(() => {
+        //         console.log('[CHAT] 🎤 Triggering TTS for bot response');
+        //         speakText(cleanText, currentLanguage);
+        //     }, 300);
+        // } else if (typeof avatarSpeak === 'function') {
+        //     // Fallback to avatar animation only
+        //     setTimeout(() => {
+        //         const wordCount = message.split(/\s+/).length;
+        //         const estimatedDuration = Math.max(1000, Math.min(10000, (wordCount / 2.5) * 1000));
+        //         avatarSpeak(estimatedDuration);
+        //     }, 100);
+        // }
     }
 }
 
@@ -1300,6 +1364,21 @@ function handleAction(action, orderId = null, templateId = null) {
                 performAdvancedSearch(searchQuery);
             }
             break;
+        case 'delivery_dashboard':
+            if (typeof showDeliveryPartnerDashboard === 'function') {
+                showDeliveryPartnerDashboard();
+            } else {
+                sendMessage('Show my delivery orders');
+            }
+            break;
+        case 'track_orders':
+            // Alias for delivery dashboard
+            if (typeof showDeliveryPartnerDashboard === 'function') {
+                showDeliveryPartnerDashboard();
+            } else {
+                sendMessage('Show my delivery orders');
+            }
+            break;
         default:
             console.log('Unknown action:', action);
             // Try to send the action as a message
@@ -1307,8 +1386,8 @@ function handleAction(action, orderId = null, templateId = null) {
     }
 }
 
-function updateCartDisplay(cartItems) {
-    this.cartItems = cartItems;
+function updateCartDisplay(cartItemsParam) {
+    cartItems = cartItemsParam;
     // Update cart button with item count
     const cartButton = document.getElementById('cartButton');
     if (cartItems.length > 0) {
@@ -4458,18 +4537,41 @@ function displayDistributorOrderDetails(order) {
                     <form id="orderEditForm_${order.order_id}">
             `;
             
+            // Add delivery partner selection
+            formHTML += `
+                        <div class="mb-3" style="background: #eff6ff; padding: 15px; border-radius: 8px; border-left: 4px solid #3b82f6;">
+                            <label for="delivery_partner_${order.order_id}" class="form-label" style="font-weight: 600; color: #1e40af;">
+                                <i class="fas fa-truck me-2"></i>Assign Delivery Partner <span style="color: #dc2626;">*</span>
+                            </label>
+                            <select class="form-select" id="delivery_partner_${order.order_id}" name="delivery_partner_id" required
+                                    style="border-radius: 8px; border: 2px solid #bfdbfe; padding: 10px;">
+                                <option value="">-- Select Delivery Partner --</option>
+                            </select>
+                            <small class="text-muted" style="font-size: 0.75rem;">
+                                <i class="fas fa-info-circle me-1"></i>Select a delivery partner to assign this order for delivery
+                            </small>
+                        </div>
+            `;
+            
             // Add editable fields for each item
             order.items.forEach((item, index) => {
                 const itemId = item.id || item.item_id || index; // Use item.id if available, fallback to index
-                const originalQty = item.quantity || 0;
-                const focQty = item.free_quantity || 0;
-                const totalQty = originalQty + focQty;
+                const originalQty = item.quantity || 0;  // Paid quantity
+                const focQty = item.free_quantity || 0;  // FOC quantity
                 
                 // Get lot number from database if available
                 const lotNumber = item.lot_number || '';
                 
                 // Get expiry date from database if available, otherwise use today
                 const expiryDate = item.expiry_date || new Date().toISOString().split('T')[0];
+                
+                // Format quantity label correctly: show paid + FOC separately
+                let quantityLabelText = `${quantityLabel}`;
+                if (focQty > 0) {
+                    quantityLabelText += ` (Ordered: ${originalQty} + ${focQty} FOC)`;
+                } else {
+                    quantityLabelText += ` (Ordered: ${originalQty})`;
+                }
                 
                 formHTML += `
                     <div class="order-item-edit mb-4 p-3" style="background: #f8f9fa; border-radius: 8px; border-left: 4px solid #2563eb;">
@@ -4479,7 +4581,7 @@ function displayDistributorOrderDetails(order) {
                         <div class="d-flex flex-column gap-3">
                             <div>
                                 <label class="form-label" style="font-weight: 500; font-size: 0.875rem;">
-                                    <i class="fas fa-box me-1"></i>${quantityLabel} (Ordered: ${totalQty}${focQty > 0 ? ` + ${focQty} FOC` : ''})
+                                    <i class="fas fa-box me-1"></i>${quantityLabelText}
                                 </label>
                                 <input type="number" 
                                     class="form-control form-control-sm" 
@@ -4564,6 +4666,12 @@ function displayDistributorOrderDetails(order) {
             
             editFormContainer.innerHTML = formHTML;
             messageBubble.appendChild(editFormContainer);
+            
+            // Load delivery partners for this area after form is added to DOM
+            // Use setTimeout to ensure DOM element exists
+            setTimeout(() => {
+                loadDeliveryPartners(order.order_id);
+            }, 100);
         } else if (messageBubble) {
             // If order cannot be confirmed, show read-only items list
             let itemsList = `**Items Ordered:**\n`;
@@ -4641,6 +4749,20 @@ async function confirmOrderWithEdits(orderId) {
             submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Confirming...';
         }
         
+        // Get delivery partner selection
+        const deliveryPartnerSelect = document.getElementById(`delivery_partner_${orderId}`);
+        const deliveryPartnerId = deliveryPartnerSelect ? deliveryPartnerSelect.value : null;
+        
+        if (!deliveryPartnerId) {
+            addMessage('❌ Please select a delivery partner before confirming the order.', 'bot', 'error');
+            if (submitBtn) {
+                submitBtn.disabled = false;
+                const t_func = (typeof t !== 'undefined') ? t : (key) => key;
+                submitBtn.innerHTML = `<i class="fas fa-check-circle me-2"></i>${t_func('buttons.confirmOrder')}`;
+            }
+            return;
+        }
+        
         const response = await fetch('/enhanced-chat/confirm_order_action', {
             method: 'POST',
             headers: {
@@ -4648,14 +4770,15 @@ async function confirmOrderWithEdits(orderId) {
             },
             body: JSON.stringify({ 
                 order_id: orderId,
-                item_edits: itemEdits
+                item_edits: itemEdits,
+                delivery_partner_id: deliveryPartnerId
             })
         });
         
         const data = await response.json();
         
         if (data.success) {
-            let successMessage = `✅ **Order Confirmed Successfully!**\n\n${data.message}\n\nThe stock has been moved from blocked to sold, and the MR has been notified via email.`;
+            let successMessage = `✅ **Order Confirmed Successfully!**\n\n${data.message}\n\nThe stock has been moved from blocked to out_for_delivery, and the delivery partner has been notified via email.`;
             
             // Show notifications if any
             if (data.notifications && data.notifications.length > 0) {
@@ -4703,18 +4826,30 @@ async function confirmOrderAction(orderId) {
     }
     
     try {
+        // Get delivery partner selection first (must be selected before confirming)
+        const deliveryPartnerSelect = document.getElementById(`delivery_partner_${orderId}`);
+        const deliveryPartnerId = deliveryPartnerSelect ? deliveryPartnerSelect.value : null;
+        
+        if (!deliveryPartnerId) {
+            addMessage('❌ Please select a delivery partner before confirming the order.', 'bot', 'error');
+            return;
+        }
+        
         const response = await fetch('/enhanced-chat/confirm_order_action', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify({ order_id: orderId })
+            body: JSON.stringify({ 
+                order_id: orderId,
+                delivery_partner_id: deliveryPartnerId
+            })
         });
         
         const data = await response.json();
         
         if (data.success) {
-            let successMessage = `✅ **Order Confirmed Successfully!**\n\n${data.message}\n\nThe stock has been moved from blocked to sold, and the MR has been notified via email.`;
+            let successMessage = `✅ **Order Confirmed Successfully!**\n\n${data.message}\n\nThe stock has been moved from blocked to out_for_delivery, and the delivery partner has been notified via email.`;
             
             // Show notifications if any
             if (data.notifications && data.notifications.length > 0) {
@@ -7228,6 +7363,527 @@ async function saveCartAsTemplate() {
         showToast('Error saving template', 'error');
     }
 }
+
+// Load delivery partners for dealer to select
+async function loadDeliveryPartners(orderId) {
+    try {
+        console.log(`🔍 Loading delivery partners for order ${orderId}...`);
+        const response = await fetch('/enhanced-chat/api/delivery-partners', {
+            method: 'GET',
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        });
+        
+        if (!response.ok) {
+            console.error(`❌ API error: ${response.status} ${response.statusText}`);
+            const errorText = await response.text();
+            console.error('Error response:', errorText);
+            throw new Error(`API error: ${response.status}`);
+        }
+        
+        const data = await response.json();
+        console.log('📦 Delivery partners API response:', data);
+        
+        if (data.success && data.delivery_partners) {
+            const select = document.getElementById(`delivery_partner_${orderId}`);
+            if (select) {
+                // Clear existing options except the first one
+                select.innerHTML = '<option value="">-- Select Delivery Partner --</option>';
+                
+                if (data.delivery_partners.length > 0) {
+                    // Add delivery partners
+                    data.delivery_partners.forEach(partner => {
+                        const option = document.createElement('option');
+                        option.value = partner.id;
+                        option.textContent = `${partner.name} (${partner.unique_id})`;
+                        select.appendChild(option);
+                    });
+                    console.log(`✅ Loaded ${data.delivery_partners.length} delivery partner(s) for area: ${data.area || 'unknown'}`);
+                } else {
+                    // No delivery partners found
+                    const noPartnersOption = document.createElement('option');
+                    noPartnersOption.value = '';
+                    noPartnersOption.textContent = '⚠️ No delivery partners available for this area';
+                    noPartnersOption.disabled = true;
+                    select.appendChild(noPartnersOption);
+                    console.warn(`⚠️ No delivery partners found for area: ${data.area || 'unknown'}`);
+                }
+            } else {
+                console.error(`❌ Delivery partner select element not found: delivery_partner_${orderId}`);
+            }
+        } else {
+            console.error('❌ Failed to load delivery partners:', data.error);
+            const select = document.getElementById(`delivery_partner_${orderId}`);
+            if (select) {
+                const errorOption = document.createElement('option');
+                errorOption.value = '';
+                errorOption.textContent = `⚠️ ${data.error || 'No delivery partners found'}`;
+                errorOption.disabled = true;
+                select.appendChild(errorOption);
+            }
+        }
+    } catch (error) {
+        console.error('Error loading delivery partners:', error);
+        const select = document.getElementById(`delivery_partner_${orderId}`);
+        if (select) {
+            const errorOption = document.createElement('option');
+            errorOption.value = '';
+            errorOption.textContent = '⚠️ Error loading delivery partners';
+            errorOption.disabled = true;
+            select.appendChild(errorOption);
+        }
+    }
+}
+
+// Delivery Partner Dashboard Functions
+async function showDeliveryPartnerDashboard() {
+    try {
+        const response = await fetch('/enhanced-chat/api/delivery-partner/orders', {
+            method: 'GET',
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            if (data.orders.length === 0) {
+                addMessage('📦 **No Orders Assigned**\n\nYou currently have no orders assigned for delivery.', 'bot');
+                const t_func = (typeof t !== 'undefined') ? t : (key) => key;
+                showActionButtons([
+                    { text: '🔄 Refresh Orders', action: 'delivery_dashboard' },
+                    { text: t_func('buttons.backToHome'), action: 'home' }
+                ]);
+            } else {
+                // Store orders data globally for filtering
+                window.deliveryPartnerOrders = data.orders;
+                
+                // Show initial message
+                addMessage(`📦 **Track Delivery Orders**\n\nYou have **${data.orders.length}** order(s) assigned for delivery. Please select an order to view details.`, 'bot');
+                
+                // Add order selection form with filters
+                addDeliveryPartnerOrderSelectionForm(data.orders);
+                
+                const t_func = (typeof t !== 'undefined') ? t : (key) => key;
+                showActionButtons([
+                    { text: '🔄 Refresh Orders', action: 'delivery_dashboard' },
+                    { text: t_func('buttons.backToHome'), action: 'home' }
+                ]);
+            }
+        } else {
+            addMessage(`❌ Error: ${data.error}`, 'bot', 'error');
+        }
+    } catch (error) {
+        console.error('Error loading delivery partner dashboard:', error);
+        addMessage('❌ Error loading orders. Please try again.', 'bot', 'error');
+    }
+}
+
+// Add order selection form for delivery partners
+function addDeliveryPartnerOrderSelectionForm(orders) {
+    const messagesDiv = document.getElementById('chatMessages');
+    if (!messagesDiv) {
+        console.error('Chat messages container not found');
+        return;
+    }
+    
+    // Get last bot message
+    const botMessages = messagesDiv.querySelectorAll('.message.bot');
+    const lastBotMessage = botMessages[botMessages.length - 1];
+    
+    if (!lastBotMessage) {
+        console.error('Last bot message not found');
+        return;
+    }
+    
+    // Create form container
+    const formContainer = document.createElement('div');
+    formContainer.className = 'delivery-partner-order-selection-container';
+    formContainer.style.cssText = 'width: 100%; margin-top: 15px; animation: slideInFromBottom 0.3s ease-out;';
+    
+    // Get unique dates and statuses for filters
+    const uniqueDates = [...new Set(orders.map(o => new Date(o.order_date).toISOString().split('T')[0]))].sort().reverse();
+    const uniqueStatuses = [...new Set(orders.map(o => o.status))].sort();
+    
+    // Build HTML for filters and order selection
+    let formHTML = `
+        <div class="card border-0 shadow-sm" style="background: rgba(255, 255, 255, 0.98); border-radius: 12px; padding: 20px;">
+            <h6 class="mb-3" style="color: #2563eb; font-weight: 600;">
+                <i class="fas fa-filter me-2"></i>Filters & Order Selection
+            </h6>
+            
+            <!-- Filters - Stacked Vertically -->
+            <div class="mb-3">
+                <label for="dp_statusFilter" class="form-label" style="font-weight: 600; color: #1e40af; font-size: 0.875rem; margin-bottom: 8px;">
+                    <i class="fas fa-tag me-1"></i>Filter by Status
+                </label>
+                <select class="form-select" id="dp_statusFilter" onchange="filterDeliveryPartnerOrders()"
+                        style="border-radius: 8px; border: 2px solid #e5e7eb; padding: 10px;">
+                    <option value="">All Statuses</option>
+                    ${uniqueStatuses.map(status => `
+                        <option value="${status}">${(status || 'confirmed').replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase())}</option>
+                    `).join('')}
+                </select>
+            </div>
+            
+            <div class="mb-3">
+                <label for="dp_dateFilter" class="form-label" style="font-weight: 600; color: #1e40af; font-size: 0.875rem; margin-bottom: 8px;">
+                    <i class="fas fa-calendar me-1"></i>Filter by Date
+                </label>
+                <select class="form-select" id="dp_dateFilter" onchange="filterDeliveryPartnerOrders()"
+                        style="border-radius: 8px; border: 2px solid #e5e7eb; padding: 10px;">
+                    <option value="">All Dates</option>
+                    ${uniqueDates.map(date => `
+                        <option value="${date}">${new Date(date).toLocaleDateString()}</option>
+                    `).join('')}
+                </select>
+            </div>
+            
+            <div class="mb-3">
+                <label for="dp_orderSelect" class="form-label" style="font-weight: 600; color: #1e40af; font-size: 0.875rem; margin-bottom: 8px;">
+                    <i class="fas fa-list me-1"></i>Select Order <span style="color: #dc2626;">*</span>
+                </label>
+                <select class="form-select form-select-lg" id="dp_orderSelect" onchange="loadDeliveryPartnerOrderDetails()" required
+                        style="border-radius: 10px; border: 2px solid #3b82f6; padding: 12px; font-size: 0.95rem;">
+                    <option value="">-- Select an Order --</option>
+                    ${orders.map(order => {
+                        const statusBadge = order.status === 'confirmed' ? '🟡' : order.status === 'in_transit' ? '🟠' : '🔵';
+                        const dateStr = new Date(order.order_date).toLocaleDateString();
+                        return `<option value="${order.order_id}" data-order-index="${orders.indexOf(order)}">
+                            ${order.order_id} ${statusBadge} - ${dateStr} - ${(order.total_amount || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK
+                        </option>`;
+                    }).join('')}
+                </select>
+            </div>
+            
+            <!-- Order Details Container (shown after selection) -->
+            <div id="dp_orderDetailsContainer" style="display: none; margin-top: 20px; padding: 15px; background: #f9fafb; border-radius: 8px;">
+                <!-- Order details will be loaded here -->
+            </div>
+        </div>
+    `;
+    
+    formContainer.innerHTML = formHTML;
+    
+    // Find message bubble and append form
+    let messageBubble = lastBotMessage.querySelector('.message-bubble .bg-light');
+    if (!messageBubble) {
+        messageBubble = lastBotMessage.querySelector('.message-bubble');
+    }
+    if (!messageBubble) {
+        messageBubble = lastBotMessage;
+    }
+    
+    messageBubble.appendChild(formContainer);
+    
+    // Store orders data in form container for filtering
+    formContainer._originalOrders = orders;
+    formContainer._filteredOrders = orders;
+    
+    // Scroll to bottom
+    messagesDiv.scrollTo({
+        top: messagesDiv.scrollHeight,
+        behavior: 'smooth'
+    });
+}
+
+// Filter delivery partner orders
+function filterDeliveryPartnerOrders() {
+    const formContainer = document.querySelector('.delivery-partner-order-selection-container');
+    if (!formContainer || !formContainer._originalOrders) {
+        return;
+    }
+    
+    const statusFilter = document.getElementById('dp_statusFilter')?.value || '';
+    const dateFilter = document.getElementById('dp_dateFilter')?.value || '';
+    const orderSelect = document.getElementById('dp_orderSelect');
+    
+    if (!orderSelect) return;
+    
+    let filteredOrders = formContainer._originalOrders;
+    
+    // Apply status filter
+    if (statusFilter) {
+        filteredOrders = filteredOrders.filter(order => order.status === statusFilter);
+    }
+    
+    // Apply date filter
+    if (dateFilter) {
+        filteredOrders = filteredOrders.filter(order => {
+            const orderDate = new Date(order.order_date).toISOString().split('T')[0];
+            return orderDate === dateFilter;
+        });
+    }
+    
+    // Update dropdown options
+    const selectedValue = orderSelect.value;
+    orderSelect.innerHTML = '<option value="">-- Select an Order --</option>';
+    
+    filteredOrders.forEach(order => {
+        const statusBadge = order.status === 'confirmed' ? '🟡' : order.status === 'in_transit' ? '🟠' : '🔵';
+        const dateStr = new Date(order.order_date).toLocaleDateString();
+        const option = document.createElement('option');
+        option.value = order.order_id;
+        option.setAttribute('data-order-index', formContainer._originalOrders.indexOf(order).toString());
+        option.textContent = `${order.order_id} ${statusBadge} - ${dateStr} - ${(order.total_amount || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK`;
+        orderSelect.appendChild(option);
+    });
+    
+    // Restore selection if still available
+    if (selectedValue) {
+        const option = Array.from(orderSelect.options).find(opt => opt.value === selectedValue);
+        if (option) {
+            orderSelect.value = selectedValue;
+            loadDeliveryPartnerOrderDetails();
+        } else {
+            // Clear order details if selected order is filtered out
+            const detailsContainer = document.getElementById('dp_orderDetailsContainer');
+            if (detailsContainer) {
+                detailsContainer.style.display = 'none';
+                detailsContainer.innerHTML = '';
+            }
+        }
+    }
+    
+    // Store filtered orders
+    formContainer._filteredOrders = filteredOrders;
+}
+
+// Load order details when order is selected
+function loadDeliveryPartnerOrderDetails() {
+    const orderSelect = document.getElementById('dp_orderSelect');
+    const detailsContainer = document.getElementById('dp_orderDetailsContainer');
+    
+    if (!orderSelect || !detailsContainer) {
+        return;
+    }
+    
+    const selectedOrderId = orderSelect.value;
+    
+    if (!selectedOrderId) {
+        detailsContainer.style.display = 'none';
+        detailsContainer.innerHTML = '';
+        return;
+    }
+    
+    // Get order data
+    const formContainer = document.querySelector('.delivery-partner-order-selection-container');
+    if (!formContainer || !formContainer._originalOrders) {
+        return;
+    }
+    
+    const order = formContainer._originalOrders.find(o => o.order_id === selectedOrderId);
+    
+    if (!order) {
+        detailsContainer.innerHTML = '<p class="text-danger">Order not found.</p>';
+        detailsContainer.style.display = 'block';
+        return;
+    }
+    
+    // Build order details HTML
+    const statusBadge = order.status === 'confirmed' ? '🟡' : order.status === 'in_transit' ? '🟠' : '🔵';
+    const dateStr = new Date(order.order_date).toLocaleDateString();
+    
+    let detailsHTML = `
+        <div class="delivery-order-details">
+            <h6 class="mb-3" style="color: #059669; font-weight: 600; border-bottom: 2px solid #059669; padding-bottom: 10px;">
+                <i class="fas fa-box-open me-2"></i>Order Details
+            </h6>
+            
+            <!-- Order Information - First -->
+            <div class="mb-3">
+                <div class="info-box" style="background: #eff6ff; padding: 15px; border-radius: 8px; border-left: 4px solid #3b82f6;">
+                    <p class="mb-2"><strong><i class="fas fa-hashtag me-1"></i>Order ID:</strong> ${order.order_id} ${statusBadge}</p>
+                    <p class="mb-2"><strong><i class="fas fa-calendar me-1"></i>Date:</strong> ${dateStr}</p>
+                    <p class="mb-2"><strong><i class="fas fa-tag me-1"></i>Status:</strong> ${order.status_display || order.status}</p>
+                    <p class="mb-0"><strong><i class="fas fa-money-bill-wave me-1"></i>Total Amount:</strong> ${(order.total_amount || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK</p>
+                </div>
+            </div>
+            
+            <!-- Customer Details - Second -->
+            <div class="mb-3">
+                <h6 style="color: #10b981; font-weight: 600; margin-bottom: 10px;">
+                    <i class="fas fa-user me-2"></i>Customer Details
+                </h6>
+                <div class="info-box" style="background: #f0fdf4; padding: 15px; border-radius: 8px; border-left: 4px solid #10b981;">
+                    <p class="mb-2"><strong><i class="fas fa-user-circle me-1"></i>Customer Name:</strong> ${order.customer.name || 'N/A'}</p>
+                    <p class="mb-2"><strong><i class="fas fa-phone me-1"></i>Phone:</strong> ${order.customer.phone || 'N/A'}</p>
+                    <p class="mb-0"><strong><i class="fas fa-map-marker-alt me-1"></i>Address:</strong> ${order.customer.address || 'Address not provided'}</p>
+                </div>
+            </div>
+            
+            <!-- Items to Deliver - Third -->
+            <div class="mb-3">
+                <h6 style="color: #1e40af; font-weight: 600; margin-bottom: 10px;">
+                    <i class="fas fa-list-ul me-2"></i>Items to Deliver
+                </h6>
+                <div class="table-responsive">
+                    <table class="table table-bordered" style="font-size: 0.9rem;">
+                        <thead style="background: #3b82f6; color: white;">
+                            <tr>
+                                <th>Product</th>
+                                <th style="text-align: center;">Quantity</th>
+                                <th style="text-align: center;">FOC</th>
+                                <th style="text-align: right;">Unit Price</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${order.items.map(item => {
+                                const paidQty = item.quantity || 0;
+                                const freeQty = item.free_quantity || 0;
+                                const totalQty = paidQty + freeQty;
+                                return `
+                                    <tr>
+                                        <td>${item.product_name} (${item.product_code})</td>
+                                        <td style="text-align: center;">${paidQty}</td>
+                                        <td style="text-align: center; color: #10b981;">${freeQty > 0 ? `+${freeQty}` : '-'}</td>
+                                        <td style="text-align: right;">${(item.unit_price || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK</td>
+                                    </tr>
+                                `;
+                            }).join('')}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            
+            <!-- Mark as Delivered Button - Styled like action buttons -->
+            <div class="mt-4" style="display: flex; justify-content: center; gap: 10px;">
+                <button class="btn btn-success action-btn" onclick="markOrderDelivered('${order.order_id}')" 
+                        style="background: linear-gradient(135deg, rgba(16, 185, 129, 0.95) 0%, rgba(5, 150, 105, 0.95) 100%);
+                               color: white;
+                               border: none;
+                               padding: 12px 24px;
+                               font-size: 0.9rem;
+                               font-weight: 600;
+                               border-radius: 10px;
+                               box-shadow: 0 4px 12px rgba(16, 185, 129, 0.25), 0 2px 4px rgba(16, 185, 129, 0.15);
+                               transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+                               min-width: 180px;
+                               display: flex;
+                               align-items: center;
+                               justify-content: center;
+                               gap: 8px;
+                               cursor: pointer;"
+                        onmouseover="this.style.transform='translateY(-3px) scale(1.02)'; this.style.boxShadow='0 6px 20px rgba(16, 185, 129, 0.4)';"
+                        onmouseout="this.style.transform='translateY(0) scale(1)'; this.style.boxShadow='0 4px 12px rgba(16, 185, 129, 0.25), 0 2px 4px rgba(16, 185, 129, 0.15)';">
+                    <i class="fas fa-check-circle"></i>
+                    <span>Mark as Delivered</span>
+                </button>
+            </div>
+        </div>
+    `;
+    
+    detailsContainer.innerHTML = detailsHTML;
+    detailsContainer.style.display = 'block';
+    
+    // Scroll to details
+    detailsContainer.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+async function markOrderDelivered(orderId) {
+    if (!confirm(`Are you sure you want to mark order ${orderId} as delivered?`)) {
+        return;
+    }
+    
+    try {
+        // Hide/remove the selection form immediately
+        const formContainer = document.querySelector('.delivery-partner-order-selection-container');
+        if (formContainer) {
+            formContainer.style.transition = 'opacity 0.3s ease-out';
+            formContainer.style.opacity = '0';
+            setTimeout(() => {
+                formContainer.remove();
+            }, 300);
+        }
+        
+        // Hide order details container
+        const detailsContainer = document.getElementById('dp_orderDetailsContainer');
+        if (detailsContainer) {
+            detailsContainer.style.display = 'none';
+        }
+        
+        const response = await fetch('/enhanced-chat/api/delivery-partner/mark-delivered', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ order_id: orderId })
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            // Show success message
+            addMessage(`✅ **Order Delivered Successfully!**\n\n${data.message}\n\nThe stock has been moved from out_for_delivery to sold, and notifications have been sent to the MR and dealer.`, 'bot');
+            
+            // Check if there are more orders assigned to this DP
+            setTimeout(async () => {
+                try {
+                    const checkResponse = await fetch('/enhanced-chat/api/delivery-partner/orders', {
+                        method: 'GET',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        }
+                    });
+                    
+                    const checkData = await checkResponse.json();
+                    
+                    if (checkData.success) {
+                        if (checkData.orders.length > 0) {
+                            // There are more orders - show action buttons (Track Orders and Help)
+                            const t_func = (typeof t !== 'undefined') ? t : (key) => key;
+                            showActionButtons([
+                                { text: 'Track Orders', action: 'delivery_dashboard' },
+                                { text: 'Help', action: 'help' }
+                            ]);
+                        } else {
+                            // No more orders - just show success message
+                            addMessage('📦 You have no more orders assigned for delivery.', 'bot');
+                            // No action buttons needed - just the success message
+                        }
+                    }
+                } catch (error) {
+                    console.error('Error checking remaining orders:', error);
+                    // On error, still show action buttons
+                    showActionButtons([
+                        { text: 'Track Orders', action: 'delivery_dashboard' },
+                        { text: 'Help', action: 'help' }
+                    ]);
+                }
+            }, 500);
+        } else {
+            addMessage(`❌ Error: ${data.message}`, 'bot', 'error');
+            // On error, restore the form
+            if (formContainer && !formContainer.parentElement) {
+                const messagesDiv = document.getElementById('chatMessages');
+                const botMessages = messagesDiv.querySelectorAll('.message.bot');
+                const lastBotMessage = botMessages[botMessages.length - 1];
+                if (lastBotMessage) {
+                    let messageBubble = lastBotMessage.querySelector('.message-bubble .bg-light');
+                    if (!messageBubble) {
+                        messageBubble = lastBotMessage.querySelector('.message-bubble');
+                    }
+                    if (!messageBubble) {
+                        messageBubble = lastBotMessage;
+                    }
+                    messageBubble.appendChild(formContainer);
+                }
+            }
+        }
+    } catch (error) {
+        console.error('Error marking order as delivered:', error);
+        addMessage('❌ Error marking order as delivered. Please try again.', 'bot', 'error');
+    }
+}
+
+// Make functions globally available
+window.loadDeliveryPartners = loadDeliveryPartners;
+window.showDeliveryPartnerDashboard = showDeliveryPartnerDashboard;
+window.markOrderDelivered = markOrderDelivered;
+window.filterDeliveryPartnerOrders = filterDeliveryPartnerOrders;
+window.loadDeliveryPartnerOrderDetails = loadDeliveryPartnerOrderDetails;
 
 // Make template functions globally available
 window.saveOrderTemplate = saveOrderTemplate;

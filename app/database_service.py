@@ -5,7 +5,7 @@ from app import db
 from app.models import (User, Product, Order, OrderItem, CartItem, ChatSession, 
                         Conversation, PendingOrderProducts, Customer, FOC, DealerWiseStockDetails)
 
-logging.basicConfig(level=logging.INFO)
+# Single logger initialization - logging.basicConfig should only be called once in __init__.py
 logger = logging.getLogger(__name__)
 
 class DatabaseService:
@@ -210,14 +210,37 @@ class DatabaseService:
             raise
     
     def update_order_total(self, order_id):
-        """Update order total amount"""
-        order = Order.query.get(order_id)
-        if order:
-            total = sum(item.total_price for item in order.order_items)
-            order.total_amount = total
-            db.session.commit()
-            return order
-        return None
+        """Update order total amount including tax"""
+        try:
+            order = Order.query.get(order_id)
+            if order:
+                # Calculate subtotal from order items
+                subtotal = sum(item.total_price for item in order.order_items)
+                
+                # Calculate tax (use order's tax_rate or config default)
+                from flask import current_app
+                tax_rate = order.tax_rate if hasattr(order, 'tax_rate') and order.tax_rate else current_app.config.get('TAX_RATE', 0.05)
+                tax_amount = subtotal * tax_rate
+                
+                # Calculate grand total
+                grand_total = subtotal + tax_amount
+                
+                # Update order fields
+                order.subtotal = subtotal
+                order.tax_amount = tax_amount
+                order.total_amount = grand_total
+                order.updated_at = datetime.utcnow()
+                
+                db.session.commit()
+                return order
+            return None
+        except Exception as e:
+            self.logger.error(f"Error updating order total: {str(e)}")
+            try:
+                db.session.rollback()
+            except Exception:
+                pass
+            raise
     
     def get_orders_by_mr(self, mr_id):
         """Get orders by MR"""
@@ -246,14 +269,39 @@ class DatabaseService:
         return Order.query.filter_by(order_id=order_id).first()
     
     def update_order_status(self, order_id, status):
-        """Update order status"""
-        order = Order.query.filter_by(order_id=order_id).first()
-        if order:
-            order.status = status
-            order.updated_at = datetime.utcnow()
-            db.session.commit()
-            return order
-        return None
+        """Update order status with validation"""
+        # Import valid statuses from enhanced_order_service
+        try:
+            from app.enhanced_order_service import VALID_ORDER_STATUSES, ORDER_STATUS_TRANSITIONS
+            
+            order = Order.query.filter_by(order_id=order_id).first()
+            if order:
+                # Validate status
+                if status not in VALID_ORDER_STATUSES:
+                    self.logger.warning(f"Invalid order status '{status}' for order {order_id}")
+                    return None
+                
+                # Validate status transition
+                current_status = order.status
+                if current_status in ORDER_STATUS_TRANSITIONS:
+                    if status not in ORDER_STATUS_TRANSITIONS[current_status]:
+                        self.logger.warning(f"Invalid status transition from '{current_status}' to '{status}' for order {order_id}")
+                        # Allow transition but log warning
+                
+                order.status = status
+                order.updated_at = datetime.utcnow()
+                db.session.commit()
+                return order
+            return None
+        except ImportError:
+            # Fallback if import fails
+            order = Order.query.filter_by(order_id=order_id).first()
+            if order:
+                order.status = status
+                order.updated_at = datetime.utcnow()
+                db.session.commit()
+                return order
+            return None
     
     def get_orders_for_distributor(self, distributor_user, status_filter=None):
         """Get orders for a distributor's area"""
@@ -434,6 +482,41 @@ class DatabaseService:
                 pass
             return False, f"Error removing from cart: {str(e)}"
     
+    def remove_from_cart_by_product(self, user_id, product_id, quantity):
+        """Remove specific quantity of a product from cart by product_id"""
+        try:
+            from app.db_locking import with_row_lock
+            
+            # Find cart item with row lock to prevent race conditions
+            cart_item_query = CartItem.query.filter_by(
+                user_id=user_id,
+                product_id=product_id
+            )
+            cart_item = with_row_lock(cart_item_query, nowait=False).first()
+            
+            if not cart_item:
+                return False, "Product not found in cart"
+            
+            if cart_item.quantity <= quantity:
+                # Remove entire item if quantity to remove >= current quantity
+                db.session.delete(cart_item)
+                db.session.commit()
+                return True, "Item removed from cart"
+            else:
+                # Reduce quantity
+                cart_item.quantity -= quantity
+                cart_item.total_price = (cart_item.unit_price or 0) * cart_item.quantity
+                cart_item.updated_at = datetime.utcnow()
+                db.session.commit()
+                return True, f"Reduced quantity by {quantity}"
+        except Exception as e:
+            self.logger.error(f"Error removing from cart by product: {str(e)}")
+            try:
+                db.session.rollback()
+            except Exception:
+                pass
+            return False, f"Error removing from cart: {str(e)}"
+    
     def clear_cart(self, user_id):
         """Clear user's cart"""
         try:
@@ -471,8 +554,8 @@ class DatabaseService:
                     stock.quantity_adjusted = True
                     stock.adjustment_reason = f"Received {received_quantity} instead of {stock.quantity}"
                 
-                # Update available_for_sale
-                stock.available_for_sale = received_quantity
+                # Update available_for_sale (must account for blocked, out_for_delivery, and sold quantities)
+                stock.update_available_quantity()  # Uses the method that correctly calculates
                 
                 db.session.commit()
                 self.logger.info(f"Stock {stock_id} confirmed by dealer")
@@ -520,7 +603,7 @@ class DatabaseService:
     
     # Pending Orders Management
     def create_pending_order_product(self, original_order_id, product_code, product_name, 
-                                    requested_quantity, user_id, user_email):
+                                    requested_quantity, user_id, user_email, original_order_item_id=None):
         """Create a pending order product entry for out-of-stock items"""
         try:
             # Validate all required fields before creating
@@ -550,8 +633,37 @@ class DatabaseService:
                     self.logger.warning(f"No email found for user {user_id}, using placeholder")
                     user_email = 'no-email@placeholder.com'  # Ensure non-null value
             
+            # Check for existing pending order for same product and user
+            # Only merge if from same original order item to avoid incorrect aggregation
+            existing_pending = None
+            if original_order_item_id:
+                # If we have original_order_item_id, check for pending from same item
+                existing_pending = PendingOrderProducts.query.filter_by(
+                    user_id=int(user_id),
+                    product_code=str(product_code).strip(),
+                    original_order_item_id=original_order_item_id,
+                    status='pending'
+                ).first()
+            else:
+                # Fallback: check without original_order_item_id (for backward compatibility)
+                existing_pending = PendingOrderProducts.query.filter_by(
+                    user_id=int(user_id),
+                    product_code=str(product_code).strip(),
+                    status='pending'
+                ).first()
+            
+            if existing_pending:
+                # Update existing pending order quantity instead of creating duplicate
+                existing_pending.requested_quantity += int(requested_quantity)
+                existing_pending.updated_at = datetime.utcnow()
+                db.session.commit()
+                self.logger.info(f"Updated existing pending order {existing_pending.id} for product {product_code}, new quantity: {existing_pending.requested_quantity}")
+                return existing_pending
+            
+            # Create new pending order
             pending_order = PendingOrderProducts(
                 original_order_id=original_order_id if original_order_id else None,
+                original_order_item_id=original_order_item_id,  # Link to original OrderItem
                 product_code=str(product_code).strip(),
                 product_name=str(product_name).strip(),
                 requested_quantity=int(requested_quantity),
@@ -561,7 +673,7 @@ class DatabaseService:
             )
             db.session.add(pending_order)
             db.session.commit()
-            self.logger.info(f"Created pending order for product {product_code}, quantity {requested_quantity}, user {user_id}")
+            self.logger.info(f"Created pending order for product {product_code}, quantity {requested_quantity}, user {user_id}, original_item_id={original_order_item_id}")
             return pending_order
         except Exception as e:
             self.logger.error(f"Error creating pending order product: {str(e)}")
@@ -639,8 +751,47 @@ class DatabaseService:
         return self.get_all_products()
     
     def get_product_by_code(self, product_code):
-        """Get product by product code"""
-        return Product.query.filter_by(product_name=product_code).first()
+        """
+        Get product by product code or name
+        Searches in both DealerWiseStockDetails (for product_code) and Product (for product_name)
+        """
+        if not product_code:
+            return None
+        
+        # Method 1: Try to find product via DealerWiseStockDetails by product_code
+        # DealerWiseStockDetails has product_code field, then get the Product via product_id
+        stock_detail = DealerWiseStockDetails.query.filter_by(
+            product_code=product_code,
+            status='confirmed'
+        ).first()
+        
+        if stock_detail and stock_detail.product_id:
+            product = Product.query.get(stock_detail.product_id)
+            if product:
+                self.logger.debug(f"Found product via DealerWiseStockDetails: {product_code} -> Product ID {product.id}")
+                return product
+        
+        # Method 2: Try to find Product by product_name (case-insensitive partial match)
+        # Some product codes might actually be product names
+        product = Product.query.filter(
+            Product.product_name.ilike(f'%{product_code}%')
+        ).first()
+        
+        if product:
+            self.logger.debug(f"Found product by name match: {product_code} -> Product ID {product.id}")
+            return product
+        
+        # Method 3: Try exact match on product_name (case-insensitive)
+        product = Product.query.filter(
+            func.lower(Product.product_name) == func.lower(product_code)
+        ).first()
+        
+        if product:
+            self.logger.debug(f"Found product by exact name match: {product_code} -> Product ID {product.id}")
+            return product
+        
+        self.logger.warning(f"Product not found by code/name: {product_code}")
+        return None
     
     # FOC Management
     def get_foc_for_product(self, product_id):

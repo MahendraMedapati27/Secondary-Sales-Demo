@@ -92,10 +92,23 @@ class Config:
     ## EMAIL CONFIGURATION
     # ------------------------------------------------------------------------
     # Microsoft Graph API Configuration (replacing SMTP)
-    MS_GRAPH_TENANT_ID = os.getenv('MS_GRAPH_TENANT_ID')
-    MS_GRAPH_CLIENT_ID = os.getenv('MS_GRAPH_CLIENT_ID')
-    MS_GRAPH_CLIENT_SECRET = os.getenv('MS_GRAPH_CLIENT_SECRET')
+    # New Azure AD App Registration Credentials (order-management-chatbot-extracter)
+    # Application (client) ID: e181a276-4a3b-41b8-9366-229f8f04f048
+    # Directory (tenant) ID: 54904ca2-e5a0-481c-a10a-73242e6476ea
+    # Can be overridden via environment variables
+    MS_GRAPH_TENANT_ID = os.getenv('MS_GRAPH_TENANT_ID', '54904ca2-e5a0-481c-a10a-73242e6476ea')
+    MS_GRAPH_CLIENT_ID = os.getenv('MS_GRAPH_CLIENT_ID', 'e181a276-4a3b-41b8-9366-229f8f04f048')
+    MS_GRAPH_CLIENT_SECRET = os.getenv('MS_GRAPH_CLIENT_SECRET')  # Must be set in environment for security
     MS_GRAPH_SENDER_EMAIL = os.getenv('MS_GRAPH_SENDER_EMAIL')  # Email address to send from (must be in Azure AD)
+    
+    # ------------------------------------------------------------------------
+    ## STOCK EXTRACTER CONFIGURATION
+    # ------------------------------------------------------------------------
+    # SharePoint/OneDrive Configuration for stock extraction
+    SHAREPOINT_SITE_URL = os.getenv('SHAREPOINT_SITE_URL', 'https://highvolttech.sharepoint.com/sites/ITTeam')
+    SHAREPOINT_FOLDER_PATH = os.getenv('SHAREPOINT_FOLDER_PATH', '/Shared Documents/IT/Order_Management_Chatbot')
+    EXTRACTER_CHECK_INTERVAL_MINUTES = int(os.getenv('EXTRACTER_CHECK_INTERVAL_MINUTES', 60))  # Check every 60 minutes
+    EXTRACTER_ENABLED = os.getenv('EXTRACTER_ENABLED', 'true').lower() == 'true'  # Enable/disable extracter
     
     # Legacy SMTP Configuration (kept for backward compatibility, but not used)
     MAIL_SERVER = os.getenv('MAIL_SERVER', 'smtp.gmail.com')
@@ -113,6 +126,11 @@ class Config:
     # ------------------------------------------------------------------------
     OTP_EXPIRATION = int(os.getenv('OTP_EXPIRATION', 600))  # 10 minutes
     TOKEN_EXPIRATION = int(os.getenv('TOKEN_EXPIRATION', 3600))
+    
+    # ------------------------------------------------------------------------
+    ## ORDER MANAGEMENT SETTINGS
+    # ------------------------------------------------------------------------
+    TAX_RATE = float(os.getenv('TAX_RATE', 0.05))  # Default 5% tax rate
     
     # ------------------------------------------------------------------------
     ## WEB SEARCH APIs (Tavily for Quantum Blue)
@@ -147,3 +165,18 @@ class Config:
     WHATSAPP_WEBHOOK_URL = os.getenv('WHATSAPP_WEBHOOK_URL', 'https://your-domain.com/webhook/whatsapp')
     WHATSAPP_API_VERSION = os.getenv('WHATSAPP_API_VERSION', 'v22.0')
     WHATSAPP_BASE_URL = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}"
+    
+    # ------------------------------------------------------------------------
+    ## AZURE SPEECH SERVICES CONFIGURATION (Voice Interaction)
+    # ------------------------------------------------------------------------
+    AZURE_SPEECH_KEY = os.getenv('AZURE_SPEECH_KEY')
+    AZURE_SPEECH_REGION = os.getenv('AZURE_SPEECH_REGION', 'eastus')
+    # Voice selection based on language
+    # English: en-US-AriaNeural, en-US-JennyNeural
+    # Hindi: hi-IN-SwaraNeural, hi-IN-MadhurNeural
+    # Telugu: te-IN-MohiniNeural, te-IN-ShrutiNeural
+    # Burmese: my-MM-NilarNeural, my-MM-ThihaNeural
+    AZURE_SPEECH_VOICE_EN = os.getenv('AZURE_SPEECH_VOICE_EN', 'en-US-AriaNeural')
+    AZURE_SPEECH_VOICE_HI = os.getenv('AZURE_SPEECH_VOICE_HI', 'hi-IN-SwaraNeural')
+    AZURE_SPEECH_VOICE_TE = os.getenv('AZURE_SPEECH_VOICE_TE', 'te-IN-MohiniNeural')
+    AZURE_SPEECH_VOICE_MY = os.getenv('AZURE_SPEECH_VOICE_MY', 'my-MM-NilarNeural')

@@ -3,7 +3,7 @@ import json
 from flask import current_app
 from app.groq_service import GroqService
 
-logging.basicConfig(level=logging.INFO)
+# Single logger initialization - removed duplicate
 logger = logging.getLogger(__name__)
 
 class LLMClassificationService:
@@ -32,12 +32,6 @@ class LLMClassificationService:
                 result_text = result_text[start_idx:end_idx].strip()
         
         return result_text
-    
-    def classify_message(self, user_message, context_data=None):
-        """
-        Alias for classify_user_intent for backward compatibility
-        """
-        return self.classify_user_intent(user_message, context_data)
     
     def classify_user_intent(self, user_message, context_data=None):
         """

@@ -2,10 +2,7 @@ import time
 import logging
 import json
 from flask import current_app
-from groq import Groq # Import Groq Client
-# REMOVED: from groq.lib.chat_completion_service import ChatCompletion # This line caused the error
-
-# --- Dependency Check ---
+# Import Groq Client
 try:
     from groq import Groq
     GROQ_AVAILABLE = True
@@ -14,7 +11,7 @@ except ImportError:
     logger = logging.getLogger(__name__)
     logger.error("Groq package not installed. Install with: pip install groq")
 
-logging.basicConfig(level=logging.INFO)
+# Single logger initialization - logging.basicConfig should only be called once in __init__.py
 logger = logging.getLogger(__name__)
 
 class GroqService:
