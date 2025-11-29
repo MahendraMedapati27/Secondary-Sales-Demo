@@ -557,7 +557,7 @@ function addMessage(message, sender, type = 'normal') {
     if (sender === 'user') {
         bubbleDiv.innerHTML = `
             <div class="d-flex justify-content-end align-items-center" style="width: 100%; gap: 8px;">
-                <div class="bg-primary text-white rounded-3 px-3 py-2" style="max-width: 75%; width: fit-content; min-width: 0; font-size: 0.875rem; word-break: normal !important; overflow-wrap: anywhere !important; white-space: normal !important; overflow: hidden;">
+                <div class="bg-primary text-white rounded-3 px-3 py-2" style="max-width: 100%; width: 100%; font-size: 0.875rem; word-break: normal !important; overflow-wrap: anywhere !important; white-space: normal !important; overflow: hidden;">
                     ${formatMessage(message)}
                 </div>
                 <div class="message-avatar user-avatar">
@@ -577,7 +577,7 @@ function addMessage(message, sender, type = 'normal') {
                 <div class="message-avatar bot-avatar">
                     <img src="/static/Images/Q_logo_quantum_blue-removebg-preview.png" alt="Quantum Blue Logo" class="avatar-image">
                 </div>
-                <div class="bg-light border rounded-3 px-3 py-2${tableClass}" style="max-width: ${maxWidth}; font-size: 0.875rem; width: auto;">
+                <div class="bg-light border rounded-3 px-3 py-2${tableClass}" style="max-width: 100%; font-size: 0.875rem; width: 100%;">
                     ${formatMessage(message)}
                 </div>
             </div>
@@ -716,7 +716,7 @@ function addMessageWithAnimation(message, sender, type = 'normal') {
                 <div class="message-avatar bot-avatar">
                     <img src="/static/Images/Q_logo_quantum_blue-removebg-preview.png" alt="Quantum Blue Logo" class="avatar-image">
                 </div>
-                <div class="bg-light border rounded-3 px-3 py-2${tableClass}" style="max-width: ${maxWidth}; font-size: 0.875rem; width: auto;">
+                <div class="bg-light border rounded-3 px-3 py-2${tableClass}" style="max-width: 100%; font-size: 0.875rem; width: 100%;">
                 </div>
             </div>
         `;
@@ -726,7 +726,7 @@ function addMessageWithAnimation(message, sender, type = 'normal') {
     } else {
         bubbleDiv.innerHTML = `
             <div class="d-flex justify-content-end align-items-center" style="width: 100%; gap: 8px;">
-                <div class="bg-primary text-white rounded-3 px-3 py-2" style="max-width: 75%; width: fit-content; min-width: 0; font-size: 0.875rem; word-break: normal !important; overflow-wrap: anywhere !important; white-space: normal !important; overflow: hidden;">
+                <div class="bg-primary text-white rounded-3 px-3 py-2" style="max-width: 100%; width: 100%; font-size: 0.875rem; word-break: normal !important; overflow-wrap: anywhere !important; white-space: normal !important; overflow: hidden;">
                 </div>
                 <div class="message-avatar user-avatar">
                     <i class="fas fa-user-circle"></i>
@@ -1759,21 +1759,315 @@ function displayRecentOrders(orders) {
 }
 
 function displayOrderDetails(orderDetails) {
-    let message = `**📦 Order Details - ${orderDetails.order_id}**\n\n`;
-    message += `Status: ${orderDetails.status}\n`;
-    message += `Stage: ${orderDetails.order_stage}\n`;
-    message += `Total Amount: ${orderDetails.total_amount.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK\n`;
-    message += `Order Date: ${orderDetails.order_date}\n`;
-    message += `Warehouse: ${orderDetails.warehouse_location}\n\n`;
-    
-    if (orderDetails.items && orderDetails.items.length > 0) {
-        message += 'Items:\n';
-        orderDetails.items.forEach(item => {
-            message += `• ${item.product_name} - Qty: ${item.quantity} - $${item.total_price}\n`;
-        });
+    try {
+        if (!orderDetails) {
+            console.error('displayOrderDetails: Order data is missing');
+            addMessage('Error: Order data is missing. Please try again.', 'bot', 'error');
+            return;
+        }
+
+        const messagesDiv = document.getElementById('chatMessages');
+        if (!messagesDiv) {
+            console.error('displayOrderDetails: Chat messages container not found');
+            return;
+        }
+
+        // Helper function to format dates safely
+        const formatOrFallback = (value) => {
+            if (!value) return 'Not available';
+            try {
+                if (typeof value === 'string' && value.includes('T')) {
+                    // ISO format
+                    const date = new Date(value);
+                    if (!isNaN(date.getTime())) {
+                        return formatDate(value);
+                    }
+                }
+                return formatDate(value);
+            } catch (e) {
+                return value;
+            }
+        };
+
+        // Helper function to get status badge HTML
+        function getStatusBadge(status) {
+            const statusLower = (status || '').toLowerCase();
+            let badgeClass = 'pending';
+            let badgeText = status ? status.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase()) : 'Unknown';
+            
+            if (statusLower.includes('confirm')) badgeClass = 'confirmed';
+            else if (statusLower.includes('reject')) badgeClass = 'rejected';
+            else if (statusLower.includes('cancel')) badgeClass = 'cancelled';
+            else if (statusLower.includes('draft')) badgeClass = 'draft';
+            else if (statusLower.includes('dispatch')) badgeClass = 'dispatched';
+            else if (statusLower.includes('deliver')) badgeClass = 'delivered';
+            
+            return `<span class="order-status-badge ${badgeClass}">${badgeText}</span>`;
+        }
+
+        // Get timeline data
+        const placedAt = orderDetails.placed_at || orderDetails.order_datetime || orderDetails.created_at || orderDetails.order_date;
+        const confirmedAt = orderDetails.distributor_confirmed_at;
+        const deliveredAt = orderDetails.delivered_at;
+        const lastUpdatedAt = orderDetails.last_updated_at;
+        
+        // Check if order is cancelled
+        const orderStatus = (orderDetails.status || orderDetails.status_display || '').toLowerCase();
+        const isCancelled = orderStatus.includes('cancel');
+
+        // Build initial message
+        let message = `**📦 Order Details - ${orderDetails.order_id || 'Unknown'}**\n\n`;
+        
+        // Add pending order notice if applicable
+        if (orderDetails.is_fulfilled_pending_order && orderDetails.pending_source_orders && orderDetails.pending_source_orders.length > 0) {
+            message += `⚠️ **This order was created by fulfilling a previous pending order.**\n\n`;
+            orderDetails.pending_source_orders.forEach(p => {
+                message += `• Original Order ID: **${p.original_order_id || 'N/A'}** (placed on ${p.original_order_date ? formatOrFallback(p.original_order_date) : 'N/A'})\n`;
+                message += `  - Product: ${p.product_name} (${p.product_code})\n`;
+                message += `  - Requested Quantity: ${p.requested_quantity} units\n`;
+            });
+            message += `\n`;
+        }
+
+        // Add message first
+        addMessage(message, 'bot');
+
+        // Find the last bot message to add table
+        const botMessages = messagesDiv.querySelectorAll('.message.bot');
+        const lastBotMessage = botMessages[botMessages.length - 1];
+
+        if (!lastBotMessage) {
+            console.error('displayOrderDetails: Could not find last bot message');
+            return;
+        }
+
+        // Find message bubble for table
+        let messageBubbleForTable = lastBotMessage.querySelector('.message-bubble .bg-light');
+        if (!messageBubbleForTable) {
+            messageBubbleForTable = lastBotMessage.querySelector('.message-bubble');
+        }
+        if (!messageBubbleForTable) {
+            messageBubbleForTable = lastBotMessage.querySelector('.bg-light');
+        }
+        if (!messageBubbleForTable) {
+            messageBubbleForTable = lastBotMessage;
+        }
+
+        if (messageBubbleForTable) {
+            // Create timeline and status table container
+            const timelineTableContainer = document.createElement('div');
+            timelineTableContainer.className = 'order-timeline-table mt-3 mb-3';
+            timelineTableContainer.style.cssText = 'width: 100%; overflow-x: auto;';
+
+            // Build timeline and status table
+            let timelineTableHTML = `
+                <div style="overflow-x: auto; width: 100%; max-width: 100%; box-sizing: border-box; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 15px;">
+                    <table class="table table-bordered table-hover mb-0" style="font-size: 0.875rem; margin-bottom: 0; width: 100%; min-width: 700px; table-layout: auto;">
+                        <thead style="background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%); color: white;">
+                            <tr>
+                                <th style="padding: 12px; border: 1px solid #1e40af; font-weight: 600; text-align: left; min-width: 180px;">Event</th>
+                                <th style="padding: 12px; border: 1px solid #1e40af; font-weight: 600; text-align: left; min-width: 250px;">Date & Time</th>
+                                <th style="padding: 12px; border: 1px solid #1e40af; font-weight: 600; text-align: center; min-width: 120px; white-space: nowrap;">Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr style="background-color: #f8f9fa;">
+                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600; white-space: nowrap;">
+                                    <i class="fas fa-shopping-cart me-2" style="color: #2563eb;"></i>Order Placed
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                    ${placedAt ? formatOrFallback(placedAt) : 'Not available'}
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6; text-align: center; white-space: nowrap;">
+                                    <span style="color: #10b981; font-weight: 600;">✓ Completed</span>
+                                </td>
+                            </tr>
+                            ${!isCancelled ? `
+                            <tr style="background-color: ${confirmedAt ? '#f0fdf4' : '#fff7ed'};">
+                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600; white-space: nowrap;">
+                                    <i class="fas fa-check-circle me-2" style="color: ${confirmedAt ? '#10b981' : '#f59e0b'};"></i>Dealer Confirmed
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                    ${confirmedAt ? formatOrFallback(confirmedAt) : 'Not yet confirmed by dealer'}
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6; text-align: center; white-space: nowrap;">
+                                    ${confirmedAt ? '<span style="color: #10b981; font-weight: 600;">✓ Completed</span>' : '<span style="color: #f59e0b; font-weight: 600;">⏳ Pending</span>'}
+                                </td>
+                            </tr>
+                            <tr style="background-color: ${deliveredAt ? '#f0fdf4' : '#fff7ed'};">
+                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600; white-space: nowrap;">
+                                    <i class="fas fa-truck me-2" style="color: ${deliveredAt ? '#10b981' : '#f59e0b'};"></i>Delivered to Customer
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                    ${deliveredAt ? formatOrFallback(deliveredAt) : 'Not yet delivered'}
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6; text-align: center; white-space: nowrap;">
+                                    ${deliveredAt ? '<span style="color: #10b981; font-weight: 600;">✓ Completed</span>' : '<span style="color: #f59e0b; font-weight: 600;">⏳ Pending</span>'}
+                                </td>
+                            </tr>
+                            ` : ''}
+                            ${lastUpdatedAt ? `
+                            <tr style="background-color: #f8f9fa;">
+                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600; white-space: nowrap;">
+                                    <i class="fas fa-clock me-2" style="color: #6b7280;"></i>Last Updated
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                    ${formatOrFallback(lastUpdatedAt)}
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6; text-align: center; white-space: nowrap;">
+                                    <span style="color: #6b7280;">-</span>
+                                </td>
+                            </tr>
+                            ` : ''}
+                        </tbody>
+                    </table>
+                </div>
+            `;
+
+            timelineTableContainer.innerHTML = timelineTableHTML;
+            messageBubbleForTable.appendChild(timelineTableContainer);
+
+            // Create order information table
+            const infoTableContainer = document.createElement('div');
+            infoTableContainer.className = 'order-info-table mt-3 mb-3';
+            infoTableContainer.style.cssText = 'width: 100%; overflow-x: auto;';
+
+            let infoTableHTML = `
+                <div style="overflow-x: auto; width: 100%; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 15px;">
+                    <table class="table table-bordered table-hover mb-0" style="font-size: 0.875rem; margin-bottom: 0; width: 100%; min-width: 500px;">
+                        <thead style="background: linear-gradient(135deg, #059669 0%, #047857 100%); color: white;">
+                            <tr>
+                                <th style="padding: 12px; border: 1px solid #065f46; font-weight: 600; text-align: left; width: 40%;">Information</th>
+                                <th style="padding: 12px; border: 1px solid #065f46; font-weight: 600; text-align: left; width: 60%;">Details</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
+                                    <i class="fas fa-info-circle me-2" style="color: #059669;"></i>Status
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                    ${getStatusBadge(orderDetails.status_display || orderDetails.status)}
+                                </td>
+                            </tr>
+                            ${orderDetails.order_stage ? `
+                            <tr>
+                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
+                                    <i class="fas fa-layer-group me-2" style="color: #059669;"></i>Order Stage
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                    ${orderDetails.order_stage}
+                                </td>
+                            </tr>
+                            ` : ''}
+                            ${typeof orderDetails.total_amount === 'number' ? `
+                            <tr>
+                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
+                                    <i class="fas fa-money-bill-wave me-2" style="color: #059669;"></i>Total Amount
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                    <strong style="color: #059669;">${orderDetails.total_amount.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK</strong>
+                                </td>
+                            </tr>
+                            ` : ''}
+                            ${orderDetails.order_date ? `
+                            <tr>
+                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
+                                    <i class="fas fa-calendar me-2" style="color: #059669;"></i>Order Date
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                    ${orderDetails.order_date}
+                                </td>
+                            </tr>
+                            ` : ''}
+                            ${orderDetails.area ? `
+                            <tr>
+                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
+                                    <i class="fas fa-map-marker-alt me-2" style="color: #059669;"></i>Area
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                    ${orderDetails.area}
+                                </td>
+                            </tr>
+                            ` : ''}
+                            ${orderDetails.customer_name ? `
+                            <tr>
+                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
+                                    <i class="fas fa-user me-2" style="color: #059669;"></i>Customer
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                    ${orderDetails.customer_name}
+                                </td>
+                            </tr>
+                            ` : ''}
+                        </tbody>
+                    </table>
+                </div>
+            `;
+
+            infoTableContainer.innerHTML = infoTableHTML;
+            messageBubbleForTable.appendChild(infoTableContainer);
+
+            // Add items table if items exist
+            if (orderDetails.items && orderDetails.items.length > 0) {
+                const itemsTableContainer = document.createElement('div');
+                itemsTableContainer.className = 'order-items-table mt-3 mb-3';
+                itemsTableContainer.style.cssText = 'width: 100%; overflow-x: auto;';
+
+                let itemsTableHTML = `
+                    <div style="overflow-x: auto; width: 100%; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+                        <table class="table table-bordered table-hover mb-0" style="font-size: 0.875rem; margin-bottom: 0; width: 100%; min-width: 500px;">
+                            <thead style="background: linear-gradient(135deg, #7c3aed 0%, #6d28d9 100%); color: white;">
+                                <tr>
+                                    <th style="padding: 12px; border: 1px solid #5b21b6; font-weight: 600; text-align: left;">Product Name</th>
+                                    <th style="padding: 12px; border: 1px solid #5b21b6; font-weight: 600; text-align: center;">Quantity</th>
+                                    <th style="padding: 12px; border: 1px solid #5b21b6; font-weight: 600; text-align: right;">Total Price</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                `;
+
+                orderDetails.items.forEach((item, index) => {
+                    const rowColor = index % 2 === 0 ? '#f8f9fa' : '#ffffff';
+                    const lineTotal = typeof item.total_price === 'number'
+                        ? item.total_price.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})
+                        : item.total_price || '0.00';
+                    
+                    itemsTableHTML += `
+                        <tr style="background-color: ${rowColor};">
+                            <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                <strong>${item.product_name || 'Unknown Product'}</strong>
+                            </td>
+                            <td style="padding: 12px; border: 1px solid #dee2e6; text-align: center;">
+                                ${item.quantity || 0} units
+                            </td>
+                            <td style="padding: 12px; border: 1px solid #dee2e6; text-align: right;">
+                                <strong>${lineTotal} MMK</strong>
+                            </td>
+                        </tr>
+                    `;
+                });
+
+                itemsTableHTML += `
+                            </tbody>
+                        </table>
+                    </div>
+                `;
+
+                itemsTableContainer.innerHTML = itemsTableHTML;
+                messageBubbleForTable.appendChild(itemsTableContainer);
+            }
+
+            // Scroll to bottom
+            messagesDiv.scrollTo({
+                top: messagesDiv.scrollHeight,
+                behavior: 'smooth'
+            });
+        }
+    } catch (error) {
+        console.error('Error displaying order details:', error);
+        addMessage('Error displaying order details. Please try again.', 'bot', 'error');
     }
-    
-    addMessage(message, 'bot');
 }
 
 function resetChat() {
@@ -1834,7 +2128,7 @@ function addStockConfirmationForm(stocks, invoiceIds = null, invoiceDates = null
     
     let formHTML = `
         <div class="message-bubble bot">
-            <div class="bg-light border rounded-3 px-3 py-3" style="max-width: 90%; font-size: 0.875rem;">
+            <div class="bg-light border rounded-3 px-3 py-3" style="max-width: 100%; width: 100%; font-size: 0.875rem;">
                 <h6 class="mb-3"><strong>📦 Stock Confirmation Form</strong></h6>
                 <form id="confirmStockForm" onsubmit="handleStockConfirmation(event)">
     `;
@@ -3348,14 +3642,18 @@ function showCustomerTable(customers) {
     // Create table container
     const tableContainer = document.createElement('div');
     tableContainer.className = 'customer-table-container mt-3 mb-3';
-    tableContainer.style.cssText = 'animation: slideInFromBottom 0.3s ease-out; width: 100%; max-width: 100%; overflow-x: auto;';
+    
+    // Add vertical scroll if more than 5 customers
+    const hasScroll = customers.length > 5;
+    const scrollStyle = hasScroll ? 'max-height: 280px; overflow-y: auto; overflow-x: auto;' : 'overflow-x: auto;';
+    tableContainer.style.cssText = `animation: slideInFromBottom 0.3s ease-out; width: 100%; max-width: 100%; ${scrollStyle} border-radius: 12px; border: 1px solid #dee2e6;`;
     
     let tableHTML = `
-        <table class="table table-bordered table-hover" style="font-size: 0.875rem; margin-bottom: 0; min-width: 100%; white-space: nowrap;">
-            <thead style="background-color: #f8f9fa;">
+        <table class="table table-bordered table-hover mb-0" style="font-size: 0.875rem; margin-bottom: 0; min-width: 100%; white-space: nowrap;">
+            <thead style="background-color: #f8f9fa; ${hasScroll ? 'position: sticky; top: 0; z-index: 10;' : ''}">
                 <tr>
-                    <th style="padding: 10px; border: 1px solid #dee2e6; font-weight: 600; white-space: nowrap;">Customer Name</th>
-                    <th style="padding: 10px; border: 1px solid #dee2e6; font-weight: 600; white-space: nowrap;">Customer ID</th>
+                    <th style="padding: 10px; border: 1px solid #dee2e6; font-weight: 600; white-space: nowrap; background-color: #f8f9fa;">Customer Name</th>
+                    <th style="padding: 10px; border: 1px solid #dee2e6; font-weight: 600; white-space: nowrap; background-color: #f8f9fa;">Customer ID</th>
                 </tr>
             </thead>
             <tbody>
@@ -3407,15 +3705,19 @@ function showProductTable(products) {
     // Create table container with rounded edges
     const tableContainer = document.createElement('div');
     tableContainer.className = 'product-table-container mt-3 mb-3';
-    tableContainer.style.cssText = 'animation: slideInFromBottom 0.3s ease-out; width: 100%; max-width: 100%; overflow-x: auto; border-radius: 12px; overflow: hidden;';
+    
+    // Add vertical scroll if more than 5 products
+    const hasScroll = products.length > 5;
+    const scrollStyle = hasScroll ? 'max-height: 280px; overflow-y: auto; overflow-x: auto;' : 'overflow-x: auto;';
+    tableContainer.style.cssText = `animation: slideInFromBottom 0.3s ease-out; width: 100%; max-width: 100%; ${scrollStyle} border-radius: 12px; border: 1px solid #dee2e6;`;
     
     let tableHTML = `
-        <table class="table table-bordered table-hover mb-0" style="font-size: 0.875rem; margin-bottom: 0; min-width: 100%; white-space: nowrap; border-radius: 12px; overflow: hidden;">
-            <thead style="background-color: #f8f9fa;">
+        <table class="table table-bordered table-hover mb-0" style="font-size: 0.875rem; margin-bottom: 0; min-width: 100%; white-space: nowrap;">
+            <thead style="background-color: #f8f9fa; ${hasScroll ? 'position: sticky; top: 0; z-index: 10;' : ''}">
                 <tr>
-                    <th style="padding: 10px; border: 1px solid #dee2e6; font-weight: 600; white-space: nowrap;">Product Name</th>
-                    <th style="padding: 10px; border: 1px solid #dee2e6; font-weight: 600; white-space: nowrap;">Price</th>
-                    <th style="padding: 10px; border: 1px solid #dee2e6; font-weight: 600; white-space: nowrap;">Available Quantity</th>
+                    <th style="padding: 10px; border: 1px solid #dee2e6; font-weight: 600; white-space: nowrap; background-color: #f8f9fa;">Product Name</th>
+                    <th style="padding: 10px; border: 1px solid #dee2e6; font-weight: 600; white-space: nowrap; background-color: #f8f9fa;">Price</th>
+                    <th style="padding: 10px; border: 1px solid #dee2e6; font-weight: 600; white-space: nowrap; background-color: #f8f9fa;">Available Quantity</th>
                 </tr>
             </thead>
             <tbody>
@@ -3477,7 +3779,7 @@ function showOrdersTable(orders) {
     tableContainer.style.cssText = 'animation: slideInFromBottom 0.3s ease-out; width: 100%; max-width: 100%; box-sizing: border-box;';
     
     let tableHTML = `
-        <div style="width: 100%; border-radius: 12px; overflow: hidden; max-height: 400px; overflow-y: auto; overflow-x: auto; border: 1px solid #dee2e6;">
+        <div style="width: 100%; border-radius: 12px; overflow: hidden; border: 1px solid #dee2e6;">
             <table class="table table-bordered table-hover mb-0" style="font-size: 0.875rem; margin-bottom: 0; width: 100%; min-width: 300px; white-space: nowrap;">
                 <thead style="background-color: #f8f9fa; position: sticky; top: 0; z-index: 10;">
                     <tr>
@@ -3553,7 +3855,7 @@ function addOrderSelectionForm(orders, filters = null) {
             if (!contentDiv) {
                 contentDiv = document.createElement('div');
                 contentDiv.className = 'bg-light border rounded-3 px-3 py-2';
-                contentDiv.style.cssText = 'max-width: 75%; font-size: 0.875rem; width: auto;';
+                contentDiv.style.cssText = 'max-width: 100%; font-size: 0.875rem; width: 100%;';
                 wrapper.appendChild(contentDiv);
             }
             messageBubble = contentDiv;
@@ -4257,26 +4559,46 @@ function displayMROrderDetails(order) {
         const unitPriceLabel = t_func('labels.unitPrice');
         const totalPriceLabel = t_func('labels.totalPrice');
         
+        // Helper function to format dates safely
+        const formatOrFallback = (value) => {
+            if (!value) return 'Not available';
+            try {
+                if (typeof value === 'string' && value.includes('T')) {
+                    // ISO format
+                    const date = new Date(value);
+                    if (!isNaN(date.getTime())) {
+                        return formatDate(value);
+                    }
+                }
+                return formatDate(value);
+            } catch (e) {
+                return value;
+            }
+        };
+
+        // Get timeline data
+        const placedAt = order.placed_at || order.order_datetime || order.created_at || order.order_date;
+        const confirmedAt = order.distributor_confirmed_at;
+        const deliveredAt = order.delivered_at;
+        const lastUpdatedAt = order.last_updated_at;
+        
+        // Check if order is cancelled
+        const orderStatus = (order.status || order.status_display || '').toLowerCase();
+        const isCancelled = orderStatus.includes('cancel');
+
         // Create main message container
         let message = `**📦 ${orderDetailsLabel} - ${order.order_id || 'Unknown'}**\n\n`;
         
-        // Order Information Section (first)
-        message += `**📋 ${orderInfoLabel}:**\n`;
-        message += `• **${statusLabel}:** ${getStatusBadge(order.status || order.status_display)}\n`;
-        message += `• **${dateLabel}:** ${order.order_datetime || order.order_date || 'N/A'}\n`;
-        message += `• **${totalItemsLabel}:** ${order.total_items || 0} ${unitsLabel}\n`;
-        message += `• **${totalAmountLabel}:** ${(order.total_amount || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK\n`;
-        message += `\n`;
-        
-        // Customer Information Section (second line)
-        const customerInfoLabel = `${customerLabel} Information`;
-        message += `**👤 ${customerInfoLabel}:**\n`;
-        if (order.customer_name) {
-            message += `• **${customerLabel}:** ${order.customer_name}\n`;
-        } else {
-            message += `• **${customerLabel}:** Not specified\n`;
+        // Add pending order notice if applicable
+        if (order.is_fulfilled_pending_order && order.pending_source_orders && order.pending_source_orders.length > 0) {
+            message += `⚠️ **This order was created by fulfilling a previous pending order.**\n\n`;
+            order.pending_source_orders.forEach(p => {
+                message += `• Original Order ID: **${p.original_order_id || 'N/A'}** (placed on ${p.original_order_date ? formatOrFallback(p.original_order_date) : 'N/A'})\n`;
+                message += `  - Product: ${p.product_name} (${p.product_code})\n`;
+                message += `  - Requested Quantity: ${p.requested_quantity} units\n`;
+            });
+            message += `\n`;
         }
-        message += `\n`;
         
         // Add message first
         addMessage(message, 'bot');
@@ -4321,7 +4643,165 @@ function displayMROrderDetails(order) {
             // Add data attribute for print functionality
             messageBubbleForTable.setAttribute('data-order-id', order.order_id || '');
             
-            // Create table container
+            // Create timeline and status table container (FIRST TABLE - at the top)
+            const timelineTableContainer = document.createElement('div');
+            timelineTableContainer.className = 'order-timeline-table mt-3 mb-3';
+            timelineTableContainer.style.cssText = 'width: 100%; overflow-x: auto;';
+
+            // Build timeline and status table
+            let timelineTableHTML = `
+                <div style="overflow-x: auto; width: 100%; max-width: 100%; box-sizing: border-box; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 15px;">
+                    <table class="table table-bordered table-hover mb-0" style="font-size: 0.875rem; margin-bottom: 0; width: 100%; min-width: 700px; table-layout: auto;">
+                        <thead style="background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%); color: white;">
+                            <tr>
+                                <th style="padding: 12px; border: 1px solid #1e40af; font-weight: 600; text-align: left; min-width: 180px;">Event</th>
+                                <th style="padding: 12px; border: 1px solid #1e40af; font-weight: 600; text-align: left; min-width: 250px;">Date & Time</th>
+                                <th style="padding: 12px; border: 1px solid #1e40af; font-weight: 600; text-align: center; min-width: 120px; white-space: nowrap;">Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr style="background-color: #f8f9fa;">
+                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600; white-space: nowrap;">
+                                    <i class="fas fa-shopping-cart me-2" style="color: #2563eb;"></i>Order Placed
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                    ${placedAt ? formatOrFallback(placedAt) : 'Not available'}
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6; text-align: center; white-space: nowrap;">
+                                    <span style="color: #10b981; font-weight: 600;">✓ Completed</span>
+                                </td>
+                            </tr>
+                            ${!isCancelled ? `
+                            <tr style="background-color: ${confirmedAt ? '#f0fdf4' : '#fff7ed'};">
+                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600; white-space: nowrap;">
+                                    <i class="fas fa-check-circle me-2" style="color: ${confirmedAt ? '#10b981' : '#f59e0b'};"></i>Dealer Confirmed
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                    ${confirmedAt ? formatOrFallback(confirmedAt) : 'Not yet confirmed by dealer'}
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6; text-align: center; white-space: nowrap;">
+                                    ${confirmedAt ? '<span style="color: #10b981; font-weight: 600;">✓ Completed</span>' : '<span style="color: #f59e0b; font-weight: 600;">⏳ Pending</span>'}
+                                </td>
+                            </tr>
+                            <tr style="background-color: ${deliveredAt ? '#f0fdf4' : '#fff7ed'};">
+                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600; white-space: nowrap;">
+                                    <i class="fas fa-truck me-2" style="color: ${deliveredAt ? '#10b981' : '#f59e0b'};"></i>Delivered to Customer
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                    ${deliveredAt ? formatOrFallback(deliveredAt) : 'Not yet delivered'}
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6; text-align: center; white-space: nowrap;">
+                                    ${deliveredAt ? '<span style="color: #10b981; font-weight: 600;">✓ Completed</span>' : '<span style="color: #f59e0b; font-weight: 600;">⏳ Pending</span>'}
+                                </td>
+                            </tr>
+                            ` : ''}
+                            ${lastUpdatedAt ? `
+                            <tr style="background-color: #f8f9fa;">
+                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600; white-space: nowrap;">
+                                    <i class="fas fa-clock me-2" style="color: #6b7280;"></i>Last Updated
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                    ${formatOrFallback(lastUpdatedAt)}
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6; text-align: center; white-space: nowrap;">
+                                    <span style="color: #6b7280;">-</span>
+                                </td>
+                            </tr>
+                            ` : ''}
+                        </tbody>
+                    </table>
+                </div>
+            `;
+
+            timelineTableContainer.innerHTML = timelineTableHTML;
+            messageBubbleForTable.appendChild(timelineTableContainer);
+
+            // Create order information table (SECOND TABLE)
+            const infoTableContainer = document.createElement('div');
+            infoTableContainer.className = 'order-info-table mt-3 mb-3';
+            infoTableContainer.style.cssText = 'width: 100%; overflow-x: auto;';
+
+            let infoTableHTML = `
+                <div style="overflow-x: auto; width: 100%; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 15px;">
+                    <table class="table table-bordered table-hover mb-0" style="font-size: 0.875rem; margin-bottom: 0; width: 100%; min-width: 500px;">
+                        <thead style="background: linear-gradient(135deg, #059669 0%, #047857 100%); color: white;">
+                            <tr>
+                                <th style="padding: 12px; border: 1px solid #065f46; font-weight: 600; text-align: left; width: 40%;">Information</th>
+                                <th style="padding: 12px; border: 1px solid #065f46; font-weight: 600; text-align: left; width: 60%;">Details</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
+                                    <i class="fas fa-info-circle me-2" style="color: #059669;"></i>${statusLabel}
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                    ${getStatusBadge(order.status || order.status_display)}
+                                </td>
+                            </tr>
+                            ${order.order_stage ? `
+                            <tr>
+                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
+                                    <i class="fas fa-layer-group me-2" style="color: #059669;"></i>Order Stage
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                    ${order.order_stage}
+                                </td>
+                            </tr>
+                            ` : ''}
+                            <tr>
+                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
+                                    <i class="fas fa-calendar me-2" style="color: #059669;"></i>${dateLabel}
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                    ${order.order_datetime || order.order_date || 'N/A'}
+                                </td>
+                            </tr>
+                            <tr>
+                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
+                                    <i class="fas fa-boxes me-2" style="color: #059669;"></i>${totalItemsLabel}
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                    ${order.total_items || 0} ${unitsLabel}
+                                </td>
+                            </tr>
+                            <tr>
+                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
+                                    <i class="fas fa-money-bill-wave me-2" style="color: #059669;"></i>${totalAmountLabel}
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                    <strong style="color: #059669;">${(order.total_amount || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK</strong>
+                                </td>
+                            </tr>
+                            ${order.area ? `
+                            <tr>
+                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
+                                    <i class="fas fa-map-marker-alt me-2" style="color: #059669;"></i>Area
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                    ${order.area}
+                                </td>
+                            </tr>
+                            ` : ''}
+                            ${order.customer_name ? `
+                            <tr>
+                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
+                                    <i class="fas fa-user me-2" style="color: #059669;"></i>${customerLabel}
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                    ${order.customer_name}
+                                </td>
+                            </tr>
+                            ` : ''}
+                        </tbody>
+                    </table>
+                </div>
+            `;
+
+            infoTableContainer.innerHTML = infoTableHTML;
+            messageBubbleForTable.appendChild(infoTableContainer);
+            
+            // Create items table container (THIRD TABLE - product items)
             const tableContainer = document.createElement('div');
             tableContainer.className = 'order-items-table mt-3 mb-3';
             tableContainer.style.cssText = 'width: 100%; overflow-x: auto;';
@@ -4379,16 +4859,39 @@ function displayMROrderDetails(order) {
                 `;
             }
             
-            // Add total row
+            // Add total rows (Tax and Grand Total)
+            const subtotal = order.subtotal || 0;
+            const taxAmount = order.tax_amount || 0;
+            const grandTotal = order.total_amount || 0;
+            const taxRate = order.tax_rate || 0.05;
+            const taxPercent = (taxRate * 100).toFixed(0);
+            const taxLabel = `${t_func('labels.tax') || 'Tax'} (${taxPercent}%)`;
+            
             tableHTML += `
                         </tbody>
-                        <tfoot style="background-color: #f1f5f9; border-top: 2px solid #2563eb;">
+                        <tfoot style="background-color: #f1f5f9; border-top: 2px solid #2563eb;">`;
+            
+            // Add Tax row if tax amount exists
+            if (taxAmount > 0 && subtotal > 0) {
+                tableHTML += `
+                            <tr>
+                                <td colspan="4" style="padding: 10px; border: 1px solid #dee2e6; text-align: right; font-weight: 600; font-size: 0.95rem;">
+                                    <strong>${taxLabel}:</strong>
+                                </td>
+                                <td style="padding: 10px; border: 1px solid #dee2e6; text-align: right; font-weight: 600; font-size: 0.95rem;">
+                                    ${taxAmount.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK
+                                </td>
+                            </tr>`;
+            }
+            
+            // Add Grand Total row
+            tableHTML += `
                             <tr>
                                 <td colspan="4" style="padding: 12px; border: 1px solid #dee2e6; text-align: right; font-weight: 700; font-size: 1rem;">
                                     <strong>${t_func('labels.grandTotal')}:</strong>
                                 </td>
                                 <td style="padding: 12px; border: 1px solid #dee2e6; text-align: right; font-weight: 700; font-size: 1rem; color: #2563eb;">
-                                    <strong>${(order.total_amount || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK</strong>
+                                    <strong>${grandTotal.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK</strong>
                                 </td>
                             </tr>
                         </tfoot>
@@ -4453,25 +4956,66 @@ function displayDistributorOrderDetails(order) {
             return `<span class="order-status-badge ${badgeClass}">${badgeText}</span>`;
         }
         
+        // Helper function to format dates safely
+        const formatOrFallback = (value) => {
+            if (!value) return 'Not available';
+            try {
+                if (typeof value === 'string' && value.includes('T')) {
+                    // ISO format
+                    const date = new Date(value);
+                    if (!isNaN(date.getTime())) {
+                        return formatDate(value);
+                    }
+                }
+                return formatDate(value);
+            } catch (e) {
+                return value;
+            }
+        };
+        
         // Get translations
         const t_func = (typeof t !== 'undefined') ? t : (key) => key;
         const orderDetailsLabel = t_func('labels.orderDetails');
         const statusLabel = t_func('labels.status');
         const dateLabel = t_func('labels.date');
+        const totalItemsLabel = t_func('labels.totalItems');
+        const totalAmountLabel = t_func('labels.totalAmount');
+        const customerLabel = t_func('labels.customer');
+        const unitsLabel = t_func('labels.units');
+        const productNameLabel = t_func('labels.productName');
+        const quantityLabel = t_func('labels.quantity');
+        const focLabel = t_func('labels.foc');
+        const unitPriceLabel = t_func('labels.unitPrice');
+        const totalPriceLabel = t_func('labels.totalPrice');
         
-        // Build detailed order message in bullet points
-        let message = `**📦 ${orderDetailsLabel} - ${order.order_id}**\n\n`;
-        message += `• **MR:** ${order.mr_name}\n`;
-        message += `• **Area:** ${order.area}\n`;
-        message += `• **Contact:** ${order.mr_email}\n`;
-        message += `• **Phone:** ${order.mr_phone}\n`;
-        message += `• **${statusLabel}:** ${getStatusBadge(order.status || order.status_display)}\n`;
-        message += `• **${dateLabel}:** ${order.order_datetime}\n\n`;
+        // Get timeline data
+        const placedAt = order.placed_at || order.order_datetime || order.created_at || order.order_date;
+        const confirmedAt = order.distributor_confirmed_at;
+        const deliveredAt = order.delivered_at;
+        const lastUpdatedAt = order.last_updated_at;
+        
+        // Check if order is cancelled
+        const orderStatus = (order.status || order.status_display || '').toLowerCase();
+        const isCancelled = orderStatus.includes('cancel');
+        
+        // Build initial message
+        let message = `**📦 ${orderDetailsLabel} - ${order.order_id || 'Unknown'}**\n\n`;
+        
+        // Add pending order notice if applicable
+        if (order.is_fulfilled_pending_order && order.pending_source_orders && order.pending_source_orders.length > 0) {
+            message += `⚠️ **This order was created by fulfilling a previous pending order.**\n\n`;
+            order.pending_source_orders.forEach(p => {
+                message += `• Original Order ID: **${p.original_order_id || 'N/A'}** (placed on ${p.original_order_date ? formatOrFallback(p.original_order_date) : 'N/A'})\n`;
+                message += `  - Product: ${p.product_name} (${p.product_code})\n`;
+                message += `  - Requested Quantity: ${p.requested_quantity} units\n`;
+            });
+            message += `\n`;
+        }
         
         // Add message first
         addMessage(message, 'bot');
         
-        // Find the last bot message to add editable form and copy button
+        // Find the last bot message to add tables
         const botMessages = messagesDiv.querySelectorAll('.message.bot');
         const lastBotMessage = botMessages[botMessages.length - 1];
         
@@ -4480,13 +5024,11 @@ function displayDistributorOrderDetails(order) {
             return;
         }
         
-        // Try multiple selectors to find the message bubble
-        let messageBubble = lastBotMessage.querySelector('.message-bubble .bg-light');
-        
         // Add copy button to the order title
-        if (messageBubble && order.order_id) {
+        const messageBubble = lastBotMessage.querySelector('.message-bubble .bg-light');
+        if (messageBubble) {
             const titleElement = messageBubble.querySelector('strong');
-            if (titleElement) {
+            if (titleElement && order.order_id) {
                 const copyBtn = document.createElement('button');
                 copyBtn.className = 'copy-btn';
                 copyBtn.innerHTML = '<i class="fas fa-copy"></i>';
@@ -4495,21 +5037,313 @@ function displayDistributorOrderDetails(order) {
                 copyBtn.style.cssText = 'margin-left: 8px; display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; background: rgba(37, 99, 235, 0.1); border: 1px solid rgba(37, 99, 235, 0.3); border-radius: 6px; color: #2563eb; font-size: 0.75rem; cursor: pointer; transition: all 0.2s;';
                 titleElement.parentNode.insertBefore(copyBtn, titleElement.nextSibling);
             }
-            
-            // Add data attribute for print functionality
-            messageBubble.setAttribute('data-order-id', order.order_id);
-        }
-        if (!messageBubble) {
-            messageBubble = lastBotMessage.querySelector('.message-bubble');
-        }
-        if (!messageBubble) {
-            messageBubble = lastBotMessage.querySelector('.bg-light');
-        }
-        if (!messageBubble) {
-            messageBubble = lastBotMessage;
         }
         
-        if (messageBubble && order.can_confirm) {
+        // Find message bubble for table
+        let messageBubbleForTable = lastBotMessage.querySelector('.message-bubble .bg-light');
+        if (!messageBubbleForTable) {
+            messageBubbleForTable = lastBotMessage.querySelector('.message-bubble');
+        }
+        if (!messageBubbleForTable) {
+            messageBubbleForTable = lastBotMessage.querySelector('.bg-light');
+        }
+        if (!messageBubbleForTable) {
+            messageBubbleForTable = lastBotMessage;
+        }
+        
+        if (messageBubbleForTable) {
+            // Add data attribute for print functionality
+            messageBubbleForTable.setAttribute('data-order-id', order.order_id || '');
+            
+            // Create timeline and status table container (FIRST TABLE - at the top)
+            const timelineTableContainer = document.createElement('div');
+            timelineTableContainer.className = 'order-timeline-table mt-3 mb-3';
+            timelineTableContainer.style.cssText = 'width: 100%; overflow-x: auto;';
+
+            // Build timeline and status table
+            let timelineTableHTML = `
+                <div style="overflow-x: auto; width: 100%; max-width: 100%; box-sizing: border-box; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 15px;">
+                    <table class="table table-bordered table-hover mb-0" style="font-size: 0.875rem; margin-bottom: 0; width: 100%; min-width: 700px; table-layout: auto;">
+                        <thead style="background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%); color: white;">
+                            <tr>
+                                <th style="padding: 12px; border: 1px solid #1e40af; font-weight: 600; text-align: left; min-width: 180px;">Event</th>
+                                <th style="padding: 12px; border: 1px solid #1e40af; font-weight: 600; text-align: left; min-width: 250px;">Date & Time</th>
+                                <th style="padding: 12px; border: 1px solid #1e40af; font-weight: 600; text-align: center; min-width: 120px; white-space: nowrap;">Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr style="background-color: #f8f9fa;">
+                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600; white-space: nowrap;">
+                                    <i class="fas fa-shopping-cart me-2" style="color: #2563eb;"></i>Order Placed
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                    ${placedAt ? formatOrFallback(placedAt) : 'Not available'}
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6; text-align: center; white-space: nowrap;">
+                                    <span style="color: #10b981; font-weight: 600;">✓ Completed</span>
+                                </td>
+                            </tr>
+                            ${!isCancelled ? `
+                            <tr style="background-color: ${confirmedAt ? '#f0fdf4' : '#fff7ed'};">
+                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600; white-space: nowrap;">
+                                    <i class="fas fa-check-circle me-2" style="color: ${confirmedAt ? '#10b981' : '#f59e0b'};"></i>Dealer Confirmed
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                    ${confirmedAt ? formatOrFallback(confirmedAt) : 'Not yet confirmed by dealer'}
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6; text-align: center; white-space: nowrap;">
+                                    ${confirmedAt ? '<span style="color: #10b981; font-weight: 600;">✓ Completed</span>' : '<span style="color: #f59e0b; font-weight: 600;">⏳ Pending</span>'}
+                                </td>
+                            </tr>
+                            <tr style="background-color: ${deliveredAt ? '#f0fdf4' : '#fff7ed'};">
+                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600; white-space: nowrap;">
+                                    <i class="fas fa-truck me-2" style="color: ${deliveredAt ? '#10b981' : '#f59e0b'};"></i>Delivered to Customer
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                    ${deliveredAt ? formatOrFallback(deliveredAt) : 'Not yet delivered'}
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6; text-align: center; white-space: nowrap;">
+                                    ${deliveredAt ? '<span style="color: #10b981; font-weight: 600;">✓ Completed</span>' : '<span style="color: #f59e0b; font-weight: 600;">⏳ Pending</span>'}
+                                </td>
+                            </tr>
+                            ` : ''}
+                            ${lastUpdatedAt ? `
+                            <tr style="background-color: #f8f9fa;">
+                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600; white-space: nowrap;">
+                                    <i class="fas fa-clock me-2" style="color: #6b7280;"></i>Last Updated
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                    ${formatOrFallback(lastUpdatedAt)}
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6; text-align: center; white-space: nowrap;">
+                                    <span style="color: #6b7280;">-</span>
+                                </td>
+                            </tr>
+                            ` : ''}
+                        </tbody>
+                    </table>
+                </div>
+            `;
+
+            timelineTableContainer.innerHTML = timelineTableHTML;
+            messageBubbleForTable.appendChild(timelineTableContainer);
+
+            // Create order information table (SECOND TABLE)
+            const infoTableContainer = document.createElement('div');
+            infoTableContainer.className = 'order-info-table mt-3 mb-3';
+            infoTableContainer.style.cssText = 'width: 100%; overflow-x: auto;';
+
+            let infoTableHTML = `
+                <div style="overflow-x: auto; width: 100%; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 15px;">
+                    <table class="table table-bordered table-hover mb-0" style="font-size: 0.875rem; margin-bottom: 0; width: 100%; min-width: 500px;">
+                        <thead style="background: linear-gradient(135deg, #059669 0%, #047857 100%); color: white;">
+                            <tr>
+                                <th style="padding: 12px; border: 1px solid #065f46; font-weight: 600; text-align: left; width: 40%;">Information</th>
+                                <th style="padding: 12px; border: 1px solid #065f46; font-weight: 600; text-align: left; width: 60%;">Details</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
+                                    <i class="fas fa-info-circle me-2" style="color: #059669;"></i>${statusLabel}
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                    ${getStatusBadge(order.status || order.status_display)}
+                                </td>
+                            </tr>
+                            ${order.order_stage ? `
+                            <tr>
+                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
+                                    <i class="fas fa-layer-group me-2" style="color: #059669;"></i>Order Stage
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                    ${order.order_stage}
+                                </td>
+                            </tr>
+                            ` : ''}
+                            <tr>
+                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
+                                    <i class="fas fa-calendar me-2" style="color: #059669;"></i>${dateLabel}
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                    ${order.order_datetime || order.order_date || 'N/A'}
+                                </td>
+                            </tr>
+                            <tr>
+                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
+                                    <i class="fas fa-user-md me-2" style="color: #059669;"></i>MR Name
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                    ${order.mr_name || 'N/A'}
+                                </td>
+                            </tr>
+                            <tr>
+                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
+                                    <i class="fas fa-envelope me-2" style="color: #059669;"></i>MR Contact
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                    ${order.mr_email || 'N/A'}
+                                </td>
+                            </tr>
+                            <tr>
+                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
+                                    <i class="fas fa-phone me-2" style="color: #059669;"></i>MR Phone
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                    ${order.mr_phone || 'N/A'}
+                                </td>
+                            </tr>
+                            ${order.area ? `
+                            <tr>
+                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
+                                    <i class="fas fa-map-marker-alt me-2" style="color: #059669;"></i>Area
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                    ${order.area}
+                                </td>
+                            </tr>
+                            ` : ''}
+                            ${order.customer_name ? `
+                            <tr>
+                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
+                                    <i class="fas fa-user me-2" style="color: #059669;"></i>${customerLabel}
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                    ${order.customer_name}
+                                </td>
+                            </tr>
+                            ` : ''}
+                            ${order.delivery_partner_name ? `
+                            <tr>
+                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
+                                    <i class="fas fa-truck me-2" style="color: #059669;"></i>Delivery Partner
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                    <strong>${order.delivery_partner_name}</strong>${order.delivery_partner_unique_id ? ` (${order.delivery_partner_unique_id})` : ''}
+                                    ${order.delivery_partner_email ? `<br><small style="color: #6b7280;"><i class="fas fa-envelope me-1"></i>${order.delivery_partner_email}</small>` : ''}
+                                    ${order.delivery_partner_phone ? `<br><small style="color: #6b7280;"><i class="fas fa-phone me-1"></i>${order.delivery_partner_phone}</small>` : ''}
+                                </td>
+                            </tr>
+                            ` : ''}
+                            <tr>
+                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
+                                    <i class="fas fa-boxes me-2" style="color: #059669;"></i>${totalItemsLabel}
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                    ${order.total_items || 0} ${unitsLabel}
+                                </td>
+                            </tr>
+                            <tr>
+                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
+                                    <i class="fas fa-money-bill-wave me-2" style="color: #059669;"></i>${totalAmountLabel}
+                                </td>
+                                <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                    <strong style="color: #059669;">${(order.total_amount || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK</strong>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            `;
+
+            infoTableContainer.innerHTML = infoTableHTML;
+            messageBubbleForTable.appendChild(infoTableContainer);
+            
+            // Add items table if items exist (THIRD TABLE)
+            if (order.items && order.items.length > 0) {
+                const itemsTableContainer = document.createElement('div');
+                itemsTableContainer.className = 'order-items-table mt-3 mb-3';
+                itemsTableContainer.style.cssText = 'width: 100%; overflow-x: auto;';
+
+                let itemsTableHTML = `
+                    <div style="overflow-x: auto; width: 100%; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+                        <table class="table table-bordered table-hover mb-0" style="font-size: 0.875rem; margin-bottom: 0; width: 100%; min-width: 500px;">
+                            <thead style="background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%); color: white;">
+                                <tr>
+                                    <th style="padding: 12px; border: 1px solid #1e40af; font-weight: 600; text-align: left;">${productNameLabel}</th>
+                                    <th style="padding: 12px; border: 1px solid #1e40af; font-weight: 600; text-align: center;">${quantityLabel}</th>
+                                    <th style="padding: 12px; border: 1px solid #1e40af; font-weight: 600; text-align: center;">${focLabel}</th>
+                                    <th style="padding: 12px; border: 1px solid #1e40af; font-weight: 600; text-align: right;">${unitPriceLabel}</th>
+                                    <th style="padding: 12px; border: 1px solid #1e40af; font-weight: 600; text-align: right;">${totalPriceLabel}</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                `;
+
+                order.items.forEach((item, index) => {
+                    const rowColor = index % 2 === 0 ? '#f8f9fa' : '#ffffff';
+                    const focDisplay = (item.free_quantity || 0) > 0 
+                        ? `<span style="color: #10b981; font-weight: 600;">+${item.free_quantity}</span>` 
+                        : '<span style="color: #6b7280;">-</span>';
+                    
+                    itemsTableHTML += `
+                        <tr style="background-color: ${rowColor};">
+                            <td style="padding: 12px; border: 1px solid #dee2e6;">
+                                <strong>${item.product_name || 'Unknown Product'}</strong>
+                            </td>
+                            <td style="padding: 12px; border: 1px solid #dee2e6; text-align: center;">
+                                ${item.quantity || 0} ${unitsLabel}
+                            </td>
+                            <td style="padding: 12px; border: 1px solid #dee2e6; text-align: center;">
+                                ${focDisplay}
+                            </td>
+                            <td style="padding: 12px; border: 1px solid #dee2e6; text-align: right;">
+                                ${(item.unit_price || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK
+                            </td>
+                            <td style="padding: 12px; border: 1px solid #dee2e6; text-align: right; font-weight: 600;">
+                                ${(item.total_price || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK
+                            </td>
+                        </tr>
+                    `;
+                });
+                
+                // Add total rows (Tax and Grand Total)
+                const subtotal = order.subtotal || 0;
+                const taxAmount = order.tax_amount || 0;
+                const grandTotal = order.total_amount || 0;
+                const taxRate = order.tax_rate || 0.05;
+                const taxPercent = (taxRate * 100).toFixed(0);
+                const taxLabel = `${t_func('labels.tax') || 'Tax'} (${taxPercent}%)`;
+                
+                itemsTableHTML += `
+                            </tbody>
+                            <tfoot style="background-color: #f1f5f9; border-top: 2px solid #2563eb;">`;
+                
+                // Add Tax row if tax amount exists
+                if (taxAmount > 0 && subtotal > 0) {
+                    itemsTableHTML += `
+                                <tr>
+                                    <td colspan="4" style="padding: 10px; border: 1px solid #dee2e6; text-align: right; font-weight: 600; font-size: 0.95rem;">
+                                        <strong>${taxLabel}:</strong>
+                                    </td>
+                                    <td style="padding: 10px; border: 1px solid #dee2e6; text-align: right; font-weight: 600; font-size: 0.95rem;">
+                                        ${taxAmount.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK
+                                    </td>
+                                </tr>`;
+                }
+                
+                // Add Grand Total row
+                itemsTableHTML += `
+                                <tr>
+                                    <td colspan="4" style="padding: 12px; border: 1px solid #dee2e6; text-align: right; font-weight: 700; font-size: 1rem;">
+                                        <strong>${t_func('labels.grandTotal')}:</strong>
+                                    </td>
+                                    <td style="padding: 12px; border: 1px solid #dee2e6; text-align: right; font-weight: 700; font-size: 1rem; color: #2563eb;">
+                                        <strong>${grandTotal.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK</strong>
+                                    </td>
+                                </tr>
+                            </tfoot>
+                        </table>
+                    </div>
+                `;
+
+                itemsTableContainer.innerHTML = itemsTableHTML;
+                messageBubbleForTable.appendChild(itemsTableContainer);
+            }
+        }
+        
+        // Now add the editable form if order can be confirmed
+        if (messageBubbleForTable && order.can_confirm) {
             // Create editable form for order items
             const editFormContainer = document.createElement('div');
             editFormContainer.className = 'order-edit-form mt-3 mb-3';
@@ -4665,29 +5499,13 @@ function displayDistributorOrderDetails(order) {
             `;
             
             editFormContainer.innerHTML = formHTML;
-            messageBubble.appendChild(editFormContainer);
+            messageBubbleForTable.appendChild(editFormContainer);
             
             // Load delivery partners for this area after form is added to DOM
             // Use setTimeout to ensure DOM element exists
             setTimeout(() => {
                 loadDeliveryPartners(order.order_id);
             }, 100);
-        } else if (messageBubble) {
-            // If order cannot be confirmed, show read-only items list
-            let itemsList = `**Items Ordered:**\n`;
-            order.items.forEach(item => {
-                if (item.free_quantity > 0) {
-                    itemsList += `• ${item.product_name}: **${item.total_quantity} units** (${item.quantity} paid + ${item.free_quantity} free) @ ${item.unit_price.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK = ${item.total_price.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK\n`;
-                } else {
-                    itemsList += `• ${item.product_name}: ${item.quantity} units @ ${item.unit_price.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK = ${item.total_price.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK\n`;
-                }
-            });
-            itemsList += `\n**💰 Total:** ${order.total_amount.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK | **Items:** ${order.total_items} units\n`;
-            
-            // Add items list to message
-            const itemsDiv = document.createElement('div');
-            itemsDiv.innerHTML = formatMessage(itemsList);
-            messageBubble.appendChild(itemsDiv);
         }
         
         // Add action buttons
@@ -5394,8 +6212,8 @@ function showTableSelectionForm(tables) {
     formContainer.style.transition = 'opacity 0.5s ease-out, transform 0.5s ease-out';
     
     let formHTML = `
-        <div class="message-bubble" style="width: 85% !important; max-width: none !important;">
-            <div class="bg-light rounded-3 px-4 py-3 shadow-sm" style="border: 2px solid #3b82f6;">
+        <div class="message-bubble bot" style="width: 75% !important; max-width: 75% !important;">
+            <div class="bg-light rounded-3 px-4 py-3 shadow-sm" style="border: 2px solid #3b82f6; width: 100%; max-width: 100%;">
                 <h5 class="text-primary mb-3">
                     <i class="fas fa-table me-2"></i>Select Database Table
                 </h5>
@@ -5470,8 +6288,8 @@ function showColumnSelectionForm(tableKey, tableName, columns) {
     formContainer.style.transition = 'opacity 0.5s ease-out, transform 0.5s ease-out';
     
     let formHTML = `
-        <div class="message-bubble" style="width: 85% !important; max-width: none !important;">
-            <div class="bg-light rounded-3 px-4 py-3 shadow-sm" style="border: 2px solid #3b82f6;">
+        <div class="message-bubble bot" style="width: 75% !important; max-width: 75% !important;">
+            <div class="bg-light rounded-3 px-4 py-3 shadow-sm" style="border: 2px solid #3b82f6; width: 100%; max-width: 100%;">
                 <h5 class="text-primary mb-3">
                     <i class="fas fa-columns me-2"></i>Select Columns for ${tableName}
                 </h5>
@@ -5840,7 +6658,7 @@ function showProductSearchInterface(products) {
             if (!contentDiv) {
                 contentDiv = document.createElement('div');
                 contentDiv.className = 'bg-light border rounded-3 px-3 py-2';
-                contentDiv.style.cssText = 'max-width: 75%; font-size: 0.875rem; width: auto;';
+                contentDiv.style.cssText = 'max-width: 100%; font-size: 0.875rem; width: 100%;';
                 wrapper.appendChild(contentDiv);
             }
             messageBubble = contentDiv;
@@ -6067,7 +6885,7 @@ function displayProductDetails(product) {
     
     const contentDiv = document.createElement('div');
     contentDiv.className = 'bg-light border rounded-3 px-4 py-3';
-    contentDiv.style.cssText = 'max-width: 85%; font-size: 0.875rem; width: auto;';
+    contentDiv.style.cssText = 'max-width: 100%; font-size: 0.875rem; width: 100%;';
     
     // Get translations
     const t_func = (typeof t !== 'undefined') ? t : (key) => key;
@@ -6403,6 +7221,9 @@ function showRecentSearches(inputElement) {
         }
     }
     
+    // Limit to only 3 most recent searches
+    const displaySearches = recentSearches.slice(0, 3);
+    
     const dropdown = document.createElement('div');
     dropdown.id = 'recentSearchesDropdown';
     dropdown.className = 'recent-searches';
@@ -6414,29 +7235,35 @@ function showRecentSearches(inputElement) {
         width: ${inputRect.width}px;
         background: white;
         border: 1px solid #e5e7eb;
-        border-radius: 8px;
-        box-shadow: 0 -4px 6px rgba(0, 0, 0, 0.1);
-        max-height: 200px;
-        overflow-y: auto;
+        border-radius: 12px;
+        box-shadow: 0 -8px 16px rgba(0, 0, 0, 0.12);
         z-index: 1000;
         transform: translateY(-100%);
+        overflow: hidden;
     `;
     
     dropdown.innerHTML = `
-        <div style="padding: 8px; border-bottom: 1px solid #e5e7eb; display: flex; justify-content: space-between; align-items: center; background: #f8f9fa;">
-            <span style="font-size: 0.75rem; color: #6b7280; font-weight: 600;">Recent Searches</span>
-            <button onclick="closeRecentSearches()" style="background: transparent; border: none; color: #6b7280; cursor: pointer; padding: 2px 6px; font-size: 0.875rem;" title="Close">
+        <div class="recent-searches-header">
+            <span class="recent-searches-title">
+                <i class="fas fa-clock me-2"></i>Recent Searches
+            </span>
+            <button onclick="closeRecentSearches()" class="recent-searches-close-btn" title="Close">
                 <i class="fas fa-times"></i>
             </button>
         </div>
-        ${recentSearches.map(term => `
-            <div class="recent-search-item" onclick="selectRecentSearch('${term.replace(/'/g, "\\'")}')">
-                <span><i class="fas fa-history me-2"></i>${term}</span>
-                <button class="btn btn-sm text-danger" onclick="event.stopPropagation(); removeRecentSearch('${term.replace(/'/g, "\\'")}')" style="background: transparent; border: none; padding: 0 4px;">
-                    <i class="fas fa-times"></i>
-                </button>
-            </div>
-        `).join('')}
+        <div class="recent-searches-list">
+            ${displaySearches.map(term => `
+                <div class="recent-search-item" onclick="selectRecentSearch('${term.replace(/'/g, "\\'")}')">
+                    <div class="recent-search-content">
+                        <i class="fas fa-history recent-search-icon"></i>
+                        <span class="recent-search-text">${term}</span>
+                    </div>
+                    <button class="recent-search-remove-btn" onclick="event.stopPropagation(); removeRecentSearch('${term.replace(/'/g, "\\'")}')" title="Remove">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+            `).join('')}
+        </div>
     `;
     
     document.body.appendChild(dropdown);

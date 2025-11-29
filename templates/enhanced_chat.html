@@ -1,163 +1,68 @@
 {% extends "base.html" %}
 
-{% block title %}HV (Powered by Quantum Blue AI) - Chat{% endblock %}
+{% block title %}R&B (Powered by Quantum Blue AI){% endblock %}
+
+{% block importmap %}
+<!-- Import map for Three.js modules - must be in head and before any module scripts -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.150.1/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.150.1/examples/jsm/"
+  }
+}
+</script>
+{% endblock %}
 
 {% block content %}
-<!-- CRITICAL: Block old cached scripts BEFORE anything loads -->
-<script>
-(function() {
-    'use strict';
-    const PAGE_VERSION = 'threejs-avatar-v3.0-SERVER-' + Date.now();
-    const SERVER_VERSION = '{{ cache_buster if cache_buster else "NO_SERVER_VERSION" }}';
-    console.log('═══════════════════════════════════════════════════════');
-    console.log('🚀 NEW CODE LOADING - Version:', PAGE_VERSION);
-    console.log('📦 SERVER VERSION:', SERVER_VERSION);
-    console.log('📅 Timestamp:', new Date().toISOString());
-    console.log('🔧 Using THREE.js for avatar (NOT Model Viewer)');
-    console.log('═══════════════════════════════════════════════════════');
-    
-    // CRITICAL: If we see old logs, something is wrong
-    if (!SERVER_VERSION || SERVER_VERSION === 'NO_SERVER_VERSION') {
-        console.error('❌ CRITICAL: Server version not found! Flask is serving OLD cached template!');
-        console.error('❌ Please restart Flask server and clear ALL caches!');
+<script type="module">
+const THREE_AVATAR_VERSION = '{{ cache_buster if cache_buster else range(1000, 9999) | random }}';
+const THREE_AVATAR_URL = "{{ url_for('enhanced_chatbot.serve_three_avatar') }}?v=" + THREE_AVATAR_VERSION + "&t=" + Date.now() + "&cb=" + Math.random();
+console.log('📦 Loading avatar script from:', THREE_AVATAR_URL);
+
+const script = document.createElement('script');
+script.type = 'module';
+script.src = THREE_AVATAR_URL;
+script.onerror = (error) => {
+    console.error('❌ Failed to load three_avatar.js:', error);
+    console.error('❌ Error details:', error.message || error);
+    const fallback = document.getElementById('simple-avatar-fallback');
+    if (fallback) {
+        fallback.style.display = 'flex';
+        console.log('✅ Showing fallback avatar due to script load error');
     }
-    
-    // Force clear any cached THREE.js globals
-    if (window.THREE) {
-        console.warn('⚠️ Clearing cached THREE.js object');
-        delete window.THREE;
-    }
-    
-    // CRITICAL: Check if we have old cached HTML - if so, force reload
-    // Check for old scripts in DOM
-    const oldScripts = [
-        document.querySelector('script[src*="three@0.149"]'),
-        document.querySelector('script[src*="three-vrm"]'),
-        document.querySelector('script[src*="GLTFLoader.js"]:not([type="module"])'),
-        ...Array.from(document.querySelectorAll('script')).filter(s => 
-            s.innerHTML && s.innerHTML.includes('Library Loading Check')
-        )
-    ].filter(Boolean);
-    
-    // If old scripts are found, just remove them and continue (no reload)
-    if (oldScripts.length > 0) {
-        console.warn('═══════════════════════════════════════════════════════');
-        console.warn('⚠️ OLD CACHED SCRIPTS DETECTED - Removing them...');
-        console.warn(`⚠️ Found ${oldScripts.length} old script(s) in page`);
-        
-        // Remove old scripts immediately and continue
-        oldScripts.forEach(s => {
-            console.warn('🚫 Removing old cached script:', s.src || 'inline script');
-            s.remove();
-        });
-        
-        console.warn('✅ Old scripts removed - continuing with new code');
-        console.warn('═══════════════════════════════════════════════════════');
-    }
-    
-    // Remove any old script tags immediately (but don't log excessively)
-    const oldScriptTags = document.querySelectorAll('script[src*="three@0.149"], script[src*="three-vrm"], script[src*="GLTFLoader.js"]:not([type="module"])');
-    if (oldScriptTags.length > 0) {
-        console.warn(`🚫 Found and removing ${oldScriptTags.length} old cached script(s)`);
-        oldScriptTags.forEach(s => s.remove());
-    }
-    console.log('🔄 Page version:', PAGE_VERSION, '- Clearing cached scripts');
-    
-    // If old THREE.js is already loaded, warn and clear
-    if (typeof THREE !== 'undefined') {
-        console.warn('⚠️ OLD THREE.js detected in cache - this should NOT be here!');
-        console.warn('⚠️ Please clear browser cache (Ctrl+Shift+Delete)');
-        // Try to clean up
-        delete window.THREE;
-        delete window.THREE_VRM;
-    }
-    
-    // Block script tags with Three.js, GLTFLoader, VRM, Babylon
-    const blockedPatterns = ['three.js', 'GLTFLoader', 'three-vrm', 'babylon'];
-    
-    // Remove any existing blocked scripts from DOM immediately
-    function removeBlockedScripts() {
-        const scripts = document.querySelectorAll('script[src]');
-        scripts.forEach(function(script) {
-            blockedPatterns.forEach(function(pattern) {
-                if (script.src && script.src.includes(pattern)) {
-                    console.warn('🚫 Removing cached script from DOM:', script.src);
-                    script.remove();
-                }
-            });
-        });
-    }
-    
-    // Run immediately
-    removeBlockedScripts();
-    
-    // Run again after a short delay to catch late-loading scripts
-    setTimeout(removeBlockedScripts, 100);
-    setTimeout(removeBlockedScripts, 500);
-    
-    // Intercept script tag creation
-    const Observer = window.MutationObserver || window.WebKitMutationObserver;
-    if (Observer) {
-        const observer = new Observer(function(mutations) {
-            mutations.forEach(function(mutation) {
-                mutation.addedNodes.forEach(function(node) {
-                    if (node.tagName === 'SCRIPT' && node.src) {
-                        blockedPatterns.forEach(function(pattern) {
-                            if (node.src.includes(pattern)) {
-                                console.warn('🚫 Blocked cached script:', node.src);
-                                node.remove();
-                                return false;
-                            }
-                        });
-                    }
-                });
-            });
-        });
-        observer.observe(document.head, { childList: true, subtree: true });
-        observer.observe(document.body, { childList: true, subtree: true });
-    }
-    
-    // Also override createElement early
-    const originalCreateElement = document.createElement.bind(document);
-    document.createElement = function(tagName, options) {
-        const element = originalCreateElement(tagName, options);
-        if (tagName.toLowerCase() === 'script') {
-            const originalSetAttribute = element.setAttribute.bind(element);
-            element.setAttribute = function(name, value) {
-                if (name === 'src' && value) {
-                    for (let i = 0; i < blockedPatterns.length; i++) {
-                        if (value.includes(blockedPatterns[i])) {
-                            console.warn('🚫 Prevented script:', value);
-                            return; // Block it
-                        }
-                    }
-                }
-                return originalSetAttribute(name, value);
-            };
+};
+script.onload = () => {
+    console.log('✅ three_avatar.js script loaded successfully');
+};
+document.head.appendChild(script);
+
+// Also show fallback avatar if avatar section is hidden (small screens)
+setTimeout(() => {
+    const avatarSection = document.querySelector('.avatar-section');
+    const fallback = document.getElementById('simple-avatar-fallback');
+    if (avatarSection && fallback) {
+        const display = window.getComputedStyle(avatarSection).display;
+        if (display === 'none') {
+            console.log('📱 Avatar section hidden (small screen), showing fallback in chat area');
+            // Don't show fallback here - let the avatar script handle it
         }
-        return element;
-    };
-    
-    console.log('✅ Early script blocker active');
-})();
+    }
+}, 500);
 </script>
+
+<script src="{{ url_for('static', filename='js/i18n.js') }}"></script>
+<script src="{{ url_for('static', filename='js/enhanced_chat.js') }}"></script>
+
 <div class="chat-container">
-    <!-- Left Side: 3D VRM Avatar -->
-    <div class="avatar-section" style="position: relative; z-index: 1; pointer-events: auto;">
-        <div id="avatar-container" style="width: 100%; height: 100%; position: relative; min-height: 500px; pointer-events: auto;">
-            <!-- THREE.js Canvas Container -->
-            <div id="three-canvas-container" style="width: 100%; height: 100%; position: absolute; top: 0; left: 0; z-index: 1; pointer-events: auto;">
-                <!-- THREE.js will render here -->
-            </div>
-            <!-- Fallback 2D Avatar (shown if THREE.js fails) -->
-            <div class="simple-avatar" id="simple-avatar-fallback" style="display: none; align-items: center; justify-content: center; position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 0;">
+    <div class="avatar-section">
+        <div id="avatar-container">
+            <div id="three-canvas-container"></div>
+            <div class="simple-avatar" id="simple-avatar-fallback">
                 <div style="text-align: center; position: relative;">
                     <div class="avatar-antenna"></div>
                     <div class="avatar-head">
-                        <div class="avatar-eyes">
-                            <div class="avatar-eye"></div>
-                            <div class="avatar-eye"></div>
-                        </div>
+                        <div class="avatar-eyes"><div class="avatar-eye"></div><div class="avatar-eye"></div></div>
                         <div class="avatar-mouth"></div>
                     </div>
                 </div>
@@ -165,122 +70,98 @@
         </div>
     </div>
 
-    <!-- Right Side: Chatbot Interface -->
     <div class="chat-section">
-        <div class="card shadow-lg h-100" style="position: relative;">
-            <div class="card-header bg-gradient-primary text-white d-flex justify-content-between align-items-center" style="position: relative;">
-                <div class="d-flex align-items-center">
-                    <img src="/static/Images/Q_logo_quantum_blue-removebg-preview.png" alt="Quantum Blue Logo" style="width: 180px; height: 80px; margin-right: -50px; margin-left: -50px; margin-top: -8px; object-fit: contain;">
-                    <h6 class="mb-0 me-3" style="font-size: 1.1rem;">
-                        HV (Powered by Quantum Blue AI)
-                    </h6>
+        <div class="glass-card" style="position: relative;">
+            
+            <div class="glass-header d-flex justify-content-between align-items-center">
+                <div class="d-flex align-items-center gap-3">
+                    <img src="/static/Images/Q_logo_quantum_blue-removebg-preview.png" alt="Logo" class="header-logo">
+                    <div class="d-flex flex-column justify-content-center">
+                        <span class="brand-title">R&B</span>
+                        <small class="brand-subtitle">(Powered by Quantum Blue AI)</small>
+                    </div>
                 </div>
-                <div class="btn-group" role="group">
-                    <button class="btn btn-sm btn-light d-flex align-items-center gap-1" onclick="toggleUserInfoPanel()" data-i18n-title="buttons.userInfo" title="Toggle User Info" id="userInfoToggleBtn">
-                        <i class="fas fa-chevron-down" id="userInfoToggleIcon"></i>
-                        <span data-i18n="buttons.userInfo">User Info</span>
+
+                <div class="d-flex gap-2">
+                    <button class="btn btn-pill-white btn-sm" onclick="toggleUserInfoPanel()" id="profileBtn">
+                        Profile <i class="fas fa-chevron-down ms-2" style="font-size: 0.7em;"></i>
                     </button>
-                    <a href="https://highvolt.tech/demo-ss-dashboard/" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-light d-flex align-items-center gap-1" data-i18n-title="buttons.dashboard" title="Open Dashboard">
-                        <i class="fas fa-chart-line"></i>
-                        <span data-i18n="buttons.dashboard">Dashboard</span>
+                    
+                    <a href="https://highvolt.tech/demo-ss-dashboard/" target="_blank" class="btn btn-pill-white btn-sm">
+                        Overview <i class="fas fa-file-alt ms-2" style="font-size: 0.8em;"></i>
                     </a>
-                    <select id="languageSelector" class="btn btn-sm btn-light" style="border: 1px solid #dee2e6; padding: 6px 12px; cursor: pointer;" onchange="changeLanguage(this.value)">
-                        <option value="en">🇺🇸 English</option>
-                        <option value="my">🇲🇲 မြန်မာ (Burmese)</option>
-                        <option value="hi">🇮🇳 हिंदी (Hindi)</option>
-                        <option value="te">🇮🇳 తెలుగు (Telugu)</option>
+
+                    <select id="languageSelector" class="btn btn-pill-white btn-sm" onchange="changeLanguage(this.value)">
+                        <option value="en">ENG(US)</option>
+                        <option value="my">MY(BUR)</option>
+                        <option value="hi">HIN(IND)</option>
                     </select>
-                    <button class="btn btn-sm btn-light d-flex align-items-center gap-1" onclick="resetChat()" data-i18n-title="buttons.reset" title="Reset Chat - Start New Conversation">
-                        <i class="fas fa-redo"></i>
-                        <span data-i18n="buttons.reset">Reset</span>
-                    </button>
-                    <button class="btn btn-sm btn-light d-flex align-items-center gap-1" onclick="viewCart()" data-i18n-title="buttons.cart" title="View Cart" id="cartButton" style="display: none;">
-                        <i class="fas fa-shopping-cart"></i>
-                        <span data-i18n="buttons.cart">Cart</span>
-                    </button>
                 </div>
             </div>
-            <div class="card-body p-0 d-flex flex-column">
-                
-                <!-- User Info Panel (hidden by default) -->
-                <div id="userInfoPanel" class="bg-gradient-light p-2 border-bottom shadow-sm" style="display: none;">
-                    <div class="d-flex justify-content-between align-items-center">
-                        <div class="user-info-item">
-                            <div class="d-flex align-items-center gap-2 mb-1">
-                                <i class="fas fa-user text-primary"></i>
-                                <span class="text-muted small" data-i18n="labels.user">User</span>
-                            </div>
-                            <div class="fw-bold text-primary" id="userName">-</div>
-                        </div>
-                        <div class="user-info-item">
-                            <div class="d-flex align-items-center gap-2 mb-1">
-                                <i class="fas fa-map-marker-alt text-primary"></i>
-                                <span class="text-muted small" data-i18n="labels.area">Area</span>
-                            </div>
-                            <div class="fw-bold text-primary" id="userArea">-</div>
-                        </div>
-                        <div class="user-info-item">
-                            <div class="d-flex align-items-center gap-2 mb-1">
-                                <i class="fas fa-tag text-primary"></i>
-                                <span class="text-muted small" data-i18n="labels.type">Type</span>
-                            </div>
-                            <div class="fw-bold text-primary" id="userType">-</div>
-                        </div>
+
+            <div id="userInfoPanel" class="user-info-dropdown" style="display: none;">
+                <div class="d-flex align-items-center mb-3 pb-2 border-bottom">
+                    <div class="bg-light rounded-circle d-flex align-items-center justify-content-center me-3" style="width: 40px; height: 40px;">
+                        <i class="fas fa-user text-primary"></i>
+                    </div>
+                    <div>
+                        <h6 class="mb-0 fw-bold text-dark">User Profile</h6>
+                        <small class="text-muted">Active Session</small>
                     </div>
                 </div>
-                
-                <!-- Chat Messages -->
-                <div id="chatMessages" class="chat-messages p-3 flex-grow-1" style="overflow-y: auto; min-height: 0;">
-                    <div class="text-center text-muted py-5">
-                        <img src="/static/Images/Q_logo_quantum_blue-removebg-preview.png" alt="Quantum Blue Logo" style="width: 180px; height: 100px; margin-bottom: 24px; object-fit: contain;">
-                        <h4>Welcome to HV (Powered by Quantum Blue AI)</h4>
-                        <p>Your intelligent assistant for orders, tracking, and more!</p>
+                <div class="mb-2">
+                    <small class="text-muted d-block">Username</small>
+                    <span id="userName" class="fw-medium text-dark">-</span>
+                </div>
+                <div class="mb-2">
+                    <small class="text-muted d-block">Area</small>
+                    <span id="userArea" class="fw-medium text-dark">-</span>
+                </div>
+                <div>
+                    <small class="text-muted d-block">Account Type</small>
+                    <span id="userType" class="fw-medium text-dark">-</span>
+                </div>
+            </div>
+
+            <div class="card-body">
+                <div id="chatMessages" class="chat-messages flex-grow-1 d-flex flex-column">
+                    
+                    <div class="inner-glass-card welcome-screen text-center">
+                        <div class="logo-container">
+                            <img src="/static/Images/Q_logo_quantum_blue-removebg-preview.png" alt="Logo" class="welcome-logo">
+                        </div>
+                        <h3 class="welcome-title">Welcome To R&B</h3>
+                        <p class="welcome-subtitle">Powered by Quantum Blue AI</p>
+                        <p class="welcome-text">Your intelligent assistant for orders, tracking, and more!</p>
+                    </div>
+
+                </div>
+                <div id="typingIndicator" class="typing-indicator" style="display: none;">
+                    <div class="typing-dots">
+                        <span></span><span></span><span></span>
                     </div>
                 </div>
-                
-                <!-- Action Buttons - REMOVED per user request -->
-                
-                <!-- Input Area -->
-                <div class="p-3 border-top">
-                    <div class="position-relative">
-                        <div class="input-group">
-                            <!-- Voice button DISABLED -->
-                            <!-- <button class="btn btn-outline-secondary" id="voiceButton" type="button" 
-                                    onclick="toggleVoiceInput()" title="Voice Input (Click and hold to speak)">
-                                <i class="fas fa-microphone" id="voiceIcon"></i>
-                            </button> -->
-                            <input type="text" id="messageInput" class="form-control" 
-                                   data-i18n-placeholder="placeholders.typeMessage"
-                                   placeholder="Type your message..." autocomplete="off" />
-                            <button class="btn btn-primary" onclick="sendMessage()" id="sendButton" disabled>
-                                <i class="fas fa-paper-plane"></i> Send
-                            </button>
-                        </div>
-                        <!-- Product Recommendations Dropdown -->
-                        <div id="productRecommendations" class="position-absolute w-100 bg-white border rounded shadow-lg" 
-                             style="top: 100%; z-index: 1000; max-height: 300px; overflow-y: auto; display: none; margin-top: 2px;">
-                            <div id="recommendationsList"></div>
-                        </div>
-                    </div>
-                    <div class="form-text small text-muted mt-1">
-                        Press Enter to send • Shift+Enter for new line
-                    </div>
-                    <!-- Voice Status Indicator - DISABLED -->
-                    <!-- <div id="voiceStatus" class="text-muted small mt-2" style="display: none;">
-                        <div class="d-flex align-items-center">
-                            <div class="spinner-border spinner-border-sm me-2 text-primary" role="status">
-                                <span class="visually-hidden">Listening...</span>
-                            </div>
-                            <span id="voiceStatusText">Listening...</span>
-                        </div>
-                    </div> -->
-                    <div id="typingIndicator" class="text-muted small mt-2" style="display: none;">
-                        <div class="d-flex align-items-center">
-                            <div class="spinner-border spinner-border-sm me-2" role="status">
-                                <span class="visually-hidden">Loading...</span>
-                            </div>
-                            <span>Quantum Blue is thinking...</span>
-                        </div>
+            </div>
+
+             <div class="glass-footer">
+                <div class="input-wrapper mb-3">
+                    <input type="text" id="messageInput" class="glass-input" placeholder="Type your message">
+                    <button class="btn btn-primary send-btn" onclick="sendMessage()" id="sendButton">
+                        <i class="fas fa-paper-plane me-2"></i> Send
+                    </button>
+                </div>
+
+                <div class="d-flex justify-content-between align-items-center">
+                    <small class="text-white-50 ms-2" style="font-size: 0.7rem;">Press Enter to send • Shift+Enter for new line</small>
+                    
+                    <div class="d-flex gap-2">
+                        <button class="btn btn-glass-dark-grey btn-sm px-3" onclick="resetChat()">
+                            Reset <i class="fas fa-redo-alt ms-2" style="font-size: 0.8em;"></i>
+                        </button>
+                        
+                        <button class="btn btn-primary btn-sm rounded-pill px-4 d-flex align-items-center" onclick="viewCart()" id="cartButton">
+                            Orders <i class="fas fa-shopping-cart ms-2" style="font-size: 0.8em;"></i>
+                        </button>
                     </div>
                 </div>
             </div>
@@ -289,163 +170,35 @@
 </div>
 
 <!-- Cart Modal -->
-<div class="modal fade" id="cartModal" tabindex="-1">
-    <div class="modal-dialog modal-lg">
+<div class="modal fade" id="cartModal" tabindex="-1" aria-labelledby="cartModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
         <div class="modal-content">
             <div class="modal-header">
-                <h5 class="modal-title">
-                    <i class="fas fa-shopping-cart"></i> Your Cart
+                <h5 class="modal-title" id="cartModalLabel">
+                    <i class="fas fa-shopping-cart me-2"></i>Shopping Cart
                 </h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
-            <div class="modal-body">
-                <div id="cartContent">
-                    <!-- Cart items will be loaded here -->
-                </div>
+            <div class="modal-body" id="cartContent">
+                <p class="text-muted">Loading cart...</p>
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
-                <button type="button" class="btn btn-info" onclick="saveCartAsTemplate()">
-                    <i class="fas fa-save"></i> Save as Template
-                </button>
-                <button type="button" class="btn btn-success" onclick="placeOrder()">Confirm Cart & Place Order</button>
+                <button type="button" class="btn btn-primary" onclick="placeOrder()">Place Order</button>
             </div>
         </div>
     </div>
 </div>
 
-<!-- Order Summary Modal -->
-<div class="modal fade" id="orderSummaryModal" tabindex="-1">
-    <div class="modal-dialog modal-lg">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">
-                    <i class="fas fa-receipt"></i> Order Summary
-                </h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-                <div id="orderSummaryContent">
-                    <!-- Order summary will be loaded here -->
-                </div>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
-                <button type="button" class="btn btn-success" onclick="confirmPlaceOrder()">Confirm Order</button>
-            </div>
-        </div>
-    </div>
-</div>
-
-<!-- Script blocker is already installed above -->
-
-<!-- THREE.js Avatar Loader (Module) -->
-<script type="module">
-// Add aggressive cache-busting with server timestamp
-const THREE_AVATAR_VERSION = '{{ cache_buster if cache_buster else range(1000, 9999) | random }}';
-const THREE_AVATAR_URL = "{{ url_for('static', filename='js/three_avatar.js') }}?v=" + THREE_AVATAR_VERSION + "&t=" + Date.now() + "&cb=" + Math.random();
-
-console.log('[THREE-MODULE-LOADER] Loading THREE.js avatar module...');
-console.log('[THREE-MODULE-LOADER] URL:', THREE_AVATAR_URL);
-
-// Create and load the module
-const script = document.createElement('script');
-script.type = 'module';
-script.src = THREE_AVATAR_URL;
-
-script.onload = () => {
-    console.log('[THREE-MODULE-LOADER] ✅ THREE.js avatar module script tag loaded');
-};
-
-script.onerror = (error) => {
-    console.error('[THREE-MODULE-LOADER] ❌ Failed to load THREE.js avatar module:', error);
-    console.error('[THREE-MODULE-LOADER] Error details:', {
-        type: error.type,
-        target: error.target,
-        message: error.message
-    });
-    
-    // Show fallback immediately
-    const fallback = document.getElementById('simple-avatar-fallback');
-    const status = document.getElementById('status-text');
-    if (fallback) {
-        fallback.style.display = 'flex';
-    }
-    if (status) {
-        status.textContent = 'Using fallback avatar (Module load failed)';
-    }
-};
-
-document.head.appendChild(script);
-</script>
-
-<!-- 
-    OLD MODEL-VIEWER CODE REMOVED - Now using THREE.js for avatar loading
-    See: static/js/three_avatar.js
-    
-    All old code has been completely removed.
--->
-
-<!-- Avatar Functions (for chat integration) - Using three_avatar.js instead of avatar.js -->
-<!-- Azure Speech SDK (for voice recognition) - DISABLED -->
-<!-- <script src="https://unpkg.com/microsoft-cognitiveservices-speech-sdk@latest/distrib/browser/microsoft.cognitiveservices.speech.sdk.bundle-min.js" onerror="console.error('Failed to load Azure Speech SDK from CDN')"></script> -->
-<!-- i18n initialization must load before enhanced_chat.js -->
-<script src="{{ url_for('static', filename='js/i18n.js') }}?v={{ cache_buster if cache_buster else range(1000, 9999) | random }}&t={{ range(1000, 9999) | random }}"></script>
-<!-- Voice interaction module - DISABLED -->
-<!-- <script src="{{ url_for('static', filename='js/voice_interaction.js') }}?v={{ cache_buster if cache_buster else range(1000, 9999) | random }}&t={{ range(1000, 9999) | random }}"></script> -->
-<script src="{{ url_for('static', filename='js/enhanced_chat.js') }}?v={{ cache_buster if cache_buster else range(1000, 9999) | random }}&t={{ range(1000, 9999) | random }}"></script>
-
-<!-- User Info Panel Toggle Function -->
 <script>
 function toggleUserInfoPanel() {
     const panel = document.getElementById('userInfoPanel');
-    const icon = document.getElementById('userInfoToggleIcon');
-    const btn = document.getElementById('userInfoToggleBtn');
-    
+    // Simple toggle
     if (panel.style.display === 'none' || panel.style.display === '') {
         panel.style.display = 'block';
-        icon.classList.remove('fa-chevron-down');
-        icon.classList.add('fa-chevron-up');
-        if (btn) {
-            btn.classList.add('active');
-        }
     } else {
         panel.style.display = 'none';
-        icon.classList.remove('fa-chevron-up');
-        icon.classList.add('fa-chevron-down');
-        if (btn) {
-            btn.classList.remove('active');
-        }
     }
 }
-</script>
-
-<!-- Fallback: If THREE.js module fails to load, show fallback avatar -->
-<script>
-(function() {
-    console.log('[FALLBACK-CHECK] Checking if THREE.js avatar loaded...');
-    
-    // Wait for THREE.js to initialize
-    setTimeout(() => {
-        // Check if avatar loaded event was fired
-        if (!window.avatarLoaded && typeof window.avatarSpeak !== 'function') {
-            console.warn('[FALLBACK-CHECK] THREE.js avatar not loaded, showing fallback');
-            const fallback = document.getElementById('simple-avatar-fallback');
-            const status = document.getElementById('status-text');
-            if (fallback) {
-                fallback.style.display = 'flex';
-            }
-            if (status) {
-                status.textContent = 'Using fallback avatar';
-            }
-        }
-    }, 5000);
-    
-    // Listen for avatar loaded event
-    window.addEventListener('avatarLoaded', () => {
-        console.log('[FALLBACK-CHECK] ✅ Avatar loaded successfully');
-        window.avatarLoaded = true;
-    });
-})();
 </script>
 {% endblock %}

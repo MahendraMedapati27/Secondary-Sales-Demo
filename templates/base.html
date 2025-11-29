@@ -16,6 +16,7 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v={{ cache_buster if cache_buster is defined else '' }}&t={{ range(1000, 9999) | random }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/interactive.css') }}?v={{ cache_buster if cache_buster is defined else '' }}&t={{ range(1000, 9999) | random }}">
     {% block extra_css %}{% endblock %}
+    {% block importmap %}{% endblock %}
 </head>
 <body>
     <!-- Navbar removed for kiosk-style chat interface -->

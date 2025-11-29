@@ -603,10 +603,6 @@ if (document.readyState === 'loading') {
 
 // Function to change language
 function changeLanguage(lang) {
-    // Update voice language if voice interaction is available
-    if (typeof updateVoiceLanguage === 'function') {
-        updateVoiceLanguage(lang);
-    }
     // Multi-language feature disabled - show coming soon popup
     // Reset selector to English
     const selector = document.getElementById('languageSelector');
@@ -620,7 +616,46 @@ function changeLanguage(lang) {
     } else {
         alert('Multi-language feature coming soon!');
     }
-    // Dead code removed - multi-language feature not implemented
+    return;
+    
+    // Disabled code below (kept for future use)
+    /*
+    if (!i18n) {
+        console.error('i18n not initialized');
+        return;
+    }
+    i18n.changeLanguage(lang).then(() => {
+        localStorage.setItem('preferredLanguage', lang);
+        // Update UI immediately
+        updateAllUITexts();
+        // Also update after a short delay to catch any dynamically added elements
+        setTimeout(() => {
+            updateAllUITexts();
+        }, 100);
+        
+        // Update language selector
+        const selector = document.getElementById('languageSelector');
+        if (selector) {
+            selector.value = lang;
+        }
+        
+        // Send language preference to backend via a message
+        // This ensures backend knows the language for future responses
+        if (typeof sendMessage === 'function') {
+            // Store language in session by sending a hidden message
+            fetch('/enhanced-chat/message', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    message: 'lang_change',
+                    language: lang
+                })
+            }).catch(err => console.log('Language update sent'));
+        }
+    });
+    */
 }
 
 // Function to update all UI texts

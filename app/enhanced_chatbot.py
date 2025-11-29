@@ -1,6 +1,6 @@
 from flask import Blueprint, render_template, request, jsonify, session, current_app, make_response, send_file
 from app import db 
-from app.models import Conversation, User, Product, Order, OrderItem, ChatSession, CartItem, DealerWiseStockDetails, Customer, FOC
+from app.models import Conversation, User, Product, Order, OrderItem, ChatSession, CartItem, DealerWiseStockDetails, Customer, FOC, PendingOrderProducts
 from app.database_service import DatabaseService
 from app.llm_classification_service import LLMClassificationService
 from app.web_search_service import WebSearchService
@@ -1610,26 +1610,66 @@ def handle_track_order(user_message, user, context_data=None):
                 if order_stat['success']:
                     order = Order.query.filter_by(order_id=order_id).first()
                     if order:
-                        # Get order items with FOC
+                        # Get order items with FOC - use adjusted quantities if available
                         items_list = []
                         total_items = 0
                         for item in order.order_items:
+                            # Use adjusted_quantity if available (after dealer confirmation), otherwise use original quantity
+                            actual_quantity = item.adjusted_quantity if item.adjusted_quantity is not None else item.quantity
                             free_qty = item.free_quantity or 0
-                            total_qty = item.quantity + free_qty
+                            total_qty = actual_quantity + free_qty
                             total_items += total_qty
+                            
+                            # Recalculate total_price based on adjusted quantity if quantity was adjusted
+                            unit_price = float(item.unit_price) if item.unit_price else 0.0
+                            if item.adjusted_quantity is not None and item.adjusted_quantity != item.quantity:
+                                # Quantity was adjusted, recalculate total_price based on adjusted quantity
+                                total_price = float(actual_quantity * unit_price)
+                            else:
+                                # Use original total_price if quantity wasn't adjusted
+                                total_price = float(item.total_price) if item.total_price else 0.0
                             
                             items_list.append({
                                 'product_name': item.product.product_name,
                                 'product_code': item.product_code,
-                                'quantity': item.quantity,
+                                'quantity': actual_quantity,  # Use adjusted quantity if available
                                 'free_quantity': free_qty,
                                 'total_quantity': total_qty,
-                                'unit_price': item.unit_price,
-                                'total_price': item.total_price
+                                'unit_price': unit_price,
+                                'total_price': total_price  # Recalculated if quantity was adjusted
                             })
+                        
+                        # Check if this order was created by fulfilling a pending order
+                        fulfilled_pending = PendingOrderProducts.query.filter_by(fulfilled_order_id=order.order_id).all()
                         
                         # Build response with order details using bullet points
                         msg = f"**📦 Order Details**\n\n"
+                        
+                        # Add special note for fulfilled pending orders
+                        if fulfilled_pending:
+                            msg += "⚠️ **This order was created by fulfilling a previous pending order.**\n"
+                            for p in fulfilled_pending:
+                                original_order = None
+                                if p.original_order_id:
+                                    original_order = Order.query.filter_by(order_id=p.original_order_id).first()
+                                
+                                original_date = original_order.created_at.strftime('%B %d, %Y at %I:%M %p') if (original_order and original_order.created_at) else 'N/A'
+                                msg += f"• Original Order ID: **{p.original_order_id or 'N/A'}** (placed on {original_date})\n"
+                                msg += f"  - Product: {p.product_name} ({p.product_code})\n"
+                                msg += f"  - Requested Quantity: {p.requested_quantity} units\n"
+                            msg += "\n"
+                        
+                        # Add concise timeline information
+                        msg += "**⏱️ Order Timeline:**\n"
+                        placed_at = order.created_at.strftime('%B %d, %Y at %I:%M %p') if order.created_at else 'N/A'
+                        confirmed_at = order.distributor_confirmed_at.strftime('%B %d, %Y at %I:%M %p') if order.distributor_confirmed_at else None
+                        delivered_at = order.delivered_at.strftime('%B %d, %Y at %I:%M %p') if order.delivered_at else None
+                        
+                        msg += f"• Order placed: {placed_at}\n"
+                        msg += f"• Dealer confirmed: {confirmed_at or 'Not yet confirmed by dealer'}\n"
+                        msg += f"• Delivered to customer: {delivered_at or 'Not yet delivered'}\n\n"
+                        
+                        # Standard order information block
                         msg += f"**📋 Order Information:**\n"
                         msg += f"• **Order ID:** {order.order_id}\n"
                         msg += f"• **Status:** {order.status.replace('_', ' ').title()}\n"
@@ -2929,14 +2969,24 @@ def select_order():
         dealer_unique_ids = [d.unique_id for d in dealers_in_area] if dealers_in_area else []
         
         for item in order.order_items:
+            # Use adjusted_quantity if available (after dealer confirmation), otherwise use original quantity
+            # This ensures we display the actual dispatched quantity, not the original ordered quantity
+            actual_quantity = item.adjusted_quantity if item.adjusted_quantity is not None else item.quantity
             free_qty = item.free_quantity or 0
-            total_qty = item.quantity + free_qty
+            # When quantity is adjusted, FOC may have been moved to pending, so use current free_quantity
+            total_qty = actual_quantity + free_qty
             total_items += total_qty
             
-            # Get lot number from DealerWiseStockDetails for this product
+            # Get lot number - prefer adjusted_lot_number if available, otherwise from DealerWiseStockDetails
             lot_number = None
             expiry_date = None
-            if dealer_unique_ids:
+            
+            # First check if adjusted_lot_number exists (from dealer confirmation)
+            if item.adjusted_lot_number:
+                lot_number = item.adjusted_lot_number
+            
+            # If no adjusted lot number, try to get from DealerWiseStockDetails
+            if not lot_number and dealer_unique_ids:
                 # Get the first available stock detail with lot number for this product
                 # Use FEFO (First Expiry First Out) - earliest expiry first
                 from sqlalchemy import case
@@ -2957,17 +3007,33 @@ def select_order():
                     lot_number = stock_detail.lot_number
                     expiry_date = stock_detail.expiry_date.strftime('%Y-%m-%d') if stock_detail.expiry_date else None
             
+            # Prefer adjusted_expiry_date if available
+            if item.adjusted_expiry_date:
+                expiry_date = item.adjusted_expiry_date.strftime('%Y-%m-%d')
+            
+            # Recalculate total_price based on adjusted quantity if quantity was adjusted
+            unit_price = float(item.unit_price) if item.unit_price else 0.0
+            if item.adjusted_quantity is not None and item.adjusted_quantity != item.quantity:
+                # Quantity was adjusted, recalculate total_price based on adjusted quantity
+                total_price = float(actual_quantity * unit_price)
+            else:
+                # Use original total_price if quantity wasn't adjusted
+                total_price = float(item.total_price) if item.total_price else 0.0
+            
             items_list.append({
                 'id': item.id,  # Include item ID for editing
                 'product_name': item.product.product_name,
                 'product_code': item.product_code,
-                'quantity': item.quantity,
+                'quantity': actual_quantity,  # Use adjusted quantity if available
+                'original_quantity': item.quantity,  # Store original quantity for comparison
                 'free_quantity': free_qty,
                 'total_quantity': total_qty,
-                'unit_price': float(item.unit_price) if item.unit_price else 0.0,
-                'total_price': float(item.total_price) if item.total_price else 0.0,
-                'lot_number': lot_number,  # Include lot number from database
-                'expiry_date': expiry_date  # Include expiry date from database
+                'unit_price': unit_price,
+                'total_price': total_price,  # Recalculated if quantity was adjusted
+                'lot_number': lot_number,  # Prefer adjusted_lot_number, fallback to stock details
+                'expiry_date': expiry_date,  # Prefer adjusted_expiry_date, fallback to stock details
+                'adjusted_quantity': item.adjusted_quantity,  # Include for reference
+                'adjustment_reason': item.adjustment_reason  # Include adjustment reason if available
             })
         
         # Get customer info if available
@@ -2993,7 +3059,66 @@ def select_order():
                 customer_name = f"{customer.name} ({customer.unique_id})"
                 customer_id = customer.unique_id
         
-        # Build detailed response
+        # Find any pending orders that were fulfilled by this order
+        pending_sources = PendingOrderProducts.query.filter_by(fulfilled_order_id=order.order_id).all()
+        pending_source_orders = []
+        for p in pending_sources:
+            original_order = None
+            if p.original_order_id:
+                original_order = Order.query.filter_by(order_id=p.original_order_id).first()
+            original_date = original_order.created_at.strftime('%Y-%m-%d %H:%M:%S') if (original_order and original_order.created_at) else None
+            pending_source_orders.append({
+                'pending_id': p.id,
+                'original_order_id': p.original_order_id,
+                'product_code': p.product_code,
+                'product_name': p.product_name,
+                'requested_quantity': p.requested_quantity,
+                'original_order_date': original_date
+            })
+        
+        # Get delivery partner info if available
+        delivery_partner_name = None
+        delivery_partner_email = None
+        delivery_partner_phone = None
+        delivery_partner_unique_id = None
+        if order.delivery_partner_id:
+            delivery_partner = User.query.get(order.delivery_partner_id)
+            if delivery_partner:
+                delivery_partner_name = delivery_partner.name
+                delivery_partner_email = delivery_partner.email
+                delivery_partner_phone = delivery_partner.phone
+                delivery_partner_unique_id = delivery_partner.unique_id
+        elif order.delivery_partner_unique_id:
+            delivery_partner = User.query.filter_by(unique_id=order.delivery_partner_unique_id).first()
+            if delivery_partner:
+                delivery_partner_name = delivery_partner.name
+                delivery_partner_email = delivery_partner.email
+                delivery_partner_phone = delivery_partner.phone
+                delivery_partner_unique_id = delivery_partner.unique_id
+        
+        # Recalculate order totals based on adjusted quantities if any items were adjusted
+        # Sum up all item total prices (which are already recalculated based on adjusted quantities)
+        recalculated_subtotal = sum(item.get('total_price', 0) for item in items_list)
+        # Check if any item has adjusted_quantity that differs from original_quantity
+        has_adjustments = any(item.get('adjusted_quantity') is not None and 
+                             item.get('adjusted_quantity') != item.get('original_quantity', 0) 
+                             for item in items_list)
+        
+        # Use recalculated values if quantities were adjusted, otherwise use original order values
+        if has_adjustments:
+            tax_rate = float(order.tax_rate) if hasattr(order, 'tax_rate') and order.tax_rate else 0.05
+            recalculated_tax = recalculated_subtotal * tax_rate
+            recalculated_total = recalculated_subtotal + recalculated_tax
+            subtotal = recalculated_subtotal
+            tax_amount = recalculated_tax
+            total_amount = recalculated_total
+        else:
+            subtotal = float(order.subtotal) if hasattr(order, 'subtotal') and order.subtotal else 0.0
+            tax_rate = float(order.tax_rate) if hasattr(order, 'tax_rate') and order.tax_rate else 0.05
+            tax_amount = float(order.tax_amount) if hasattr(order, 'tax_amount') and order.tax_amount else 0.0
+            total_amount = float(order.total_amount) if order.total_amount else 0.0
+        
+        # Build detailed response including a timeline-friendly set of timestamps
         order_details = {
             'order_id': order.order_id,
             'mr_name': order.mr.name if order.mr else 'N/A',
@@ -3001,11 +3126,29 @@ def select_order():
             'mr_phone': order.mr.phone if order.mr else 'N/A',
             'status': order.status,
             'status_display': (order.status or 'Unknown').replace('_', ' ').title(),
-            'total_amount': float(order.total_amount) if order.total_amount else 0.0,
+            'order_stage': getattr(order, 'order_stage', None),
+            'subtotal': subtotal,
+            'tax_rate': tax_rate,
+            'tax_amount': tax_amount,
+            'total_amount': total_amount,
             'total_items': total_items,
+            # Base timestamps
             'order_date': order.created_at.strftime('%Y-%m-%d') if order.created_at else 'N/A',
             'order_time': order.created_at.strftime('%H:%M') if order.created_at else 'N/A',
             'order_datetime': order.created_at.strftime('%Y-%m-%d %H:%M:%S') if order.created_at else 'N/A',
+            # Timeline specific fields (ISO strings so frontend can render nicely)
+            'placed_at': order.created_at.isoformat() if order.created_at else None,
+            'distributor_confirmed_at': order.distributor_confirmed_at.isoformat() if order.distributor_confirmed_at else None,
+            'delivered_at': order.delivered_at.isoformat() if order.delivered_at else None,
+            'last_updated_at': order.updated_at.isoformat() if order.updated_at else None,
+            # Pending-order linkage info
+            'is_fulfilled_pending_order': True if pending_sources else False,
+            'pending_source_orders': pending_source_orders,
+            # Delivery partner info
+            'delivery_partner_name': delivery_partner_name,
+            'delivery_partner_email': delivery_partner_email,
+            'delivery_partner_phone': delivery_partner_phone,
+            'delivery_partner_unique_id': delivery_partner_unique_id,
             'area': order.mr.area if order.mr else 'N/A',
             'customer_name': customer_name,
             'customer_id': customer_id,
