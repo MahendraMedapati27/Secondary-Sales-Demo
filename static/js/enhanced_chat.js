@@ -1828,6 +1828,26 @@ function displayOrderDetails(orderDetails) {
             });
             message += `\n`;
         }
+        
+        // Add notice about pending orders created FROM this order (when partially dispatched)
+        if (orderDetails.has_pending_orders && orderDetails.pending_orders_created && orderDetails.pending_orders_created.length > 0) {
+            message += `📋 **⚠️ Partial Dispatch Notice:**\n\n`;
+            message += `This order was partially dispatched. Some items are still pending and will be fulfilled when stock becomes available.\n\n`;
+            message += `**Pending Items:**\n\n`;
+            orderDetails.pending_orders_created.forEach(p => {
+                const statusBadge = p.status === 'fulfilled' ? '✅ Fulfilled' : '⏳ Pending';
+                message += `• **${p.product_name}** (${p.product_code})\n`;
+                message += `  - Pending Quantity: ${p.requested_quantity} paid + ${p.original_foc_quantity} FOC = ${p.total_pending_quantity} total units\n`;
+                message += `  - Status: ${statusBadge}\n`;
+                if (p.fulfilled_order_id) {
+                    message += `  - Fulfilled Order ID: **${p.fulfilled_order_id}** (created on ${p.fulfilled_order_date ? formatOrFallback(p.fulfilled_order_date) : 'N/A'})\n`;
+                } else {
+                    message += `  - Created: ${p.created_at ? formatOrFallback(p.created_at) : 'N/A'}\n`;
+                }
+                message += `\n`;
+            });
+            message += `\n`;
+        }
 
         // Add message first
         addMessage(message, 'bot');
@@ -4600,6 +4620,26 @@ function displayMROrderDetails(order) {
             message += `\n`;
         }
         
+        // Add notice about pending orders created FROM this order (when partially dispatched)
+        if (order.has_pending_orders && order.pending_orders_created && order.pending_orders_created.length > 0) {
+            message += `📋 **⚠️ Partial Dispatch Notice:**\n\n`;
+            message += `This order was partially dispatched. Some items are still pending and will be fulfilled when stock becomes available.\n\n`;
+            message += `**Pending Items:**\n\n`;
+            order.pending_orders_created.forEach(p => {
+                const statusBadge = p.status === 'fulfilled' ? '✅ Fulfilled' : '⏳ Pending';
+                message += `• **${p.product_name}** (${p.product_code})\n`;
+                message += `  - Pending Quantity: ${p.requested_quantity} paid + ${p.original_foc_quantity} FOC = ${p.total_pending_quantity} total units\n`;
+                message += `  - Status: ${statusBadge}\n`;
+                if (p.fulfilled_order_id) {
+                    message += `  - Fulfilled Order ID: **${p.fulfilled_order_id}** (created on ${p.fulfilled_order_date ? formatOrFallback(p.fulfilled_order_date) : 'N/A'})\n`;
+                } else {
+                    message += `  - Created: ${p.created_at ? formatOrFallback(p.created_at) : 'N/A'}\n`;
+                }
+                message += `\n`;
+            });
+            message += `\n`;
+        }
+        
         // Add message first
         addMessage(message, 'bot');
         
@@ -5008,6 +5048,26 @@ function displayDistributorOrderDetails(order) {
                 message += `• Original Order ID: **${p.original_order_id || 'N/A'}** (placed on ${p.original_order_date ? formatOrFallback(p.original_order_date) : 'N/A'})\n`;
                 message += `  - Product: ${p.product_name} (${p.product_code})\n`;
                 message += `  - Requested Quantity: ${p.requested_quantity} units\n`;
+            });
+            message += `\n`;
+        }
+        
+        // Add notice about pending orders created FROM this order (when partially dispatched)
+        if (order.has_pending_orders && order.pending_orders_created && order.pending_orders_created.length > 0) {
+            message += `📋 **⚠️ Partial Dispatch Notice:**\n\n`;
+            message += `This order was partially dispatched. Some items are still pending and will be fulfilled when stock becomes available.\n\n`;
+            message += `**Pending Items:**\n\n`;
+            order.pending_orders_created.forEach(p => {
+                const statusBadge = p.status === 'fulfilled' ? '✅ Fulfilled' : '⏳ Pending';
+                message += `• **${p.product_name}** (${p.product_code})\n`;
+                message += `  - Pending Quantity: ${p.requested_quantity} paid + ${p.original_foc_quantity} FOC = ${p.total_pending_quantity} total units\n`;
+                message += `  - Status: ${statusBadge}\n`;
+                if (p.fulfilled_order_id) {
+                    message += `  - Fulfilled Order ID: **${p.fulfilled_order_id}** (created on ${p.fulfilled_order_date ? formatOrFallback(p.fulfilled_order_date) : 'N/A'})\n`;
+                } else {
+                    message += `  - Created: ${p.created_at ? formatOrFallback(p.created_at) : 'N/A'}\n`;
+                }
+                message += `\n`;
             });
             message += `\n`;
         }

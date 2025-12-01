@@ -3076,6 +3076,28 @@ def select_order():
                 'original_order_date': original_date
             })
         
+        # Find any pending orders that were created FROM this order (when order was partially dispatched)
+        pending_orders_from_this = PendingOrderProducts.query.filter_by(original_order_id=order.order_id).all()
+        pending_orders_created = []
+        for p in pending_orders_from_this:
+            fulfilled_order = None
+            fulfilled_order_date = None
+            if p.fulfilled_order_id:
+                fulfilled_order = Order.query.filter_by(order_id=p.fulfilled_order_id).first()
+                fulfilled_order_date = fulfilled_order.created_at.strftime('%Y-%m-%d %H:%M:%S') if (fulfilled_order and fulfilled_order.created_at) else None
+            pending_orders_created.append({
+                'pending_id': p.id,
+                'product_code': p.product_code,
+                'product_name': p.product_name,
+                'requested_quantity': p.requested_quantity,
+                'original_foc_quantity': p.original_foc_quantity or 0,
+                'total_pending_quantity': (p.requested_quantity or 0) + (p.original_foc_quantity or 0),
+                'status': p.status,
+                'fulfilled_order_id': p.fulfilled_order_id,
+                'fulfilled_order_date': fulfilled_order_date,
+                'created_at': p.created_at.strftime('%Y-%m-%d %H:%M:%S') if p.created_at else None
+            })
+        
         # Get delivery partner info if available
         delivery_partner_name = None
         delivery_partner_email = None
@@ -3144,6 +3166,9 @@ def select_order():
             # Pending-order linkage info
             'is_fulfilled_pending_order': True if pending_sources else False,
             'pending_source_orders': pending_source_orders,
+            # Pending orders created FROM this order (when partially dispatched)
+            'has_pending_orders': True if pending_orders_created else False,
+            'pending_orders_created': pending_orders_created,
             # Delivery partner info
             'delivery_partner_name': delivery_partner_name,
             'delivery_partner_email': delivery_partner_email,
