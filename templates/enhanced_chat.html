@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}HV (Powered by Quantum Blue AI){% endblock %}
+{% block title %}R&B (Powered by Quantum Blue AI){% endblock %}
 
 {% block importmap %}
 <!-- Import map for Three.js modules - must be in head and before any module scripts -->
@@ -18,37 +18,15 @@
 <script type="module">
 const THREE_AVATAR_VERSION = '{{ cache_buster if cache_buster else range(1000, 9999) | random }}';
 const THREE_AVATAR_URL = "{{ url_for('enhanced_chatbot.serve_three_avatar') }}?v=" + THREE_AVATAR_VERSION + "&t=" + Date.now() + "&cb=" + Math.random();
-console.log('📦 Loading avatar script from:', THREE_AVATAR_URL);
 
 const script = document.createElement('script');
 script.type = 'module';
 script.src = THREE_AVATAR_URL;
 script.onerror = (error) => {
-    console.error('❌ Failed to load three_avatar.js:', error);
-    console.error('❌ Error details:', error.message || error);
     const fallback = document.getElementById('simple-avatar-fallback');
-    if (fallback) {
-        fallback.style.display = 'flex';
-        console.log('✅ Showing fallback avatar due to script load error');
-    }
-};
-script.onload = () => {
-    console.log('✅ three_avatar.js script loaded successfully');
+    if (fallback) fallback.style.display = 'flex';
 };
 document.head.appendChild(script);
-
-// Also show fallback avatar if avatar section is hidden (small screens)
-setTimeout(() => {
-    const avatarSection = document.querySelector('.avatar-section');
-    const fallback = document.getElementById('simple-avatar-fallback');
-    if (avatarSection && fallback) {
-        const display = window.getComputedStyle(avatarSection).display;
-        if (display === 'none') {
-            console.log('📱 Avatar section hidden (small screen), showing fallback in chat area');
-            // Don't show fallback here - let the avatar script handle it
-        }
-    }
-}, 500);
 </script>
 
 <script src="{{ url_for('static', filename='js/i18n.js') }}"></script>
@@ -71,31 +49,79 @@ setTimeout(() => {
     </div>
 
     <div class="chat-section">
-        <div class="glass-card" style="position: relative;">
-            
-            <div class="glass-header d-flex justify-content-between align-items-center">
-                <div class="d-flex align-items-center gap-3">
-                    <img src="/static/Images/Q_logo_quantum_blue-removebg-preview.png" alt="Logo" class="header-logo">
-                    <div class="d-flex flex-column justify-content-center">
-                        <span class="brand-title">HV</span>
-                        <small class="brand-subtitle">(Powered by Quantum Blue AI)</small>
+        <div class="glass-card">
+            <div class="glass-header">
+                <div class="d-flex justify-content-between align-items-center w-100">
+                    <div class="logo-group d-flex align-items-center">
+                        <img src="/static/Images/Q_logo_quantum_blue-removebg-preview.png" alt="Logo" class="header-logo">
+                        <div class="d-flex flex-column justify-content-center brand-text-container">
+                            <span class="brand-title">R&B</span>
+                            <small class="brand-subtitle">(Powered by Quantum Blue AI)</small>
+                        </div>
                     </div>
+
+                    <div class="d-flex gap-2" id="desktop-nav">
+                        <button class="btn btn-pill-white btn-sm" onclick="toggleUserInfoPanel()" id="profileBtn">
+                            Profile <i class="fas fa-chevron-down ms-2" style="font-size: 0.7em;"></i>
+                        </button>
+                        
+                        <a href="https://highvolt.tech/demo-ss-dashboard/" target="_blank" class="btn btn-pill-white btn-sm">
+                            Overview <i class="fas fa-file-alt ms-2" style="font-size: 0.8em;"></i>
+                        </a>
+
+                        <select id="languageSelector" class="btn btn-pill-white btn-sm" onchange="changeLanguage(this.value)">
+                            <option value="en">ENG(US)</option>
+                            <option value="my">MY(BUR)</option>
+                            <option value="hi">HIN(IND)</option>
+                        </select>
+                    </div>
+
+                    <button class="btn btn-light mobile-menu-btn" onclick="toggleMobileMenu()">
+                        <i class="fas fa-bars"></i>
+                    </button>
                 </div>
 
-                <div class="d-flex gap-2">
-                    <button class="btn btn-pill-white btn-sm" onclick="toggleUserInfoPanel()" id="profileBtn">
-                        Profile <i class="fas fa-chevron-down ms-2" style="font-size: 0.7em;"></i>
-                    </button>
-                    
-                    <a href="https://highvolt.tech/demo-ss-dashboard/" target="_blank" class="btn btn-pill-white btn-sm">
-                        Overview <i class="fas fa-file-alt ms-2" style="font-size: 0.8em;"></i>
+                <div id="mobileMenuDropdown" class="mobile-menu-dropdown">
+                    <div class="mobile-menu-group">
+                        <div class="mobile-menu-item profile-toggle" onclick="toggleMobileProfile()">
+                            <div class="d-flex align-items-center">
+                                <i class="fas fa-user"></i>
+                                <span>Profile</span>
+                            </div>
+                            <i class="fas fa-chevron-down arrow-icon" id="profileArrow"></i>
+                        </div>
+                        <div id="mobileProfileContent" class="mobile-submenu" style="display: none;">
+                            <div class="submenu-row">
+                                <span class="label">Username:</span>
+                                <span class="value" id="mob_userName">-</span>
+                            </div>
+                            <div class="submenu-row">
+                                <span class="label">Area:</span>
+                                <span class="value" id="mob_userArea">-</span>
+                            </div>
+                            <div class="submenu-row">
+                                <span class="label">Type:</span>
+                                <span class="value" id="mob_userType">-</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <a href="https://highvolt.tech/demo-ss-dashboard/" target="_blank" class="mobile-menu-item">
+                        <div class="d-flex align-items-center">
+                            <i class="fas fa-file-alt"></i> <span>Overview</span>
+                        </div>
                     </a>
 
-                    <select id="languageSelector" class="btn btn-pill-white btn-sm" onchange="changeLanguage(this.value)">
-                        <option value="en">ENG(US)</option>
-                        <option value="my">MY(BUR)</option>
-                        <option value="hi">HIN(IND)</option>
-                    </select>
+                    <div class="mobile-menu-item">
+                        <div class="d-flex align-items-center" style="flex: 1;">
+                            <i class="fas fa-globe"></i>
+                            <select onchange="changeLanguage(this.value)" class="mobile-lang-select">
+                                <option value="en">English (US)</option>
+                                <option value="my">Myanmar</option>
+                                <option value="hi">Hindi</option>
+                            </select>
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -130,7 +156,7 @@ setTimeout(() => {
                         <div class="logo-container">
                             <img src="/static/Images/Q_logo_quantum_blue-removebg-preview.png" alt="Logo" class="welcome-logo">
                         </div>
-                        <h3 class="welcome-title">Welcome To HV</h3>
+                        <h3 class="welcome-title">Welcome To R&B</h3>
                         <p class="welcome-subtitle">Powered by Quantum Blue AI</p>
                         <p class="welcome-text">Your intelligent assistant for orders, tracking, and more!</p>
                     </div>
@@ -144,23 +170,23 @@ setTimeout(() => {
             </div>
 
              <div class="glass-footer">
-                <div class="input-wrapper mb-3">
+                <div class="input-wrapper">
                     <input type="text" id="messageInput" class="glass-input" placeholder="Type your message">
                     <button class="btn btn-primary send-btn" onclick="sendMessage()" id="sendButton">
-                        <i class="fas fa-paper-plane me-2"></i> Send
+                        <i class="fas fa-paper-plane"></i> <span>Send</span>
                     </button>
                 </div>
 
-                <div class="d-flex justify-content-between align-items-center">
-                    <small class="text-white-50 ms-2" style="font-size: 0.7rem;">Press Enter to send • Shift+Enter for new line</small>
+                <div class="d-flex justify-content-between align-items-center footer-row mt-2">
+                    <small class="text-white-50 ms-2 desktop-helper">Press Enter to send • Shift+Enter for new line</small>
                     
-                    <div class="d-flex gap-2">
+                    <div class="d-flex gap-2 action-buttons-wrapper">
                         <button class="btn btn-glass-dark-grey btn-sm px-3" onclick="resetChat()">
-                            Reset <i class="fas fa-redo-alt ms-2" style="font-size: 0.8em;"></i>
+                            Reset <i class="fas fa-redo-alt ms-2"></i>
                         </button>
                         
                         <button class="btn btn-primary btn-sm rounded-pill px-4 d-flex align-items-center" onclick="viewCart()" id="cartButton">
-                            Orders <i class="fas fa-shopping-cart ms-2" style="font-size: 0.8em;"></i>
+                            Orders <i class="fas fa-shopping-cart ms-2"></i>
                         </button>
                     </div>
                 </div>
@@ -169,7 +195,6 @@ setTimeout(() => {
     </div>
 </div>
 
-<!-- Cart Modal -->
 <div class="modal fade" id="cartModal" tabindex="-1" aria-labelledby="cartModalLabel" aria-hidden="true">
     <div class="modal-dialog modal-lg modal-dialog-scrollable">
         <div class="modal-content">
@@ -193,11 +218,36 @@ setTimeout(() => {
 <script>
 function toggleUserInfoPanel() {
     const panel = document.getElementById('userInfoPanel');
-    // Simple toggle
     if (panel.style.display === 'none' || panel.style.display === '') {
         panel.style.display = 'block';
     } else {
         panel.style.display = 'none';
+    }
+}
+
+function toggleMobileMenu() {
+    const menu = document.getElementById('mobileMenuDropdown');
+    if (menu.style.display === 'flex') {
+        menu.style.display = 'none';
+    } else {
+        menu.style.display = 'flex';
+        try {
+            document.getElementById('mob_userName').textContent = document.getElementById('userName').textContent;
+            document.getElementById('mob_userArea').textContent = document.getElementById('userArea').textContent;
+            document.getElementById('mob_userType').textContent = document.getElementById('userType').textContent;
+        } catch(e) {}
+    }
+}
+
+function toggleMobileProfile() {
+    const content = document.getElementById('mobileProfileContent');
+    const arrow = document.getElementById('profileArrow');
+    if (content.style.display === 'none') {
+        content.style.display = 'block';
+        if (arrow) arrow.style.transform = 'rotate(180deg)';
+    } else {
+        content.style.display = 'none';
+        if (arrow) arrow.style.transform = 'rotate(0deg)';
     }
 }
 </script>

@@ -7,6 +7,10 @@ let currentOrderSummary = null;
 let productRecommendations = [];
 let recommendationTimeout = null;
 
+// Dealer flow global variables
+let selectedDeliveryPartnerId = null;
+let deliveryPartners = [];
+
 // Initialize chat
 document.addEventListener('DOMContentLoaded', function() {
     initializeChat();
@@ -390,9 +394,17 @@ async function sendMessage(messageText = null) {
             
             // Handle interactive product selection UI
             if (data.interactive_product_selection && data.products) {
-                // Check if change customer button should be shown (for MRs with selected customer)
-                const showChangeCustomer = data.action_buttons && data.action_buttons.some(btn => btn.action === 'change_customer');
-                addProductSelectionForm(data.products, showChangeCustomer);
+                // Check if it's a dealer order - use dealer product selection form with delivery partner dropdown
+                console.log('Product selection triggered. is_dealer_order:', data.is_dealer_order);
+                if (data.is_dealer_order) {
+                    console.log('Calling addDealerProductSelectionForm for dealer');
+                    addDealerProductSelectionForm(data.products);
+                } else {
+                    // For MRs, use the regular product selection form
+                    console.log('Calling addProductSelectionForm for MR');
+                    const showChangeCustomer = data.action_buttons && data.action_buttons.some(btn => btn.action === 'change_customer');
+                    addProductSelectionForm(data.products, showChangeCustomer);
+                }
             }
             
             // Handle company report table selection
@@ -542,11 +554,12 @@ function cleanTextForTTS(text) {
 function addMessage(message, sender, type = 'normal') {
     const messagesDiv = document.getElementById('chatMessages');
     
-    // Remove welcome message if exists (when first message is sent)
-    const welcome = messagesDiv.querySelector('.text-center.text-muted');
+    // --- FIX: Remove the specific welcome card class ---
+    const welcome = messagesDiv.querySelector('.inner-glass-card');
     if (welcome) {
         welcome.remove();
     }
+
     
     const messageDiv = document.createElement('div');
     messageDiv.className = `message ${sender} mb-3`;
@@ -1715,10 +1728,6 @@ async function placeOrder() {
         
         if (data.success) {
             addMessage(data.message, 'bot');
-            // Don't display order ID separately - it's already in the order summary message
-            // if (data.order_id) {
-            //     addMessage(`Order ID: ${data.order_id}`, 'bot');
-            // }
             // Hide cart modal if it exists (legacy support)
             const cartModalElement = document.getElementById('cartModal');
             if (cartModalElement) {
@@ -1730,18 +1739,27 @@ async function placeOrder() {
         } else {
             // Check if customer selection is required
             if (data.requires_customer_selection) {
-                addMessage(data.message || 'Please select a customer before placing an order.', 'bot', 'error');
-                // Show action buttons to help user select customer
-                setTimeout(() => {
-                    showActionButtons([
-                        {'text': 'Place Order', 'action': 'place_order'},
-                        {'text': 'View Open Order', 'action': 'open_order'},
-                        {'text': 'Company Info', 'action': 'company_info'},
-                        {'text': 'Product Info', 'action': 'product_info'}
-                    ]);
-                }, 300);
-        } else {
-            addMessage(data.message || 'Error placing order', 'bot', 'error');
+                // For dealers, show dealer-specific customer selection
+                if (currentUser && currentUser.role === 'distributor') {
+                    addMessage(data.message || 'Please select a customer before placing an order.', 'bot', 'info');
+                    showDealerCustomerSelection();
+                } else {
+                    // For MRs, show MR customer selection (existing flow)
+                    addMessage(data.message || 'Please select a customer before placing an order.', 'bot', 'error');
+                    setTimeout(() => {
+                        showActionButtons([
+                            {'text': 'Place Order', 'action': 'place_order'},
+                            {'text': 'View Open Order', 'action': 'open_order'},
+                            {'text': 'Company Info', 'action': 'company_info'},
+                            {'text': 'Product Info', 'action': 'product_info'}
+                        ]);
+                    }, 300);
+                }
+            } else if (data.requires_delivery_partner_selection) {
+                // Dealer needs to select delivery partner
+                addMessage(data.message || 'Please select a delivery partner before placing an order.', 'bot', 'error');
+            } else {
+                addMessage(data.message || 'Error placing order', 'bot', 'error');
             }
         }
     } catch (error) {
@@ -1835,7 +1853,14 @@ function displayOrderDetails(orderDetails) {
             message += `This order was partially dispatched. Some items are still pending and will be fulfilled when stock becomes available.\n\n`;
             message += `**Pending Items:**\n\n`;
             orderDetails.pending_orders_created.forEach(p => {
-                const statusBadge = p.status === 'fulfilled' ? '✅ Fulfilled' : '⏳ Pending';
+                // Determine status badge based on pending order status
+                let statusBadge = '⏳ Pending';
+                if (p.status === 'fulfilled') {
+                    statusBadge = '✅ Fulfilled';
+                } else if (p.status === 'cancelled') {
+                    statusBadge = '❌ Cancelled';
+                }
+                
                 message += `• **${p.product_name}** (${p.product_code})\n`;
                 message += `  - Pending Quantity: ${p.requested_quantity} paid + ${p.original_foc_quantity} FOC = ${p.total_pending_quantity} total units\n`;
                 message += `  - Status: ${statusBadge}\n`;
@@ -2092,25 +2117,24 @@ function displayOrderDetails(orderDetails) {
 
 function resetChat() {
     const messagesDiv = document.getElementById('chatMessages');
-    messagesDiv.innerHTML = `
-        <div class="text-center text-muted py-5">
-            <i class="fas fa-robot fa-3x mb-3"></i>
-            <h4>Welcome to HV (Powered by Quantum Blue AI)</h4>
-            <p>Your intelligent assistant for orders, tracking, and more!</p>
-        </div>
-    `;
     
-    // Reset state
+    // FIX: Clear content immediately to remove welcome screen
+    messagesDiv.innerHTML = '';
+    
+    // Reset state variables
     messageHistory = [];
     currentUser = null;
     cartItems = [];
     currentOrderSummary = null;
     
     // Hide panels
-    document.getElementById('userInfoPanel').style.display = 'none';
-    document.getElementById('cartButton').style.display = 'none';
+    const userInfoPanel = document.getElementById('userInfoPanel');
+    if (userInfoPanel) userInfoPanel.style.display = 'none';
     
-    // Show action buttons to start new conversation
+    const cartButton = document.getElementById('cartButton');
+    if (cartButton) cartButton.style.display = 'none';
+    
+    // Show action buttons
     showActionButtons([
         {'text': 'Place Order', 'action': 'place_order'},
         {'text': 'View Open Order', 'action': 'open_order'},
@@ -2119,7 +2143,8 @@ function resetChat() {
     ]);
     
     // Reset input placeholder
-    document.getElementById('messageInput').placeholder = 'Enter your unique ID to start...';
+    const input = document.getElementById('messageInput');
+    if (input) input.placeholder = 'Type your message...';
 }
 
 // Utility functions
@@ -2592,20 +2617,28 @@ function clearStockForm() {
 
 function addProductSelectionForm(products, showChangeCustomer = false) {
     const messagesDiv = document.getElementById('chatMessages');
-    
-    // Find the last bot message
+    if (!messagesDiv) return;
+
+    // 1. Try to find last message
     const botMessages = messagesDiv.querySelectorAll('.message.bot');
-    let lastBotMessage = null;
-    
+    let messageBubble = null;
+
     if (botMessages.length > 0) {
-        lastBotMessage = botMessages[botMessages.length - 1];
+        const lastMsg = botMessages[botMessages.length - 1];
+        messageBubble = lastMsg.querySelector('.message-bubble .bg-light') || lastMsg.querySelector('.message-bubble');
     }
-    
-    if (!lastBotMessage) return; // Exit if no bot message found
-    
-    // Find the inner message bubble div (the one with bg-light class)
-    const messageBubble = lastBotMessage.querySelector('.message-bubble .bg-light');
-    if (!messageBubble) return; // Exit if bubble not found
+
+    // 2. SAFETY FALLBACK: Create NEW message
+    if (!messageBubble) {
+        const newMsgRow = document.createElement('div');
+        newMsgRow.className = 'message bot mb-3';
+        newMsgRow.innerHTML = `
+            <div class="message-bubble bot">
+                <div class="bg-light border rounded-3 px-3 py-2" style="max-width: 100%; width: 100%;"></div>
+            </div>`;
+        messagesDiv.appendChild(newMsgRow);
+        messageBubble = newMsgRow.querySelector('.bg-light');
+    }
     
     const formDiv = document.createElement('div');
     formDiv.className = 'product-selection-container mt-3';
@@ -2613,162 +2646,63 @@ function addProductSelectionForm(products, showChangeCustomer = false) {
     formDiv.style.cssText = 'animation: slideInFromBottom 0.3s ease-out; width: 100%; max-width: 100%;';
     
     let formHTML = `
-        <div class="card border-0 shadow-lg" style="background: linear-gradient(135deg, rgba(255, 255, 255, 0.98) 0%, rgba(249, 250, 251, 0.98) 100%); backdrop-filter: blur(20px); border-radius: 16px; padding: 24px; width: 100%; max-width: 100%; box-sizing: border-box; border: 2px solid rgba(59, 130, 246, 0.1);">
-            <div class="mb-3">
-                <h5 class="mb-0" style="color: #1e40af; font-weight: 400; font-size: 1.1rem;">
-                    <i class="fas fa-shopping-cart me-2" style="color: #3b82f6;"></i>Product Selection
-                </h5>
-            </div>
+        <div class="card border-0 shadow-lg" style="background: rgba(255, 255, 255, 0.95); border-radius: 16px; padding: 20px; width: 100%;">
+            <h5 class="mb-3 text-wrap" style="color: #1e40af; font-size: 1.1rem; word-break: break-word;">
+                <i class="fas fa-shopping-cart me-2"></i>Product Selection
+            </h5>
             
             <form id="productSelectionFormElement" onsubmit="handleBulkProductSelection(event)">
-                    <!-- Search Bar with Favorites Filter -->
-                    <div class="mb-3">
-                        <div class="d-flex align-items-center justify-content-between mb-2">
-                            <label class="form-label mb-0" style="font-weight: 500;">Search products:</label>
-                            <div class="form-check">
-                                <input class="form-check-input" type="checkbox" id="productFavoriteFilterCheckbox" 
-                                       onchange="filterProductTable()"
-                                       style="cursor: pointer;">
-                                <label class="form-check-label" for="productFavoriteFilterCheckbox" style="cursor: pointer; font-size: 0.875rem; font-weight: 500;">
-                                    <i class="fas fa-star" style="color: #fbbf24;"></i> Favorites Only
-                                </label>
+                <div class="mb-3">
+                    <div class="d-flex align-items-center justify-content-between mb-2">
+                        <label class="form-label mb-0" style="font-weight: 500;">Search:</label>
+                        <div class="d-flex flex-column align-items-end" style="cursor: pointer;" onclick="const cb = document.getElementById('productFavoriteFilterCheckbox'); cb.checked = !cb.checked; filterProductTable();">
+                            <div class="d-flex align-items-center gap-2">
+                                <input class="form-check-input m-0" type="checkbox" id="productFavoriteFilterCheckbox" onchange="filterProductTable()" onclick="event.stopPropagation()" style="cursor: pointer;">
+                                <i class="fas fa-star" style="color: #fbbf24;"></i>
                             </div>
-                        </div>
-                        <div class="input-group">
-                            <span class="input-group-text" style="background: #dbeafe; border-radius: 8px 0 0 8px; border: 2px solid #bfdbfe; border-right: none;">
-                                <i class="fas fa-search" style="color: #1e40af;"></i>
-                            </span>
-                            <input type="text" 
-                                   class="form-control" 
-                                   id="productSearchInput" 
-                                   placeholder="Search products by name..." 
-                                   onkeyup="filterProductTable()"
-                                   style="background: #eff6ff; color: #1e40af; border-radius: 0 8px 8px 0; border: 2px solid #bfdbfe; border-left: none; padding: 12px; font-size: 0.95rem;"
-                                   onfocus="this.style.background='#dbeafe'"
-                                   onblur="this.style.background='#eff6ff'">
+                            <span style="font-size: 0.7rem; color: #6b7280; margin-top: 2px;">Favorites Only</span>
                         </div>
                     </div>
-                    
-                    <!-- Products Table -->
-                    <div class="mb-3" style="max-height: 400px; overflow-y: auto; border: 2px solid #e5e7eb; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.05);">
-                        <table class="table table-sm table-hover mb-0" style="font-size: 0.875rem;">
-                            <thead class="table-light" style="position: sticky; top: 0; z-index: 10; background: linear-gradient(135deg, #f3f4f6 0%, #e5e7eb 100%); box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-                                <tr>
-                                    <th style="padding: 14px; width: 45%; font-weight: 700; color: #1f2937;">Product</th>
-                                    <th style="padding: 14px; width: 20%; font-weight: 700; color: #1f2937;">Price</th>
-                                    <th style="padding: 14px; width: 15%; font-weight: 700; color: #1f2937;">Available</th>
-                                    <th style="padding: 14px; width: 20%; font-weight: 700; color: #1f2937;">Quantity</th>
-                                </tr>
-                            </thead>
-                            <tbody id="productTableBody" style="display: table-row-group;">
+                    <input type="text" class="form-control" id="productSearchInput" placeholder="Search products..." onkeyup="filterProductTable()" style="background: #eff6ff; border: 1px solid #bfdbfe; padding: 10px; border-radius: 8px;">
+                </div>
+                
+                <div class="mb-3" style="max-height: 300px; overflow-y: auto; border: 1px solid #e5e7eb; border-radius: 12px;">
+                    <table class="table table-sm table-hover mb-0" style="font-size: 0.85rem;">
+                        <thead class="table-light" style="position: sticky; top: 0; z-index: 10;">
+                            <tr><th style="padding: 10px;">Product</th><th style="padding: 10px;">Price</th><th style="padding: 10px;">Qty</th></tr>
+                        </thead>
+                        <tbody id="productTableBody">
     `;
-    
-    products.forEach((product, index) => {
-        const searchText = `${product.product_name} ${product.product_code}`.toLowerCase();
-        const focSchemesJson = product.foc_schemes ? JSON.stringify(product.foc_schemes) : '[]';
-        
-        formHTML += `
-                                <tr class="product-row" 
-                                    data-product-code="${product.product_code}" 
-                                    data-product-name="${product.product_name.replace(/"/g, '&quot;')}"
-                                    data-search-text="${searchText}"
-                                    data-price="${product.sales_price}"
-                                    data-available="${product.available_for_sale}"
-                                    data-foc="${product.foc || ''}"
-                                    style="transition: all 0.2s;">
-                                    <td style="padding: 12px;">
-                                        <div style="font-weight: 600; color: #1f2937;">
-                                            <span>${product.product_name}</span>
-                                        </div>
-                                    </td>
-                                    <td style="padding: 12px; color: #059669; font-weight: 600;">${product.sales_price.toLocaleString()} MMK</td>
-                                    <td style="padding: 12px;">
-                                        <span class="badge ${product.available_for_sale > 10 ? 'bg-success' : (product.available_for_sale > 0 ? 'bg-warning text-dark' : 'bg-danger')}" style="font-size: 0.8rem; padding: 5px 10px;">${product.available_for_sale}</span>
-                                        <small class="text-muted ms-1" style="font-size: 0.7rem;">units</small>
-                                    </td>
-                                    <td style="padding: 12px;">
-                                        <div>
-                                            <input type="number" 
-                                                   class="form-control form-control-sm product-quantity-input" 
-                                                   id="qty_${product.product_code}"
-                                                   data-product-foc="${product.foc || ''}"
-                                                   data-product-name="${product.product_name.replace(/"/g, '&quot;')}"
-                                                   data-foc-schemes='${focSchemesJson.replace(/'/g, "&apos;")}'
-                                                   data-product-code="${product.product_code}"
-                                                   min="0" 
-                                                   max="${product.available_for_sale}" 
-                                                   value="0"
-                                                   placeholder="0"
-                                                   onchange="updateSelectedProductsCount(); checkFOCNotification(this)"
-                                                   oninput="updateSelectedProductsCount(); checkFOCNotification(this)"
-                                                   style="width: 100%; min-width: 80px; max-width: 120px; text-align: center; border-radius: 8px; border: 2px solid #e5e7eb; padding: 8px 12px; font-weight: 600; font-size: 0.95rem;">
-                                            <div id="foc-notification-${product.product_code}" class="foc-notification" style="display: none; margin-top: 4px; font-size: 0.75rem; color: #059669; font-weight: 600;"></div>
-                                        </div>
-                                    </td>
-                                </tr>
-        `;
+    products.forEach(p => {
+        formHTML += `<tr class="product-row" data-product-code="${p.product_code}" data-product-name="${p.product_name.replace(/"/g, '&quot;')}" data-search-text="${(p.product_name+p.product_code).toLowerCase()}" data-price="${p.sales_price}">
+            <td style="padding: 10px;"><div class="text-wrap fw-bold" style="word-break: break-word;">${p.product_name}</div></td>
+            <td style="padding: 10px; color: #059669;">${p.sales_price.toLocaleString()}</td>
+            <td style="padding: 10px;"><input type="number" class="form-control form-control-sm product-quantity-input" style="min-width: 60px; text-align: center;" id="qty_${p.product_code}" min="0" max="${p.available_for_sale}" value="0" oninput="updateSelectedProductsCount()"></td>
+        </tr>`;
     });
-    
-    formHTML += `
-                            </tbody>
-                        </table>
-                    </div>
-                    
-                    <div id="selectedProductsCount" class="mb-3 text-center p-3" style="background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%); border-radius: 10px; border: 2px dashed #3b82f6;">
-                        <i class="fas fa-info-circle me-2" style="color: #2563eb;"></i>
-                        <span style="color: #1e40af; font-weight: 600; font-size: 0.9rem;">Select quantities above to add products to your cart</span>
-                    </div>
-                    
-                    <div class="d-grid gap-3 mb-3" style="grid-template-columns: repeat(2, 1fr);">
-                        <button type="submit" class="btn btn-primary" 
-                                style="border-radius: 10px; padding: 12px 20px; font-weight: 600; font-size: 0.9rem; background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); border: none; box-shadow: 0 3px 10px rgba(59, 130, 246, 0.3);">
-                            <i class="fas fa-cart-plus me-2"></i>Add to Cart
-                        </button>
-                        <button type="button" class="btn" onclick="clearBulkProductForm()"
-                                style="border-radius: 10px; padding: 12px 20px; font-weight: 600; font-size: 0.9rem; background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); border: none; color: white; box-shadow: 0 3px 10px rgba(59, 130, 246, 0.3);">
-                            <i class="fas fa-eraser me-2"></i>Clear All
-                        </button>
-                        <button type="button" class="btn" onclick="viewCart()"
-                                style="border-radius: 10px; padding: 12px 20px; font-weight: 600; font-size: 0.9rem; background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); border: none; color: white; box-shadow: 0 3px 10px rgba(59, 130, 246, 0.3);">
-                            <i class="fas fa-shopping-cart me-2"></i>View Cart
-                        </button>
-                        <button type="button" class="btn" onclick="confirmCart()"
-                                style="border-radius: 10px; padding: 12px 20px; font-weight: 600; font-size: 0.9rem; background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); border: none; color: white; box-shadow: 0 3px 10px rgba(59, 130, 246, 0.3);">
-                            <i class="fas fa-check-circle me-2"></i>Confirm Cart
-                        </button>
-                        <button type="button" class="btn" onclick="showOrderTemplates()"
-                                style="border-radius: 10px; padding: 12px 20px; font-weight: 600; font-size: 0.9rem; background: linear-gradient(135deg, #10b981 0%, #059669 100%); border: none; color: white; box-shadow: 0 3px 10px rgba(16, 185, 129, 0.3);">
-                            <i class="fas fa-file-alt me-2"></i>Order Templates
-                        </button>
-                    </div>
-                    <div class="d-flex justify-content-center mt-2 gap-2">
-                        ${showChangeCustomer ? `
-                        <button type="button" class="btn btn-outline-info" onclick="handleChangeCustomer()"
-                                style="border-radius: 8px; padding: 8px 14px; font-size: 0.8rem;">
-                            <i class="fas fa-user-edit me-2"></i>Change Customer
-                        </button>
-                        ` : ''}
-                        <button type="button" class="btn btn-outline-danger" onclick="this.closest('.product-selection-container').remove()"
-                                style="border-radius: 8px; padding: 8px 14px; font-size: 0.8rem;">
-                            <i class="fas fa-times me-2"></i>Cancel
-                        </button>
-                    </div>
-                </form>
-            </div>
-        </div>
-    `;
+    formHTML += `</tbody></table></div>
+                
+                <div id="selectedProductsCount" class="mb-3 text-center p-2 bg-light border rounded small text-wrap" style="word-break: break-word;">Select quantities above</div>
+                
+                <div class="d-flex flex-column gap-2 mb-3">
+                    <button type="submit" class="btn btn-primary w-100" style="padding: 8px; font-size: 0.9rem;"><i class="fas fa-cart-plus me-2"></i>Add to Cart</button>
+                    <button type="button" class="btn btn-secondary w-100" onclick="clearBulkProductForm()" style="padding: 8px; font-size: 0.9rem;"><i class="fas fa-eraser me-2"></i>Clear All</button>
+                    <button type="button" class="btn btn-primary w-100" onclick="viewCart()" style="padding: 8px; font-size: 0.9rem;"><i class="fas fa-shopping-cart me-2"></i>View Cart</button>
+                    <button type="button" class="btn btn-success w-100" onclick="confirmCart()" style="padding: 8px; font-size: 0.9rem;"><i class="fas fa-check-circle me-2"></i>Confirm Cart</button>
+                    <button type="button" class="btn btn-primary w-100" onclick="showOrderTemplates()" style="padding: 8px; font-size: 0.9rem;"><i class="fas fa-file-alt me-2"></i>Templates</button>
+                </div>
+                
+                <div class="d-flex flex-column gap-2">
+                    ${showChangeCustomer ? `<button type="button" class="btn btn-primary w-100" onclick="handleChangeCustomer()" style="padding: 8px; font-size: 0.9rem;"><i class="fas fa-user-edit me-2"></i>Change Customer</button>` : ''}
+                    <button type="button" class="btn btn-outline-danger w-100" onclick="this.closest('.product-selection-container').remove()" style="padding: 8px; font-size: 0.9rem;"><i class="fas fa-times me-2"></i>Cancel</button>
+                </div>
+            </form>
+        </div>`;
     
     formDiv.innerHTML = formHTML;
-    messageBubble.appendChild(formDiv); // Append to the message bubble instead of messagesDiv
-    
-    // Initialize product count
+    messageBubble.appendChild(formDiv);
     updateSelectedProductsCount();
-    
-    // Scroll to form
-    messagesDiv.scrollTo({
-        top: messagesDiv.scrollHeight,
-        behavior: 'smooth'
-    });
+    messagesDiv.scrollTo({ top: messagesDiv.scrollHeight, behavior: 'smooth' });
 }
 
 // Update product form star icons after favorite toggle
@@ -3381,175 +3315,160 @@ function clearProductForm() {
     }
 }
 
-// Enhanced customer selection form for MRs
 function addCustomerSelectionForm(customers) {
     const messagesDiv = document.getElementById('chatMessages');
-    
-    // Find the last bot message
+    if (!messagesDiv) return;
+
+    // 1. Try to find the last bot message to append to
     const botMessages = messagesDiv.querySelectorAll('.message.bot');
-    let lastBotMessage = null;
-    
+    let messageBubble = null;
+
     if (botMessages.length > 0) {
-        lastBotMessage = botMessages[botMessages.length - 1];
+        const lastMsg = botMessages[botMessages.length - 1];
+        // Try finding the inner content div first, then the bubble itself
+        messageBubble = lastMsg.querySelector('.message-bubble .bg-light') || lastMsg.querySelector('.message-bubble');
     }
-    
-    if (!lastBotMessage) return; // Exit if no bot message found
-    
-    // Find the inner message bubble div (the one with bg-light class)
-    const messageBubble = lastBotMessage.querySelector('.message-bubble .bg-light');
-    if (!messageBubble) return; // Exit if bubble not found
-    
+
+    // 2. SAFETY FALLBACK: If no suitable bubble found, create a NEW one.
+    // This ensures the form ALWAYS appears.
+    if (!messageBubble) {
+        const newMsgRow = document.createElement('div');
+        newMsgRow.className = 'message bot mb-3';
+        newMsgRow.innerHTML = `
+            <div class="message-bubble bot">
+                <div class="bg-light border rounded-3 px-3 py-2" style="max-width: 100%; width: 100%;"></div>
+            </div>`;
+        messagesDiv.appendChild(newMsgRow);
+        messageBubble = newMsgRow.querySelector('.bg-light');
+    }
+
+    const uniqueId = Date.now();
     const formContainer = document.createElement('div');
     formContainer.className = 'customer-selection-container mt-3';
     formContainer.style.cssText = 'animation: slideInFromBottom 0.3s ease-out; width: 100%; max-width: 100%;';
     
     const formCard = document.createElement('div');
     formCard.className = 'card border-0 shadow-sm';
-    formCard.style.cssText = `
-        background: rgba(255, 255, 255, 0.95);
-        backdrop-filter: blur(20px);
-        border-radius: 16px;
-        padding: 20px;
-        width: 100%;
-        box-sizing: border-box;
-    `;
+    formCard.style.cssText = `background: rgba(255, 255, 255, 0.95); backdrop-filter: blur(20px); border-radius: 16px; padding: 20px; width: 100%; box-sizing: border-box;`;
     
-    // Store customers data for filtering
+    // Store data
     formCard.dataset.customers = JSON.stringify(customers);
     
     formCard.innerHTML = `
-        <h6 class="mb-3" style="color: #2563eb; font-weight: 600;">
+        <h6 class="mb-2 text-wrap" style="color: #2563eb; font-weight: 600; line-height: 1.4; word-break: break-word;">
             <i class="fas fa-users me-2"></i>Select Customer
         </h6>
-        <form id="customerSelectionForm" onsubmit="handleCustomerSelection(event)">
+        <p class="text-muted mb-3 small text-wrap" style="word-break: break-word;">
+            Select a customer below or add a new one:
+        </p>
+
+        <form id="customerSelectionForm_${uniqueId}" onsubmit="handleCustomerSelection(event)">
             <div class="mb-3 position-relative">
                 <div class="d-flex align-items-center justify-content-between mb-2">
-                    <label for="customerSearchInput" class="form-label mb-0" style="font-weight: 500;">Search for a customer:</label>
-                    <div class="form-check">
-                        <input class="form-check-input" type="checkbox" id="favoriteFilterCheckbox" 
-                               onchange="filterCustomerSearch()"
-                               style="cursor: pointer;">
-                        <label class="form-check-label" for="favoriteFilterCheckbox" style="cursor: pointer; font-size: 0.875rem; font-weight: 500;">
-                            <i class="fas fa-star" style="color: #fbbf24;"></i> Favorites Only
-                        </label>
+                    <label for="customerSearchInput_${uniqueId}" class="form-label mb-0" style="font-weight: 500;">Search:</label>
+                    
+                    <div class="d-flex flex-column align-items-end" style="cursor: pointer;" 
+                         onclick="const cb = document.getElementById('favCheckbox_${uniqueId}'); cb.checked = !cb.checked; window.triggerCustomerFilter('${uniqueId}');">
+                        <div class="d-flex align-items-center gap-2">
+                            <input class="form-check-input m-0" type="checkbox" id="favCheckbox_${uniqueId}" 
+                                   onchange="window.triggerCustomerFilter('${uniqueId}')"
+                                   onclick="event.stopPropagation()"
+                                   style="cursor: pointer;">
+                            <i class="fas fa-star" style="color: #fbbf24; font-size: 1rem;"></i>
+                        </div>
+                        <span style="font-size: 0.65rem; color: #6b7280; margin-top: 2px; font-weight: 500;">Favorites Only</span>
                     </div>
                 </div>
-                <input type="text" class="form-control form-control-lg" id="customerSearchInput" 
-                    placeholder="Type customer name or ID..." autocomplete="off"
-                    style="border-radius: 10px; border: 2px solid #e5e7eb; padding: 12px; font-size: 0.95rem;">
-                <input type="hidden" id="selectedCustomerId" name="customer_id" required>
-                <input type="hidden" id="selectedCustomerUniqueId" name="customer_unique_id">
+
+                <input type="text" class="form-control" id="customerSearchInput_${uniqueId}" 
+                    placeholder="Type name or ID..." autocomplete="off"
+                    style="border-radius: 8px; border: 2px solid #e5e7eb; padding: 10px; font-size: 0.9rem;">
                 
-                <!-- Customer Dropdown -->
-                <div id="customerDropdown" class="position-absolute w-100 bg-white border rounded shadow-lg" 
-                     style="top: 100%; z-index: 1000; max-height: 300px; overflow-y: auto; display: none; margin-top: 2px;">
-                    <div id="customerDropdownList"></div>
+                <input type="hidden" id="selectedCustomerId_${uniqueId}" name="customer_id" required>
+                <input type="hidden" id="selectedCustomerUniqueId_${uniqueId}" name="customer_unique_id">
+                
+                <div id="customerDropdown_${uniqueId}" class="position-absolute w-100 bg-white border rounded shadow-lg" 
+                     style="top: 100%; z-index: 1000; max-height: 250px; overflow-y: auto; display: none; margin-top: 2px;">
+                    <div id="customerDropdownList_${uniqueId}"></div>
                 </div>
             </div>
-            <div class="d-flex gap-2">
-                <button type="submit" class="btn btn-primary flex-grow-1" 
-                    style="border-radius: 8px; padding: 8px 14px; font-weight: 600; font-size: 0.8rem;">
+
+            <div class="d-flex flex-column gap-2">
+                <button type="submit" class="btn btn-primary w-100" 
+                    style="border-radius: 8px; padding: 8px; font-weight: 600; font-size: 0.9rem;">
                     <i class="fas fa-check me-2"></i>Select Customer
                 </button>
-                <button type="button" class="btn btn-outline-secondary" onclick="this.closest('.customer-selection-container').remove()"
-                    style="border-radius: 8px; padding: 8px 14px; font-size: 0.8rem;">
+
+                <button type="button" class="btn btn-primary w-100" 
+                    onclick="this.closest('.customer-selection-container').remove(); addNewCustomerForm();"
+                    style="border-radius: 8px; padding: 8px; font-weight: 600; font-size: 0.9rem;">
+                    <i class="fas fa-user-plus me-2"></i>Add New Customer
+                </button>
+
+                <button type="button" class="btn btn-outline-secondary w-100" onclick="this.closest('.customer-selection-container').remove()"
+                    style="border-radius: 8px; padding: 8px; font-size: 0.9rem;">
                     <i class="fas fa-times"></i> Cancel
                 </button>
             </div>
         </form>
     `;
     
-    // Add event listener for customer search after form is added to DOM
-    setTimeout(() => {
-        const customerSearchInput = document.getElementById('customerSearchInput');
-        const customerDropdown = document.getElementById('customerDropdown');
-        const customerDropdownList = document.getElementById('customerDropdownList');
+    formContainer.appendChild(formCard);
+    messageBubble.appendChild(formContainer);
+
+    // Search Logic using Unique ID
+    window.triggerCustomerFilter = function(uid) {
+        const searchInput = document.getElementById(`customerSearchInput_${uid}`);
+        const dropdown = document.getElementById(`customerDropdown_${uid}`);
+        const dropdownList = document.getElementById(`customerDropdownList_${uid}`);
+        const favCheckbox = document.getElementById(`favCheckbox_${uid}`);
         
-        if (customerSearchInput && customerDropdown && customerDropdownList) {
-            // Search customers as user types
-            customerSearchInput.addEventListener('input', function(e) {
-                filterCustomerSearch();
-            });
-            
-            // Function to filter customer search (make it accessible globally)
-            function filterCustomerSearch() {
-                const query = customerSearchInput.value.trim().toLowerCase();
-                const favoriteCheckbox = document.getElementById('favoriteFilterCheckbox');
-                const showFavoritesOnly = favoriteCheckbox && favoriteCheckbox.checked;
-                
-                if (query.length < 1 && !showFavoritesOnly) {
-                    customerDropdown.style.display = 'none';
-                    return;
-                }
-                
-                // Filter customers based on search query and favorite filter
-                const filtered = customers.filter(customer => {
-                    // Apply favorite filter if checkbox is checked
-                    if (showFavoritesOnly && !isFavorite('customers', customer.unique_id)) {
-                        return false;
-                    }
-                    // Apply search query if there is one
-                    if (query.length > 0) {
-                    const nameMatch = customer.name.toLowerCase().includes(query);
-                    const idMatch = customer.unique_id.toLowerCase().includes(query);
-                    return nameMatch || idMatch;
-                    }
-                    // If no query but favorites only, show all favorites
-                    return true;
-                });
-                
-                if (filtered.length > 0) {
-                    let html = '';
-                    filtered.forEach(customer => {
-                        html += `
-                            <div class="customer-dropdown-item p-2 border-bottom" 
-                                 style="cursor: pointer; transition: background 0.2s;"
-                                 onmouseover="this.style.background='#f0f9ff'"
-                                 onmouseout="this.style.background='white'"
-                                 onclick="selectCustomerFromDropdown('${customer.id}', '${customer.unique_id}', '${customer.name.replace(/'/g, "\\'")}')">
-                                <div style="font-weight: 600; color: #1e40af;">${customer.name}</div>
-                                <div style="font-size: 0.8rem; color: #6b7280;">ID: ${customer.unique_id}</div>
-                            </div>
-                        `;
-                    });
-                    customerDropdownList.innerHTML = html;
-                    customerDropdown.style.display = 'block';
-                } else {
-                    customerDropdownList.innerHTML = '<div class="p-3 text-center text-muted">No customers found</div>';
-                    customerDropdown.style.display = 'block';
-                }
+        if (!searchInput || !dropdown) return;
+
+        const query = searchInput.value.trim().toLowerCase();
+        const showFavs = favCheckbox.checked;
+
+        if (query.length < 1 && !showFavs) {
+            dropdown.style.display = 'none';
+            return;
+        }
+
+        const filtered = customers.filter(c => {
+            if (showFavs && !isFavorite('customers', c.unique_id)) return false;
+            if (query.length > 0) {
+                return c.name.toLowerCase().includes(query) || c.unique_id.toLowerCase().includes(query);
             }
-            
-            // Make function globally accessible
-            window.filterCustomerSearch = filterCustomerSearch;
-            
-            // Show dropdown when input is focused (if favorites checkbox is checked)
-            customerSearchInput.addEventListener('focus', function(e) {
-                const favoriteCheckbox = document.getElementById('favoriteFilterCheckbox');
-                if (favoriteCheckbox && favoriteCheckbox.checked) {
-                    filterCustomerSearch();
-                }
-            });
-            
-            // Close dropdown when clicking outside
-            const favoriteCheckbox = document.getElementById('favoriteFilterCheckbox');
-            document.addEventListener('click', function(e) {
-                if (!customerSearchInput.contains(e.target) && 
-                    !customerDropdown.contains(e.target) && 
-                    !(favoriteCheckbox && favoriteCheckbox.contains(e.target))) {
-                    customerDropdown.style.display = 'none';
-                }
+            return true;
+        });
+
+        if (filtered.length > 0) {
+            dropdownList.innerHTML = filtered.map(c => `
+                <div class="p-2 border-bottom" style="cursor: pointer;" 
+                     onmouseover="this.style.background='#f0f9ff'" 
+                     onmouseout="this.style.background='white'"
+                     onclick="document.getElementById('customerSearchInput_${uid}').value='${c.name.replace(/'/g, "\\'")} (${c.unique_id})'; document.getElementById('selectedCustomerId_${uid}').value='${c.id}'; document.getElementById('customerDropdown_${uid}').style.display='none';">
+                    <div style="font-weight: 600; color: #1e40af;">${c.name}</div>
+                    <div style="font-size: 0.8rem; color: #6b7280;">ID: ${c.unique_id}</div>
+                </div>
+            `).join('');
+            dropdown.style.display = 'block';
+        } else {
+            dropdownList.innerHTML = '<div class="p-3 text-center text-muted">No customers found</div>';
+            dropdown.style.display = 'block';
+        }
+    };
+
+    setTimeout(() => {
+        const input = document.getElementById(`customerSearchInput_${uniqueId}`);
+        if (input) {
+            input.addEventListener('input', () => window.triggerCustomerFilter(uniqueId));
+            input.addEventListener('focus', () => {
+                if (document.getElementById(`favCheckbox_${uniqueId}`).checked) window.triggerCustomerFilter(uniqueId);
             });
         }
     }, 100);
-    
-    formContainer.appendChild(formCard);
-    messageBubble.appendChild(formContainer); // Append to the message bubble instead of messagesDiv
-    
-    // Store reference to customers for filtering
-    formContainer._customers = customers;
-    
-    // No need to show customer details - table already shows all info
+
+    messagesDiv.scrollTo({ top: messagesDiv.scrollHeight, behavior: 'smooth' });
 }
 
 // Update customer table star icons after favorite toggle
@@ -3849,8 +3768,7 @@ function addOrderSelectionForm(orders, filters = null) {
         return; // Exit if no bot message found
     }
     
-    // Find the inner message bubble div (the one with bg-light class)
-    // Try multiple selectors to find the message content area
+    // Find the inner message bubble div
     let messageBubble = lastBotMessage.querySelector('.message-bubble .bg-light');
     if (!messageBubble) {
         messageBubble = lastBotMessage.querySelector('.message-bubble .d-flex .bg-light');
@@ -3862,7 +3780,6 @@ function addOrderSelectionForm(orders, filters = null) {
         // Try to find the message-bubble itself and append directly
         const bubbleDiv = lastBotMessage.querySelector('.message-bubble');
         if (bubbleDiv) {
-            // Find or create a wrapper div inside the bubble
             let wrapper = bubbleDiv.querySelector('.d-flex');
             if (!wrapper) {
                 wrapper = document.createElement('div');
@@ -3870,7 +3787,6 @@ function addOrderSelectionForm(orders, filters = null) {
                 wrapper.style.cssText = 'gap: 8px; width: 100%;';
                 bubbleDiv.appendChild(wrapper);
             }
-            // Create content div if it doesn't exist
             let contentDiv = wrapper.querySelector('.bg-light');
             if (!contentDiv) {
                 contentDiv = document.createElement('div');
@@ -3884,9 +3800,7 @@ function addOrderSelectionForm(orders, filters = null) {
     
     if (!messageBubble) {
         console.error('addOrderSelectionForm: Could not find message bubble element');
-        console.log('Last bot message:', lastBotMessage);
-        console.log('Last bot message HTML:', lastBotMessage.innerHTML.substring(0, 500));
-        return; // Exit if bubble not found
+        return;
     }
     
     const formContainer = document.createElement('div');
@@ -3907,18 +3821,14 @@ function addOrderSelectionForm(orders, filters = null) {
     // Store original orders for filtering
     formContainer._originalOrders = orders;
     
-    // Check if we have filters (for distributor view or MR view)
-    // Distributor view has mr_names filter, MR view has customers filter
     const isDistributorView = filters && filters.mr_names && filters.mr_names.length > 0;
-    const isMRView = filters && filters.customers && filters.customers.length > 0; // MR view has customer filter
+    const isMRView = filters && filters.customers && filters.customers.length > 0; 
     
-    // Get unique values for filters
     const uniqueDates = filters?.dates || [...new Set(orders.map(o => o.order_date))].sort().reverse();
     const uniqueStatuses = filters?.statuses || [...new Set(orders.map(o => o.status || o.status_raw))].sort();
     const uniqueMRs = filters?.mr_names || [];
     const uniqueCustomers = filters?.customers || [];
     
-    // Get translations
     const t_func = (typeof t !== 'undefined') ? t : (key) => key;
     const orderManagementLabel = t_func('labels.orderManagementDashboard');
     const selectOrderLabel = t_func('labels.selectOrderToTrack');
@@ -3929,19 +3839,21 @@ function addOrderSelectionForm(orders, filters = null) {
         </h6>
         <form id="orderSelectionForm" onsubmit="handleOrderSelection(event)">
             ${isDistributorView ? `
+            ${uniqueMRs.length > 0 ? `
             <div class="mb-3">
                 <label for="mrFilter" class="form-label" style="font-weight: 500;">
-                    <i class="fas fa-user me-2"></i>${t_func('labels.filterByMRName')}
+                    <i class="fas fa-user-tie me-2"></i>Filter by Order Creator
                 </label>
                 <select class="form-select form-select-sm" id="mrFilter" 
                     style="border-radius: 8px; border: 1.5px solid #e5e7eb; padding: 8px 12px; font-size: 0.875rem;"
                     onchange="if(typeof filterOrdersByAll === 'function') filterOrdersByAll(); else console.error('filterOrdersByAll not found');">
-                    <option value="">${t_func('labels.allMRs')}</option>
+                    <option value="">-- All Order Creators --</option>
                     ${uniqueMRs.map(mr => `
                         <option value="${mr}">${mr}</option>
                     `).join('')}
                 </select>
             </div>
+            ` : ''}
             ` : ''}
             ${isMRView && uniqueCustomers.length > 0 ? `
             <div class="mb-3">
@@ -3988,81 +3900,13 @@ function addOrderSelectionForm(orders, filters = null) {
                 <label for="orderSelect" class="form-label" style="font-weight: 500;">
                     <i class="fas fa-box me-2"></i>${t_func('labels.chooseAnOrder')}
                 </label>
-                <div id="orderListContainer" style="max-height: 400px; overflow-y: auto; overflow-x: hidden; border: 2px solid #e5e7eb; border-radius: 10px; padding: 8px; display: none;">
-                    ${orders.map((order, index) => {
-                        const status = order.status || order.status_raw || 'pending';
-                        const statusLower = status.toLowerCase();
-                        let badgeClass = 'pending';
-                        if (statusLower.includes('confirm')) badgeClass = 'confirmed';
-                        else if (statusLower.includes('reject')) badgeClass = 'rejected';
-                        else if (statusLower.includes('cancel')) badgeClass = 'cancelled';
-                        else if (statusLower.includes('draft')) badgeClass = 'draft';
-                        else if (statusLower.includes('dispatch')) badgeClass = 'dispatched';
-                        else if (statusLower.includes('deliver')) badgeClass = 'delivered';
-                        
-                        const statusDisplay = order.status_display || status.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase());
-                        return `
-                        <div class="order-item-row mb-2 p-2 border rounded" 
-                             data-order-id="${String(order.order_id || '').replace(/"/g, '&quot;')}"
-                             data-status="${String(status || '').replace(/"/g, '&quot;')}"
-                             data-total="${order.total_amount || 0}"
-                             data-date="${String(order.order_date || '').replace(/"/g, '&quot;')}"
-                             data-mr="${String(order.mr_name || '').replace(/"/g, '&quot;')}"
-                             data-customer="${String(order.customer_name || '').replace(/"/g, '&quot;')}"
-                             data-customer-id="${String(order.customer_id || '').replace(/"/g, '&quot;')}"
-                             style="cursor: pointer; transition: all 0.2s;"
-                             onmouseover="this.style.backgroundColor='#f0f0f0'" 
-                             onmouseout="this.style.backgroundColor=''"
-                             onclick="handleOrderSelectionFromList('${String(order.order_id || '').replace(/'/g, "\\'")}');">
-                            <div class="d-flex justify-content-between align-items-center">
-                                <div>
-                                    <strong>${order.order_id}</strong>
-                                    ${order.customer_name ? ` | ${order.customer_name}` : ''}
-                                    ${order.mr_name ? ` | MR: ${order.mr_name}` : ''}
-                                </div>
-                                <div class="d-flex align-items-center gap-2">
-                                    <span class="order-status-badge ${badgeClass}">${statusDisplay}</span>
-                                    <span>${order.total_amount ? (order.total_amount.toLocaleString('en-US', {minimumFractionDigits: 0, maximumFractionDigits: 0}) + ' MMK') : '0 MMK'}</span>
-                                    <span class="text-muted small">${order.order_date}</span>
-                                    <button class="btn btn-sm btn-outline-primary" 
-                                            onclick="event.stopPropagation(); handleOrderSelectionFromList('${String(order.order_id || '').replace(/'/g, "\\'")}');" 
-                                            title="${t_func('labels.viewOrderDetails')}"
-                                            style="padding: 2px 8px; font-size: 0.75rem;">
-                                        <i class="fas fa-eye"></i> ${t_func('labels.viewOrderDetails')}
-                                    </button>
-                                </div>
-                            </div>
-                            ${isDistributorView ? '' : `
-                            <label class="d-flex justify-content-between align-items-center" style="cursor: pointer; margin: 0;" onclick="handleOrderSelectionFromList('${String(order.order_id || '').replace(/'/g, "\\'")}')">
-                                <div>
-                                    <strong>${order.order_id}</strong>
-                                    ${order.customer_name ? ` | ${order.customer_name}` : ''}
-                                </div>
-                                <div class="d-flex align-items-center gap-2">
-                                    <span class="order-status-badge ${badgeClass}">${statusDisplay}</span>
-                                    <span>${order.total_amount ? (order.total_amount.toLocaleString('en-US', {minimumFractionDigits: 0, maximumFractionDigits: 0}) + ' MMK') : '0 MMK'}</span>
-                                    <span class="text-muted small">${order.order_date}</span>
-                                </div>
-                            </label>
-                            `}
-                        </div>
-                    `;
-                    }).join('')}
-                </div>
+                <div id="orderListContainer" style="display: none;"></div>
+                
                 <select class="form-select form-select-lg" id="orderSelect" name="order_id" required 
                      style="border-radius: 10px; border: 2px solid #e5e7eb; padding: 12px; font-size: 0.95rem; max-height: 400px; overflow-y: auto; overflow-x: hidden; display: block;">
-                      <option value="">${t_func('labels.selectOrder')}</option>
+                      <option value="" selected disabled>${t_func('labels.selectOrder')}</option>
                     ${orders.map((order, index) => {
                         const status = order.status || order.status_raw || 'pending';
-                        const statusLower = status.toLowerCase();
-                        let badgeClass = 'pending';
-                        if (statusLower.includes('confirm')) badgeClass = 'confirmed';
-                        else if (statusLower.includes('reject')) badgeClass = 'rejected';
-                        else if (statusLower.includes('cancel')) badgeClass = 'cancelled';
-                        else if (statusLower.includes('draft')) badgeClass = 'draft';
-                        else if (statusLower.includes('dispatch')) badgeClass = 'dispatched';
-                        else if (statusLower.includes('deliver')) badgeClass = 'delivered';
-                        
                         const statusDisplay = order.status_display || status.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase());
                         return `
                         <option value="${order.order_id}" 
@@ -4083,20 +3927,21 @@ function addOrderSelectionForm(orders, filters = null) {
                     ${isDistributorView ? t_func('messages.selectOrderFromDropdown') : t_func('messages.selectOrderToTrack')}
                 </small>
             </div>
-            <div class="d-flex gap-2">
+            
+            <div class="d-flex flex-column gap-2">
                 ${isDistributorView ? `
-                <button type="submit" class="btn btn-primary flex-grow-1" 
-                    style="border-radius: 8px; padding: 8px 14px; font-weight: 600; font-size: 0.8rem;">
+                <button type="submit" class="btn btn-primary w-100" 
+                    style="border-radius: 8px; padding: 12px; font-weight: 600; font-size: 0.9rem;">
                     <i class="fas fa-search me-2"></i>${t_func('labels.viewOrderDetails')}
                 </button>
                 ` : `
-                <button type="submit" class="btn btn-primary flex-grow-1" 
-                    style="border-radius: 8px; padding: 8px 14px; font-weight: 600; font-size: 0.8rem;">
+                <button type="submit" class="btn btn-primary w-100" 
+                    style="border-radius: 8px; padding: 12px; font-weight: 600; font-size: 0.9rem;">
                     <i class="fas fa-search me-2"></i>${t_func('labels.viewOrderDetails')}
                 </button>
                 `}
-                <button type="button" class="btn btn-outline-secondary" onclick="this.closest('.order-selection-container').remove(); closeRecentSearches();"
-                    style="border-radius: 8px; padding: 8px 14px; font-size: 0.8rem;">
+                <button type="button" class="btn btn-outline-secondary w-100" onclick="this.closest('.order-selection-container').remove(); closeRecentSearches();"
+                    style="border-radius: 8px; padding: 12px; font-size: 0.9rem;">
                     <i class="fas fa-times"></i> ${t_func('labels.cancel')}
                 </button>
             </div>
@@ -4104,15 +3949,13 @@ function addOrderSelectionForm(orders, filters = null) {
     `;
     
     formContainer.appendChild(formCard);
-    messageBubble.appendChild(formContainer); // Append to the message bubble instead of messagesDiv
+    messageBubble.appendChild(formContainer);
     
-    // Ensure form is visible
     formContainer.style.display = 'block';
     formContainer.style.visibility = 'visible';
     formContainer.style.opacity = '1';
     
-    
-    // Add event listeners directly to filter elements (more reliable than inline handlers)
+    // Add event listeners (same as before)
     setTimeout(() => {
         const mrFilter = formContainer.querySelector('#mrFilter');
         const customerFilter = formContainer.querySelector('#customerFilter');
@@ -4121,82 +3964,37 @@ function addOrderSelectionForm(orders, filters = null) {
         
         if (mrFilter) {
             mrFilter.addEventListener('change', function() {
-                console.log('MR filter changed:', this.value);
-                if (typeof filterOrdersByAll === 'function') {
-                    filterOrdersByAll();
-                } else {
-                    console.error('filterOrdersByAll function not found');
-                }
+                if (typeof filterOrdersByAll === 'function') filterOrdersByAll();
             });
         }
-        
         if (customerFilter) {
             customerFilter.addEventListener('change', function() {
-                console.log('Customer filter changed:', this.value);
-                if (typeof filterOrdersByDateAndStatus === 'function') {
-                    filterOrdersByDateAndStatus();
-                } else {
-                    console.error('filterOrdersByDateAndStatus function not found');
-                }
+                if (typeof filterOrdersByDateAndStatus === 'function') filterOrdersByDateAndStatus();
             });
         }
-        
         if (dateFilter) {
             dateFilter.addEventListener('change', function() {
-                console.log('Date filter changed:', this.value);
                 if (isDistributorView) {
-                    if (typeof filterOrdersByAll === 'function') {
-                        filterOrdersByAll();
-                    } else {
-                        console.error('filterOrdersByAll function not found');
-                    }
+                    if (typeof filterOrdersByAll === 'function') filterOrdersByAll();
                 } else {
-                    if (typeof filterOrdersByDateAndStatus === 'function') {
-                        filterOrdersByDateAndStatus();
-                    } else {
-                        console.error('filterOrdersByDateAndStatus function not found');
-                    }
+                    if (typeof filterOrdersByDateAndStatus === 'function') filterOrdersByDateAndStatus();
                 }
             });
         }
-        
         if (statusFilter) {
             statusFilter.addEventListener('change', function() {
-                console.log('Status filter changed:', this.value);
                 if (isDistributorView) {
-                    if (typeof filterOrdersByAll === 'function') {
-                        filterOrdersByAll();
-                    } else {
-                        console.error('filterOrdersByAll function not found');
-                    }
+                    if (typeof filterOrdersByAll === 'function') filterOrdersByAll();
                 } else {
-                    if (typeof filterOrdersByDateAndStatus === 'function') {
-                        filterOrdersByDateAndStatus();
-                    } else {
-                        console.error('filterOrdersByDateAndStatus function not found');
-                    }
+                    if (typeof filterOrdersByDateAndStatus === 'function') filterOrdersByDateAndStatus();
                 }
             });
         }
-        
-        console.log('addOrderSelectionForm: Event listeners attached', {
-            mrFilter: !!mrFilter,
-            customerFilter: !!customerFilter,
-            dateFilter: !!dateFilter,
-            statusFilter: !!statusFilter
-        });
     }, 100);
     
-    // Scroll to show the form
     setTimeout(() => {
         formContainer.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }, 200);
-    
-    console.log('addOrderSelectionForm: Form added successfully', {
-        ordersCount: orders.length,
-        hasFilters: !!filters,
-        formContainer: formContainer
-    });
 }
 
 // Filter orders by all filters (MR name, date, status) - for distributors
@@ -4224,16 +4022,24 @@ function filterOrdersByAll() {
     const selectedDate = dateFilter?.value || '';
     const selectedStatus = statusFilter?.value || '';
     
-    // Filter orders by MR name, date, and status
+    // Filter orders
     let filteredOrders = orders;
+    
+    // Filter by MR/Creator name (now clearly shows "Dealer: Name" or "MR: Name")
     if (selectedMR) {
-        filteredOrders = filteredOrders.filter(order => order.mr_name === selectedMR);
+        filteredOrders = filteredOrders.filter(order => {
+            return order.mr_name === selectedMR || 
+                   (order.placed_by_display && order.placed_by_display.includes(selectedMR));
+        });
     }
+    
+    // Filter by date
     if (selectedDate) {
         filteredOrders = filteredOrders.filter(order => order.order_date === selectedDate);
     }
+    
+    // Filter by status
     if (selectedStatus) {
-        // Normalize status for comparison (handle both raw status and display status)
         filteredOrders = filteredOrders.filter(order => {
             const orderStatus = order.status || order.status_raw || '';
             const normalizedOrderStatus = orderStatus.toLowerCase().replace(/\s+/g, '_');
@@ -4273,8 +4079,8 @@ function filterOrdersByAll() {
                     <div class="d-flex justify-content-between align-items-center">
                         <div>
                             <strong>${order.order_id}</strong>
-                            ${order.customer_name ? ` | ${order.customer_name}` : ''}
-                            ${order.mr_name ? ` | MR: ${order.mr_name}` : ''}
+                            ${order.customer_name ? ` | Customer: ${order.customer_name}` : ''}
+                            ${order.placed_by_display ? ` | ${order.placed_by_display}` : (order.mr_name ? ` | MR: ${order.mr_name}` : '')}
                         </div>
                         <div class="d-flex align-items-center gap-2">
                             <span class="order-status-badge ${badgeClass}">${statusDisplay}</span>
@@ -4533,1073 +4339,334 @@ window.handleOrderSelection = handleOrderSelection;
 // filterOrdersByAll and filterOrdersByDateAndStatus are already exposed above
 
 // Display MR order details with enhanced tabular format
+// Display MR order details with enhanced horizontal scrolling
+// Display MR order details with enhanced horizontal scrolling
+// =========================================================
+// 1. MAIN DISPLAY FUNCTION (Renders Scrollable Tables)
+// =========================================================
+// Display MR order details with Fixed Mobile Horizontal Scroll
+// Display MR order details with FORCED MOBILE SCROLLING
+// Display MR order details with FORCED TOUCH SCROLLING
+// Display MR order details - FINAL MOBILE FIX (Removed Sticky Columns to enable scroll)
 function displayMROrderDetails(order) {
     try {
-        if (!order) {
-            console.error('displayMROrderDetails: Order data is missing');
-            addMessage('Error: Order data is missing. Please try again.', 'bot', 'error');
-            return;
-        }
+        if (!order) return;
         
         const messagesDiv = document.getElementById('chatMessages');
-        if (!messagesDiv) {
-            console.error('displayMROrderDetails: Chat messages container not found');
-            return;
-        }
+        if (!messagesDiv) return;
         
-        // Helper function to get status badge HTML
+        // --- Status Badge Helper ---
         function getStatusBadge(status) {
             const statusLower = (status || '').toLowerCase();
             let badgeClass = 'pending';
             let badgeText = status ? status.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase()) : 'Unknown';
-            
             if (statusLower.includes('confirm')) badgeClass = 'confirmed';
             else if (statusLower.includes('reject')) badgeClass = 'rejected';
             else if (statusLower.includes('cancel')) badgeClass = 'cancelled';
             else if (statusLower.includes('draft')) badgeClass = 'draft';
             else if (statusLower.includes('dispatch')) badgeClass = 'dispatched';
             else if (statusLower.includes('deliver')) badgeClass = 'delivered';
-            
             return `<span class="order-status-badge ${badgeClass}">${badgeText}</span>`;
         }
         
-        // Get translations (declare once at function level)
         const t_func = (typeof t !== 'undefined') ? t : (key) => key;
-        const orderDetailsLabel = t_func('labels.orderDetails');
-        const orderInfoLabel = t_func('labels.orderInformation');
-        const statusLabel = t_func('labels.status');
-        const dateLabel = t_func('labels.date');
-        const totalItemsLabel = t_func('labels.totalItems');
-        const totalAmountLabel = t_func('labels.totalAmount');
-        const customerLabel = t_func('labels.customer');
-        const unitsLabel = t_func('labels.units');
-        const productNameLabel = t_func('labels.productName');
-        const quantityLabel = t_func('labels.quantity');
-        const focLabel = t_func('labels.foc');
-        const unitPriceLabel = t_func('labels.unitPrice');
-        const totalPriceLabel = t_func('labels.totalPrice');
         
-        // Helper function to format dates safely
         const formatOrFallback = (value) => {
             if (!value) return 'Not available';
             try {
                 if (typeof value === 'string' && value.includes('T')) {
-                    // ISO format
-                    const date = new Date(value);
-                    if (!isNaN(date.getTime())) {
-                        return formatDate(value);
-                    }
+                    return new Date(value).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
                 }
-                return formatDate(value);
-            } catch (e) {
                 return value;
-            }
+            } catch (e) { return value; }
         };
 
-        // Get timeline data
-        const placedAt = order.placed_at || order.order_datetime || order.created_at || order.order_date;
-        const confirmedAt = order.distributor_confirmed_at;
-        const deliveredAt = order.delivered_at;
-        const lastUpdatedAt = order.last_updated_at;
-        
-        // Check if order is cancelled
-        const orderStatus = (order.status || order.status_display || '').toLowerCase();
-        const isCancelled = orderStatus.includes('cancel');
-
-        // Create main message container
-        let message = `**📦 ${orderDetailsLabel} - ${order.order_id || 'Unknown'}**\n\n`;
-        
-        // Add pending order notice if applicable
-        if (order.is_fulfilled_pending_order && order.pending_source_orders && order.pending_source_orders.length > 0) {
-            message += `⚠️ **This order was created by fulfilling a previous pending order.**\n\n`;
-            order.pending_source_orders.forEach(p => {
-                message += `• Original Order ID: **${p.original_order_id || 'N/A'}** (placed on ${p.original_order_date ? formatOrFallback(p.original_order_date) : 'N/A'})\n`;
-                message += `  - Product: ${p.product_name} (${p.product_code})\n`;
-                message += `  - Requested Quantity: ${p.requested_quantity} units\n`;
-            });
-            message += `\n`;
-        }
-        
-        // Add notice about pending orders created FROM this order (when partially dispatched)
+        // --- 1. Header Message ---
+        let message = `**📦 ${t_func('labels.orderDetails')} - ${order.order_id || 'Unknown'}**\n\n`;
         if (order.has_pending_orders && order.pending_orders_created && order.pending_orders_created.length > 0) {
-            message += `📋 **⚠️ Partial Dispatch Notice:**\n\n`;
-            message += `This order was partially dispatched. Some items are still pending and will be fulfilled when stock becomes available.\n\n`;
-            message += `**Pending Items:**\n\n`;
-            order.pending_orders_created.forEach(p => {
-                const statusBadge = p.status === 'fulfilled' ? '✅ Fulfilled' : '⏳ Pending';
-                message += `• **${p.product_name}** (${p.product_code})\n`;
-                message += `  - Pending Quantity: ${p.requested_quantity} paid + ${p.original_foc_quantity} FOC = ${p.total_pending_quantity} total units\n`;
-                message += `  - Status: ${statusBadge}\n`;
-                if (p.fulfilled_order_id) {
-                    message += `  - Fulfilled Order ID: **${p.fulfilled_order_id}** (created on ${p.fulfilled_order_date ? formatOrFallback(p.fulfilled_order_date) : 'N/A'})\n`;
-                } else {
-                    message += `  - Created: ${p.created_at ? formatOrFallback(p.created_at) : 'N/A'}\n`;
-                }
-                message += `\n`;
-            });
-            message += `\n`;
+            message += `📋 **⚠️ Partial Dispatch Notice:**\nSome items are pending. See details below.\n\n`;
         }
-        
-        // Add message first
         addMessage(message, 'bot');
         
-        // Find the last bot message to add table and copy button
+        // Find container
         const botMessages = messagesDiv.querySelectorAll('.message.bot');
         const lastBotMessage = botMessages[botMessages.length - 1];
-        
-        if (!lastBotMessage) {
-            console.error('displayMROrderDetails: Could not find last bot message');
-            return;
-        }
-        
-        // Add copy button to the order title
-        const messageBubble = lastBotMessage.querySelector('.message-bubble .bg-light');
-        if (messageBubble) {
-            const titleElement = messageBubble.querySelector('strong');
-            if (titleElement && order.order_id) {
-                const copyBtn = document.createElement('button');
-                copyBtn.className = 'copy-btn';
-                copyBtn.innerHTML = '<i class="fas fa-copy"></i>';
-                copyBtn.title = 'Copy Order ID';
-                copyBtn.onclick = function() { copyToClipboard(order.order_id, this); };
-                copyBtn.style.cssText = 'margin-left: 8px; display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; background: rgba(37, 99, 235, 0.1); border: 1px solid rgba(37, 99, 235, 0.3); border-radius: 6px; color: #2563eb; font-size: 0.75rem; cursor: pointer; transition: all 0.2s;';
-                titleElement.parentNode.insertBefore(copyBtn, titleElement.nextSibling);
-            }
-        }
-        
-        // Try multiple selectors to find the message bubble for table
-        let messageBubbleForTable = lastBotMessage.querySelector('.message-bubble .bg-light');
-        if (!messageBubbleForTable) {
-            messageBubbleForTable = lastBotMessage.querySelector('.message-bubble');
-        }
-        if (!messageBubbleForTable) {
-            messageBubbleForTable = lastBotMessage.querySelector('.bg-light');
-        }
-        if (!messageBubbleForTable) {
-            messageBubbleForTable = lastBotMessage;
-        }
+        let messageBubbleForTable = lastBotMessage.querySelector('.message-bubble .bg-light') || 
+                                    lastBotMessage.querySelector('.message-bubble .d-flex .bg-light') || 
+                                    lastBotMessage.querySelector('.message-bubble'); // Fallback
         
         if (messageBubbleForTable) {
-            // Add data attribute for print functionality
-            messageBubbleForTable.setAttribute('data-order-id', order.order_id || '');
             
-            // Create timeline and status table container (FIRST TABLE - at the top)
-            const timelineTableContainer = document.createElement('div');
-            timelineTableContainer.className = 'order-timeline-table mt-3 mb-3';
-            timelineTableContainer.style.cssText = 'width: 100%; overflow-x: auto;';
-
-            // Build timeline and status table
-            let timelineTableHTML = `
-                <div style="overflow-x: auto; width: 100%; max-width: 100%; box-sizing: border-box; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 15px;">
-                    <table class="table table-bordered table-hover mb-0" style="font-size: 0.875rem; margin-bottom: 0; width: 100%; min-width: 700px; table-layout: auto;">
-                        <thead style="background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%); color: white;">
-                            <tr>
-                                <th style="padding: 12px; border: 1px solid #1e40af; font-weight: 600; text-align: left; min-width: 180px;">Event</th>
-                                <th style="padding: 12px; border: 1px solid #1e40af; font-weight: 600; text-align: left; min-width: 250px;">Date & Time</th>
-                                <th style="padding: 12px; border: 1px solid #1e40af; font-weight: 600; text-align: center; min-width: 120px; white-space: nowrap;">Status</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr style="background-color: #f8f9fa;">
-                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600; white-space: nowrap;">
-                                    <i class="fas fa-shopping-cart me-2" style="color: #2563eb;"></i>Order Placed
-                                </td>
-                                <td style="padding: 12px; border: 1px solid #dee2e6;">
-                                    ${placedAt ? formatOrFallback(placedAt) : 'Not available'}
-                                </td>
-                                <td style="padding: 12px; border: 1px solid #dee2e6; text-align: center; white-space: nowrap;">
-                                    <span style="color: #10b981; font-weight: 600;">✓ Completed</span>
-                                </td>
-                            </tr>
-                            ${!isCancelled ? `
-                            <tr style="background-color: ${confirmedAt ? '#f0fdf4' : '#fff7ed'};">
-                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600; white-space: nowrap;">
-                                    <i class="fas fa-check-circle me-2" style="color: ${confirmedAt ? '#10b981' : '#f59e0b'};"></i>Dealer Confirmed
-                                </td>
-                                <td style="padding: 12px; border: 1px solid #dee2e6;">
-                                    ${confirmedAt ? formatOrFallback(confirmedAt) : 'Not yet confirmed by dealer'}
-                                </td>
-                                <td style="padding: 12px; border: 1px solid #dee2e6; text-align: center; white-space: nowrap;">
-                                    ${confirmedAt ? '<span style="color: #10b981; font-weight: 600;">✓ Completed</span>' : '<span style="color: #f59e0b; font-weight: 600;">⏳ Pending</span>'}
-                                </td>
-                            </tr>
-                            <tr style="background-color: ${deliveredAt ? '#f0fdf4' : '#fff7ed'};">
-                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600; white-space: nowrap;">
-                                    <i class="fas fa-truck me-2" style="color: ${deliveredAt ? '#10b981' : '#f59e0b'};"></i>Delivered to Customer
-                                </td>
-                                <td style="padding: 12px; border: 1px solid #dee2e6;">
-                                    ${deliveredAt ? formatOrFallback(deliveredAt) : 'Not yet delivered'}
-                                </td>
-                                <td style="padding: 12px; border: 1px solid #dee2e6; text-align: center; white-space: nowrap;">
-                                    ${deliveredAt ? '<span style="color: #10b981; font-weight: 600;">✓ Completed</span>' : '<span style="color: #f59e0b; font-weight: 600;">⏳ Pending</span>'}
-                                </td>
-                            </tr>
-                            ` : ''}
-                            ${lastUpdatedAt ? `
-                            <tr style="background-color: #f8f9fa;">
-                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600; white-space: nowrap;">
-                                    <i class="fas fa-clock me-2" style="color: #6b7280;"></i>Last Updated
-                                </td>
-                                <td style="padding: 12px; border: 1px solid #dee2e6;">
-                                    ${formatOrFallback(lastUpdatedAt)}
-                                </td>
-                                <td style="padding: 12px; border: 1px solid #dee2e6; text-align: center; white-space: nowrap;">
-                                    <span style="color: #6b7280;">-</span>
-                                </td>
-                            </tr>
-                            ` : ''}
-                        </tbody>
-                    </table>
-                </div>
+            // --- SCROLL CONTAINER STYLE ---
+            // removed complex positioning, just pure scroll
+            const scrollWrapperStyle = `
+                width: 100%;
+                display: block;
+                overflow-x: auto; 
+                -webkit-overflow-scrolling: touch;
+                margin: 15px 0;
+                border-radius: 12px;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+                background: white;
+                padding-bottom: 5px;
             `;
 
-            timelineTableContainer.innerHTML = timelineTableHTML;
-            messageBubbleForTable.appendChild(timelineTableContainer);
+            // --- TABLE 1: TIMELINE ---
+            const timelineContainer = document.createElement('div');
+            timelineContainer.style.cssText = scrollWrapperStyle;
 
-            // Create order information table (SECOND TABLE)
-            const infoTableContainer = document.createElement('div');
-            infoTableContainer.className = 'order-info-table mt-3 mb-3';
-            infoTableContainer.style.cssText = 'width: 100%; overflow-x: auto;';
+            let timelineTableHTML = `
+                <table class="table table-bordered table-hover mb-0" style="min-width: 700px; font-size: 0.875rem;">
+                    <thead style="background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%); color: white;">
+                        <tr>
+                            <th style="padding: 12px; white-space: nowrap;">Event</th>
+                            <th style="padding: 12px; white-space: nowrap;">Date & Time</th>
+                            <th style="padding: 12px; white-space: nowrap; text-align: center;">Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr style="background-color: #f8f9fa;">
+                            <td style="padding: 12px; white-space: nowrap;"><i class="fas fa-shopping-cart me-2" style="color: #2563eb;"></i>Order Placed</td>
+                            <td style="padding: 12px; white-space: nowrap;">${order.placed_at ? formatOrFallback(order.placed_at) : 'Not available'}</td>
+                            <td style="padding: 12px; white-space: nowrap; text-align: center;"><span style="color: #10b981; font-weight: 600;">✓ Completed</span></td>
+                        </tr>
+                        <tr style="background-color: ${order.distributor_confirmed_at ? '#f0fdf4' : '#fff7ed'};">
+                            <td style="padding: 12px; white-space: nowrap;"><i class="fas fa-check-circle me-2" style="color: ${order.distributor_confirmed_at ? '#10b981' : '#f59e0b'};"></i>Dealer Confirmed</td>
+                            <td style="padding: 12px; white-space: nowrap;">${order.distributor_confirmed_at ? formatOrFallback(order.distributor_confirmed_at) : 'Not yet confirmed'}</td>
+                            <td style="padding: 12px; white-space: nowrap; text-align: center;">${order.distributor_confirmed_at ? '<span style="color: #10b981; font-weight: 600;">✓ Completed</span>' : '<span style="color: #f59e0b; font-weight: 600;">⏳ Pending</span>'}</td>
+                        </tr>
+                        <tr style="background-color: ${order.delivered_at ? '#f0fdf4' : '#fff7ed'};">
+                            <td style="padding: 12px; white-space: nowrap;"><i class="fas fa-truck me-2" style="color: ${order.delivered_at ? '#10b981' : '#f59e0b'};"></i>Delivered</td>
+                            <td style="padding: 12px; white-space: nowrap;">${order.delivered_at ? formatOrFallback(order.delivered_at) : 'Not yet delivered'}</td>
+                            <td style="padding: 12px; white-space: nowrap; text-align: center;">${order.delivered_at ? '<span style="color: #10b981; font-weight: 600;">✓ Completed</span>' : '<span style="color: #f59e0b; font-weight: 600;">⏳ Pending</span>'}</td>
+                        </tr>
+                    </tbody>
+                </table>
+            `;
+            timelineContainer.innerHTML = timelineTableHTML;
+            messageBubbleForTable.appendChild(timelineContainer);
+
+            // --- TABLE 2: INFO (Sticky REMOVED to fix scroll) ---
+            const infoContainer = document.createElement('div');
+            infoContainer.style.cssText = scrollWrapperStyle;
 
             let infoTableHTML = `
-                <div style="overflow-x: auto; width: 100%; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 15px;">
-                    <table class="table table-bordered table-hover mb-0" style="font-size: 0.875rem; margin-bottom: 0; width: 100%; min-width: 500px;">
-                        <thead style="background: linear-gradient(135deg, #059669 0%, #047857 100%); color: white;">
-                            <tr>
-                                <th style="padding: 12px; border: 1px solid #065f46; font-weight: 600; text-align: left; width: 40%;">Information</th>
-                                <th style="padding: 12px; border: 1px solid #065f46; font-weight: 600; text-align: left; width: 60%;">Details</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr>
-                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
-                                    <i class="fas fa-info-circle me-2" style="color: #059669;"></i>${statusLabel}
-                                </td>
-                                <td style="padding: 12px; border: 1px solid #dee2e6;">
-                                    ${getStatusBadge(order.status || order.status_display)}
-                                </td>
-                            </tr>
-                            ${order.order_stage ? `
-                            <tr>
-                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
-                                    <i class="fas fa-layer-group me-2" style="color: #059669;"></i>Order Stage
-                                </td>
-                                <td style="padding: 12px; border: 1px solid #dee2e6;">
-                                    ${order.order_stage}
-                                </td>
-                            </tr>
-                            ` : ''}
-                            <tr>
-                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
-                                    <i class="fas fa-calendar me-2" style="color: #059669;"></i>${dateLabel}
-                                </td>
-                                <td style="padding: 12px; border: 1px solid #dee2e6;">
-                                    ${order.order_datetime || order.order_date || 'N/A'}
-                                </td>
-                            </tr>
-                            <tr>
-                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
-                                    <i class="fas fa-boxes me-2" style="color: #059669;"></i>${totalItemsLabel}
-                                </td>
-                                <td style="padding: 12px; border: 1px solid #dee2e6;">
-                                    ${order.total_items || 0} ${unitsLabel}
-                                </td>
-                            </tr>
-                            <tr>
-                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
-                                    <i class="fas fa-money-bill-wave me-2" style="color: #059669;"></i>${totalAmountLabel}
-                                </td>
-                                <td style="padding: 12px; border: 1px solid #dee2e6;">
-                                    <strong style="color: #059669;">${(order.total_amount || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK</strong>
-                                </td>
-                            </tr>
-                            ${order.area ? `
-                            <tr>
-                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
-                                    <i class="fas fa-map-marker-alt me-2" style="color: #059669;"></i>Area
-                                </td>
-                                <td style="padding: 12px; border: 1px solid #dee2e6;">
-                                    ${order.area}
-                                </td>
-                            </tr>
-                            ` : ''}
-                            ${order.customer_name ? `
-                            <tr>
-                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
-                                    <i class="fas fa-user me-2" style="color: #059669;"></i>${customerLabel}
-                                </td>
-                                <td style="padding: 12px; border: 1px solid #dee2e6;">
-                                    ${order.customer_name}
-                                </td>
-                            </tr>
-                            ` : ''}
-                        </tbody>
-                    </table>
-                </div>
+                <table class="table table-bordered table-hover mb-0" style="min-width: 650px; font-size: 0.875rem;">
+                    <thead style="background: linear-gradient(135deg, #059669 0%, #047857 100%); color: white;">
+                        <tr>
+                            <th style="padding: 12px; white-space: nowrap; width: 40%;">Information</th>
+                            <th style="padding: 12px; white-space: nowrap; width: 60%;">Details</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td style="padding: 12px; font-weight: 600; white-space: nowrap; background: #f8f9fa;"><i class="fas fa-info-circle me-2" style="color: #059669;"></i>Status</td>
+                            <td style="padding: 12px; white-space: nowrap;">${getStatusBadge(order.status || order.status_display)}</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 12px; font-weight: 600; white-space: nowrap; background: #f8f9fa;"><i class="fas fa-calendar me-2" style="color: #059669;"></i>Date</td>
+                            <td style="padding: 12px; white-space: nowrap;">${order.order_datetime || order.order_date || 'N/A'}</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 12px; font-weight: 600; white-space: nowrap; background: #f8f9fa;"><i class="fas fa-user me-2" style="color: #059669;"></i>Placed By</td>
+                            <td style="padding: 12px; white-space: nowrap;">${order.placed_by_display || (order.mr_name ? 'MR: ' + order.mr_name : 'N/A')}</td>
+                        </tr>
+                        ${order.mr_email ? `<tr>
+                            <td style="padding: 12px; font-weight: 600; white-space: nowrap; background: #f8f9fa;"><i class="fas fa-envelope me-2" style="color: #059669;"></i>Email</td>
+                            <td style="padding: 12px; white-space: nowrap;">${order.mr_email}</td>
+                        </tr>` : ''}
+                        ${order.mr_phone ? `<tr>
+                            <td style="padding: 12px; font-weight: 600; white-space: nowrap; background: #f8f9fa;"><i class="fas fa-phone me-2" style="color: #059669;"></i>Phone</td>
+                            <td style="padding: 12px; white-space: nowrap;">${order.mr_phone}</td>
+                        </tr>` : ''}
+                        ${order.area ? `<tr>
+                            <td style="padding: 12px; font-weight: 600; white-space: nowrap; background: #f8f9fa;"><i class="fas fa-map-marker-alt me-2" style="color: #059669;"></i>Area</td>
+                            <td style="padding: 12px; white-space: nowrap;">${order.area}</td>
+                        </tr>` : ''}
+                        ${order.customer_name ? `<tr>
+                            <td style="padding: 12px; font-weight: 600; white-space: nowrap; background: #f8f9fa;"><i class="fas fa-user me-2" style="color: #059669;"></i>Customer</td>
+                            <td style="padding: 12px; white-space: nowrap;">${order.customer_name}</td>
+                        </tr>` : ''}
+                        ${order.delivery_partner_name ? `<tr>
+                            <td style="padding: 12px; font-weight: 600; white-space: nowrap; background: #f8f9fa;"><i class="fas fa-truck me-2" style="color: #059669;"></i>Delivery</td>
+                            <td style="padding: 12px; white-space: nowrap;">${order.delivery_partner_name}</td>
+                        </tr>` : ''}
+                        <tr>
+                            <td style="padding: 12px; font-weight: 600; white-space: nowrap; background: #f8f9fa;"><i class="fas fa-money-bill-wave me-2" style="color: #059669;"></i>Total</td>
+                            <td style="padding: 12px; white-space: nowrap;"><strong style="color: #059669;">${(order.total_amount || 0).toLocaleString('en-US', {minimumFractionDigits: 2})} MMK</strong></td>
+                        </tr>
+                    </tbody>
+                </table>
             `;
+            infoContainer.innerHTML = infoTableHTML;
+            messageBubbleForTable.appendChild(infoContainer);
 
-            infoTableContainer.innerHTML = infoTableHTML;
-            messageBubbleForTable.appendChild(infoTableContainer);
-            
-            // Create items table container (THIRD TABLE - product items)
-            const tableContainer = document.createElement('div');
-            tableContainer.className = 'order-items-table mt-3 mb-3';
-            tableContainer.style.cssText = 'width: 100%; overflow-x: auto;';
-            
-            // Build items table
-            let tableHTML = `
-                <div style="overflow-x: auto; width: 100%; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
-                    <table class="table table-bordered table-hover mb-0" style="font-size: 0.875rem; margin-bottom: 0; width: 100%; min-width: 500px;">
-                        <thead style="background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%); color: white;">
+            // --- TABLE 3: ITEMS ---
+            if (order.items && order.items.length > 0) {
+                const itemsContainer = document.createElement('div');
+                itemsContainer.style.cssText = scrollWrapperStyle;
+
+                let itemsTableHTML = `
+                    <table class="table table-bordered table-hover mb-0" style="min-width: 800px; font-size: 0.875rem;">
+                        <thead style="background: linear-gradient(135deg, #7c3aed 0%, #6d28d9 100%); color: white;">
                             <tr>
-                                <th style="padding: 12px; border: 1px solid #1e40af; font-weight: 600; text-align: left;">${productNameLabel}</th>
-                                <th style="padding: 12px; border: 1px solid #1e40af; font-weight: 600; text-align: center;">${quantityLabel}</th>
-                                <th style="padding: 12px; border: 1px solid #1e40af; font-weight: 600; text-align: center;">${focLabel}</th>
-                                <th style="padding: 12px; border: 1px solid #1e40af; font-weight: 600; text-align: right;">${unitPriceLabel}</th>
-                                <th style="padding: 12px; border: 1px solid #1e40af; font-weight: 600; text-align: right;">${totalPriceLabel}</th>
+                                <th style="padding: 12px; white-space: nowrap; min-width: 250px;">Product Name</th>
+                                <th style="padding: 12px; white-space: nowrap; text-align: center; width: 80px;">Qty</th>
+                                <th style="padding: 12px; white-space: nowrap; text-align: center; width: 80px;">FOC</th>
+                                <th style="padding: 12px; white-space: nowrap; text-align: right; width: 120px;">Unit Price</th>
+                                <th style="padding: 12px; white-space: nowrap; text-align: right; width: 120px;">Total Price</th>
                             </tr>
                         </thead>
                         <tbody>
-            `;
-            
-            if (order.items && order.items.length > 0) {
+                `;
+
                 order.items.forEach((item, index) => {
                     const rowColor = index % 2 === 0 ? '#f8f9fa' : '#ffffff';
-                    const focDisplay = (item.free_quantity || 0) > 0 
-                        ? `<span style="color: #10b981; font-weight: 600;">+${item.free_quantity}</span>` 
-                        : '<span style="color: #6b7280;">-</span>';
-                    
-                    tableHTML += `
+                    const focDisplay = (item.free_quantity || 0) > 0 ? `<span style="color: #10b981; font-weight: 600;">+${item.free_quantity}</span>` : '-';
+                    itemsTableHTML += `
                         <tr style="background-color: ${rowColor};">
-                            <td style="padding: 12px; border: 1px solid #dee2e6;">
-                                <strong>${item.product_name || 'Unknown Product'}</strong>
-                            </td>
-                            <td style="padding: 12px; border: 1px solid #dee2e6; text-align: center;">
-                                ${item.quantity || 0} ${unitsLabel}
-                            </td>
-                            <td style="padding: 12px; border: 1px solid #dee2e6; text-align: center;">
-                                ${focDisplay}
-                            </td>
-                            <td style="padding: 12px; border: 1px solid #dee2e6; text-align: right;">
-                                ${(item.unit_price || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK
-                            </td>
-                            <td style="padding: 12px; border: 1px solid #dee2e6; text-align: right; font-weight: 600;">
-                                ${(item.total_price || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK
-                            </td>
+                            <td style="padding: 12px; white-space: normal;"><strong>${item.product_name || 'Unknown'}</strong></td>
+                            <td style="padding: 12px; text-align: center; white-space: nowrap;">${item.quantity || 0}</td>
+                            <td style="padding: 12px; text-align: center; white-space: nowrap;">${focDisplay}</td>
+                            <td style="padding: 12px; text-align: right; white-space: nowrap;">${(item.unit_price || 0).toLocaleString('en-US', {minimumFractionDigits: 2})} MMK</td>
+                            <td style="padding: 12px; text-align: right; white-space: nowrap; font-weight: 600;">${(item.total_price || 0).toLocaleString('en-US', {minimumFractionDigits: 2})} MMK</td>
                         </tr>
                     `;
                 });
-            } else {
-                tableHTML += `
-                    <tr>
-                        <td colspan="5" style="padding: 20px; text-align: center; color: #6b7280;">
-                            No items found in this order.
-                        </td>
-                    </tr>
-                `;
+
+                const taxAmount = order.tax_amount || 0;
+                const grandTotal = order.total_amount || 0;
+                
+                itemsTableHTML += `</tbody>
+                    <tfoot style="background-color: #f1f5f9; border-top: 2px solid #6d28d9;">
+                        ${taxAmount > 0 ? `
+                        <tr>
+                            <td colspan="4" style="padding: 10px; text-align: right; font-weight: 600; white-space: nowrap;">Tax (5%):</td>
+                            <td style="padding: 10px; text-align: right; font-weight: 600; white-space: nowrap;">${taxAmount.toLocaleString('en-US', {minimumFractionDigits: 2})} MMK</td>
+                        </tr>` : ''}
+                        <tr>
+                            <td colspan="4" style="padding: 12px; text-align: right; font-weight: 700; white-space: nowrap; font-size: 1rem;">Grand Total:</td>
+                            <td style="padding: 12px; text-align: right; font-weight: 700; white-space: nowrap; font-size: 1rem; color: #2563eb;">${grandTotal.toLocaleString('en-US', {minimumFractionDigits: 2})} MMK</td>
+                        </tr>
+                    </tfoot>
+                </table>`;
+
+                itemsContainer.innerHTML = itemsTableHTML;
+                messageBubbleForTable.appendChild(itemsContainer);
             }
-            
-            // Add total rows (Tax and Grand Total)
-            const subtotal = order.subtotal || 0;
-            const taxAmount = order.tax_amount || 0;
-            const grandTotal = order.total_amount || 0;
-            const taxRate = order.tax_rate || 0.05;
-            const taxPercent = (taxRate * 100).toFixed(0);
-            const taxLabel = `${t_func('labels.tax') || 'Tax'} (${taxPercent}%)`;
-            
-            tableHTML += `
-                        </tbody>
-                        <tfoot style="background-color: #f1f5f9; border-top: 2px solid #2563eb;">`;
-            
-            // Add Tax row if tax amount exists
-            if (taxAmount > 0 && subtotal > 0) {
-                tableHTML += `
-                            <tr>
-                                <td colspan="4" style="padding: 10px; border: 1px solid #dee2e6; text-align: right; font-weight: 600; font-size: 0.95rem;">
-                                    <strong>${taxLabel}:</strong>
-                                </td>
-                                <td style="padding: 10px; border: 1px solid #dee2e6; text-align: right; font-weight: 600; font-size: 0.95rem;">
-                                    ${taxAmount.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK
-                                </td>
-                            </tr>`;
-            }
-            
-            // Add Grand Total row
-            tableHTML += `
-                            <tr>
-                                <td colspan="4" style="padding: 12px; border: 1px solid #dee2e6; text-align: right; font-weight: 700; font-size: 1rem;">
-                                    <strong>${t_func('labels.grandTotal')}:</strong>
-                                </td>
-                                <td style="padding: 12px; border: 1px solid #dee2e6; text-align: right; font-weight: 700; font-size: 1rem; color: #2563eb;">
-                                    <strong>${grandTotal.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK</strong>
-                                </td>
-                            </tr>
-                        </tfoot>
-                    </table>
-                </div>
-            `;
-            
-            tableContainer.innerHTML = tableHTML;
-            messageBubbleForTable.appendChild(tableContainer);
         }
         
-        // Add action buttons based on order status
+        // Actions
+        messagesDiv.scrollTo({ top: messagesDiv.scrollHeight, behavior: 'smooth' });
+        
+        // --- Buttons ---
         const actionButtons = [];
         if (order.status === 'pending' || order.status === 'draft') {
-            actionButtons.push({
-                         text: t_func('buttons.cancelOrder'),
-                action: 'cancel_order',
-                style: 'danger',
-                order_id: order.order_id
-            });
+            actionButtons.push({ text: t_func('buttons.cancelOrder'), action: 'cancel_order', style: 'danger', order_id: order.order_id });
         }
         actionButtons.push(
-                     { text: t_func('buttons.print'), action: 'print_order', order_id: order.order_id, onclick: `printOrder('${order.order_id}')` },
-                     { text: t_func('buttons.viewAllOrders'), action: 'track_order' },
-                     { text: t_func('buttons.backToHome'), action: 'home' }
+            { text: t_func('buttons.print'), action: 'print_order', order_id: order.order_id, onclick: `printOrder('${order.order_id}')` },
+            { text: t_func('buttons.viewAllOrders'), action: 'track_order' },
+            { text: t_func('buttons.backToHome'), action: 'home' }
         );
         showActionButtons(actionButtons);
-        
-        // Scroll to bottom
-        messagesDiv.scrollTo({
-            top: messagesDiv.scrollHeight,
-            behavior: 'smooth'
-        });
+
     } catch (error) {
         console.error('displayMROrderDetails error:', error);
         addMessage('Error displaying order details. Please try again.', 'bot', 'error');
     }
 }
-
-// Display distributor order details with confirm/reject buttons and edit options
+// =========================================================
+// 2. DISTRIBUTOR WRAPPER (Adds Confirm/Reject Buttons)
+// =========================================================
 function displayDistributorOrderDetails(order) {
     try {
-        const messagesDiv = document.getElementById('chatMessages');
-        if (!messagesDiv) {
-            console.error('displayDistributorOrderDetails: Chat messages container not found');
-            return;
-        }
+        if (!order) return;
         
-        // Helper function to get status badge HTML
-        function getStatusBadge(status) {
-            const statusLower = (status || '').toLowerCase();
-            let badgeClass = 'pending';
-            let badgeText = status ? status.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase()) : 'Unknown';
-            
-            if (statusLower.includes('confirm')) badgeClass = 'confirmed';
-            else if (statusLower.includes('reject')) badgeClass = 'rejected';
-            else if (statusLower.includes('cancel')) badgeClass = 'cancelled';
-            else if (statusLower.includes('draft')) badgeClass = 'draft';
-            else if (statusLower.includes('dispatch')) badgeClass = 'dispatched';
-            else if (statusLower.includes('deliver')) badgeClass = 'delivered';
-            
-            return `<span class="order-status-badge ${badgeClass}">${badgeText}</span>`;
-        }
+        // 1. Render the tables using the robust logic above
+        displayMROrderDetails(order);
         
-        // Helper function to format dates safely
-        const formatOrFallback = (value) => {
-            if (!value) return 'Not available';
-            try {
-                if (typeof value === 'string' && value.includes('T')) {
-                    // ISO format
-                    const date = new Date(value);
-                    if (!isNaN(date.getTime())) {
-                        return formatDate(value);
-                    }
-                }
-                return formatDate(value);
-            } catch (e) {
-                return value;
-            }
-        };
-        
-        // Get translations
-        const t_func = (typeof t !== 'undefined') ? t : (key) => key;
-        const orderDetailsLabel = t_func('labels.orderDetails');
-        const statusLabel = t_func('labels.status');
-        const dateLabel = t_func('labels.date');
-        const totalItemsLabel = t_func('labels.totalItems');
-        const totalAmountLabel = t_func('labels.totalAmount');
-        const customerLabel = t_func('labels.customer');
-        const unitsLabel = t_func('labels.units');
-        const productNameLabel = t_func('labels.productName');
-        const quantityLabel = t_func('labels.quantity');
-        const focLabel = t_func('labels.foc');
-        const unitPriceLabel = t_func('labels.unitPrice');
-        const totalPriceLabel = t_func('labels.totalPrice');
-        
-        // Get timeline data
-        const placedAt = order.placed_at || order.order_datetime || order.created_at || order.order_date;
-        const confirmedAt = order.distributor_confirmed_at;
-        const deliveredAt = order.delivered_at;
-        const lastUpdatedAt = order.last_updated_at;
-        
-        // Check if order is cancelled
-        const orderStatus = (order.status || order.status_display || '').toLowerCase();
-        const isCancelled = orderStatus.includes('cancel');
-        
-        // Build initial message
-        let message = `**📦 ${orderDetailsLabel} - ${order.order_id || 'Unknown'}**\n\n`;
-        
-        // Add pending order notice if applicable
-        if (order.is_fulfilled_pending_order && order.pending_source_orders && order.pending_source_orders.length > 0) {
-            message += `⚠️ **This order was created by fulfilling a previous pending order.**\n\n`;
-            order.pending_source_orders.forEach(p => {
-                message += `• Original Order ID: **${p.original_order_id || 'N/A'}** (placed on ${p.original_order_date ? formatOrFallback(p.original_order_date) : 'N/A'})\n`;
-                message += `  - Product: ${p.product_name} (${p.product_code})\n`;
-                message += `  - Requested Quantity: ${p.requested_quantity} units\n`;
-            });
-            message += `\n`;
-        }
-        
-        // Add notice about pending orders created FROM this order (when partially dispatched)
-        if (order.has_pending_orders && order.pending_orders_created && order.pending_orders_created.length > 0) {
-            message += `📋 **⚠️ Partial Dispatch Notice:**\n\n`;
-            message += `This order was partially dispatched. Some items are still pending and will be fulfilled when stock becomes available.\n\n`;
-            message += `**Pending Items:**\n\n`;
-            order.pending_orders_created.forEach(p => {
-                const statusBadge = p.status === 'fulfilled' ? '✅ Fulfilled' : '⏳ Pending';
-                message += `• **${p.product_name}** (${p.product_code})\n`;
-                message += `  - Pending Quantity: ${p.requested_quantity} paid + ${p.original_foc_quantity} FOC = ${p.total_pending_quantity} total units\n`;
-                message += `  - Status: ${statusBadge}\n`;
-                if (p.fulfilled_order_id) {
-                    message += `  - Fulfilled Order ID: **${p.fulfilled_order_id}** (created on ${p.fulfilled_order_date ? formatOrFallback(p.fulfilled_order_date) : 'N/A'})\n`;
-                } else {
-                    message += `  - Created: ${p.created_at ? formatOrFallback(p.created_at) : 'N/A'}\n`;
-                }
-                message += `\n`;
-            });
-            message += `\n`;
-        }
-        
-        // Add message first
-        addMessage(message, 'bot');
-        
-        // Find the last bot message to add tables
-        const botMessages = messagesDiv.querySelectorAll('.message.bot');
-        const lastBotMessage = botMessages[botMessages.length - 1];
-        
-        if (!lastBotMessage) {
-            console.error('displayDistributorOrderDetails: Could not find last bot message');
-            return;
-        }
-        
-        // Add copy button to the order title
-        const messageBubble = lastBotMessage.querySelector('.message-bubble .bg-light');
-        if (messageBubble) {
-            const titleElement = messageBubble.querySelector('strong');
-            if (titleElement && order.order_id) {
-                const copyBtn = document.createElement('button');
-                copyBtn.className = 'copy-btn';
-                copyBtn.innerHTML = '<i class="fas fa-copy"></i>';
-                copyBtn.title = 'Copy Order ID';
-                copyBtn.onclick = function() { copyToClipboard(order.order_id, this); };
-                copyBtn.style.cssText = 'margin-left: 8px; display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; background: rgba(37, 99, 235, 0.1); border: 1px solid rgba(37, 99, 235, 0.3); border-radius: 6px; color: #2563eb; font-size: 0.75rem; cursor: pointer; transition: all 0.2s;';
-                titleElement.parentNode.insertBefore(copyBtn, titleElement.nextSibling);
-            }
-        }
-        
-        // Find message bubble for table
-        let messageBubbleForTable = lastBotMessage.querySelector('.message-bubble .bg-light');
-        if (!messageBubbleForTable) {
-            messageBubbleForTable = lastBotMessage.querySelector('.message-bubble');
-        }
-        if (!messageBubbleForTable) {
-            messageBubbleForTable = lastBotMessage.querySelector('.bg-light');
-        }
-        if (!messageBubbleForTable) {
-            messageBubbleForTable = lastBotMessage;
-        }
-        
-        if (messageBubbleForTable) {
-            // Add data attribute for print functionality
-            messageBubbleForTable.setAttribute('data-order-id', order.order_id || '');
-            
-            // Create timeline and status table container (FIRST TABLE - at the top)
-            const timelineTableContainer = document.createElement('div');
-            timelineTableContainer.className = 'order-timeline-table mt-3 mb-3';
-            timelineTableContainer.style.cssText = 'width: 100%; overflow-x: auto;';
+        // 2. Add the Distributor Action Buttons (and Edit Form) if applicable
+        setTimeout(() => {
+            if (order.can_confirm) {
+                const messagesDiv = document.getElementById('chatMessages');
+                const botMessages = messagesDiv.querySelectorAll('.message.bot');
+                const lastBotMessage = botMessages[botMessages.length - 1];
+                let messageBubble = lastBotMessage.querySelector('.message-bubble .bg-light') || lastBotMessage.querySelector('.message-bubble');
 
-            // Build timeline and status table
-            let timelineTableHTML = `
-                <div style="overflow-x: auto; width: 100%; max-width: 100%; box-sizing: border-box; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 15px;">
-                    <table class="table table-bordered table-hover mb-0" style="font-size: 0.875rem; margin-bottom: 0; width: 100%; min-width: 700px; table-layout: auto;">
-                        <thead style="background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%); color: white;">
-                            <tr>
-                                <th style="padding: 12px; border: 1px solid #1e40af; font-weight: 600; text-align: left; min-width: 180px;">Event</th>
-                                <th style="padding: 12px; border: 1px solid #1e40af; font-weight: 600; text-align: left; min-width: 250px;">Date & Time</th>
-                                <th style="padding: 12px; border: 1px solid #1e40af; font-weight: 600; text-align: center; min-width: 120px; white-space: nowrap;">Status</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr style="background-color: #f8f9fa;">
-                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600; white-space: nowrap;">
-                                    <i class="fas fa-shopping-cart me-2" style="color: #2563eb;"></i>Order Placed
-                                </td>
-                                <td style="padding: 12px; border: 1px solid #dee2e6;">
-                                    ${placedAt ? formatOrFallback(placedAt) : 'Not available'}
-                                </td>
-                                <td style="padding: 12px; border: 1px solid #dee2e6; text-align: center; white-space: nowrap;">
-                                    <span style="color: #10b981; font-weight: 600;">✓ Completed</span>
-                                </td>
-                            </tr>
-                            ${!isCancelled ? `
-                            <tr style="background-color: ${confirmedAt ? '#f0fdf4' : '#fff7ed'};">
-                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600; white-space: nowrap;">
-                                    <i class="fas fa-check-circle me-2" style="color: ${confirmedAt ? '#10b981' : '#f59e0b'};"></i>Dealer Confirmed
-                                </td>
-                                <td style="padding: 12px; border: 1px solid #dee2e6;">
-                                    ${confirmedAt ? formatOrFallback(confirmedAt) : 'Not yet confirmed by dealer'}
-                                </td>
-                                <td style="padding: 12px; border: 1px solid #dee2e6; text-align: center; white-space: nowrap;">
-                                    ${confirmedAt ? '<span style="color: #10b981; font-weight: 600;">✓ Completed</span>' : '<span style="color: #f59e0b; font-weight: 600;">⏳ Pending</span>'}
-                                </td>
-                            </tr>
-                            <tr style="background-color: ${deliveredAt ? '#f0fdf4' : '#fff7ed'};">
-                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600; white-space: nowrap;">
-                                    <i class="fas fa-truck me-2" style="color: ${deliveredAt ? '#10b981' : '#f59e0b'};"></i>Delivered to Customer
-                                </td>
-                                <td style="padding: 12px; border: 1px solid #dee2e6;">
-                                    ${deliveredAt ? formatOrFallback(deliveredAt) : 'Not yet delivered'}
-                                </td>
-                                <td style="padding: 12px; border: 1px solid #dee2e6; text-align: center; white-space: nowrap;">
-                                    ${deliveredAt ? '<span style="color: #10b981; font-weight: 600;">✓ Completed</span>' : '<span style="color: #f59e0b; font-weight: 600;">⏳ Pending</span>'}
-                                </td>
-                            </tr>
-                            ` : ''}
-                            ${lastUpdatedAt ? `
-                            <tr style="background-color: #f8f9fa;">
-                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600; white-space: nowrap;">
-                                    <i class="fas fa-clock me-2" style="color: #6b7280;"></i>Last Updated
-                                </td>
-                                <td style="padding: 12px; border: 1px solid #dee2e6;">
-                                    ${formatOrFallback(lastUpdatedAt)}
-                                </td>
-                                <td style="padding: 12px; border: 1px solid #dee2e6; text-align: center; white-space: nowrap;">
-                                    <span style="color: #6b7280;">-</span>
-                                </td>
-                            </tr>
-                            ` : ''}
-                        </tbody>
-                    </table>
-                </div>
-            `;
-
-            timelineTableContainer.innerHTML = timelineTableHTML;
-            messageBubbleForTable.appendChild(timelineTableContainer);
-
-            // Create order information table (SECOND TABLE)
-            const infoTableContainer = document.createElement('div');
-            infoTableContainer.className = 'order-info-table mt-3 mb-3';
-            infoTableContainer.style.cssText = 'width: 100%; overflow-x: auto;';
-
-            let infoTableHTML = `
-                <div style="overflow-x: auto; width: 100%; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 15px;">
-                    <table class="table table-bordered table-hover mb-0" style="font-size: 0.875rem; margin-bottom: 0; width: 100%; min-width: 500px;">
-                        <thead style="background: linear-gradient(135deg, #059669 0%, #047857 100%); color: white;">
-                            <tr>
-                                <th style="padding: 12px; border: 1px solid #065f46; font-weight: 600; text-align: left; width: 40%;">Information</th>
-                                <th style="padding: 12px; border: 1px solid #065f46; font-weight: 600; text-align: left; width: 60%;">Details</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr>
-                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
-                                    <i class="fas fa-info-circle me-2" style="color: #059669;"></i>${statusLabel}
-                                </td>
-                                <td style="padding: 12px; border: 1px solid #dee2e6;">
-                                    ${getStatusBadge(order.status || order.status_display)}
-                                </td>
-                            </tr>
-                            ${order.order_stage ? `
-                            <tr>
-                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
-                                    <i class="fas fa-layer-group me-2" style="color: #059669;"></i>Order Stage
-                                </td>
-                                <td style="padding: 12px; border: 1px solid #dee2e6;">
-                                    ${order.order_stage}
-                                </td>
-                            </tr>
-                            ` : ''}
-                            <tr>
-                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
-                                    <i class="fas fa-calendar me-2" style="color: #059669;"></i>${dateLabel}
-                                </td>
-                                <td style="padding: 12px; border: 1px solid #dee2e6;">
-                                    ${order.order_datetime || order.order_date || 'N/A'}
-                                </td>
-                            </tr>
-                            <tr>
-                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
-                                    <i class="fas fa-user-md me-2" style="color: #059669;"></i>MR Name
-                                </td>
-                                <td style="padding: 12px; border: 1px solid #dee2e6;">
-                                    ${order.mr_name || 'N/A'}
-                                </td>
-                            </tr>
-                            <tr>
-                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
-                                    <i class="fas fa-envelope me-2" style="color: #059669;"></i>MR Contact
-                                </td>
-                                <td style="padding: 12px; border: 1px solid #dee2e6;">
-                                    ${order.mr_email || 'N/A'}
-                                </td>
-                            </tr>
-                            <tr>
-                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
-                                    <i class="fas fa-phone me-2" style="color: #059669;"></i>MR Phone
-                                </td>
-                                <td style="padding: 12px; border: 1px solid #dee2e6;">
-                                    ${order.mr_phone || 'N/A'}
-                                </td>
-                            </tr>
-                            ${order.area ? `
-                            <tr>
-                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
-                                    <i class="fas fa-map-marker-alt me-2" style="color: #059669;"></i>Area
-                                </td>
-                                <td style="padding: 12px; border: 1px solid #dee2e6;">
-                                    ${order.area}
-                                </td>
-                            </tr>
-                            ` : ''}
-                            ${order.customer_name ? `
-                            <tr>
-                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
-                                    <i class="fas fa-user me-2" style="color: #059669;"></i>${customerLabel}
-                                </td>
-                                <td style="padding: 12px; border: 1px solid #dee2e6;">
-                                    ${order.customer_name}
-                                </td>
-                            </tr>
-                            ` : ''}
-                            ${order.delivery_partner_name ? `
-                            <tr>
-                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
-                                    <i class="fas fa-truck me-2" style="color: #059669;"></i>Delivery Partner
-                                </td>
-                                <td style="padding: 12px; border: 1px solid #dee2e6;">
-                                    <strong>${order.delivery_partner_name}</strong>${order.delivery_partner_unique_id ? ` (${order.delivery_partner_unique_id})` : ''}
-                                    ${order.delivery_partner_email ? `<br><small style="color: #6b7280;"><i class="fas fa-envelope me-1"></i>${order.delivery_partner_email}</small>` : ''}
-                                    ${order.delivery_partner_phone ? `<br><small style="color: #6b7280;"><i class="fas fa-phone me-1"></i>${order.delivery_partner_phone}</small>` : ''}
-                                </td>
-                            </tr>
-                            ` : ''}
-                            <tr>
-                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
-                                    <i class="fas fa-boxes me-2" style="color: #059669;"></i>${totalItemsLabel}
-                                </td>
-                                <td style="padding: 12px; border: 1px solid #dee2e6;">
-                                    ${order.total_items || 0} ${unitsLabel}
-                                </td>
-                            </tr>
-                            <tr>
-                                <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: 600;">
-                                    <i class="fas fa-money-bill-wave me-2" style="color: #059669;"></i>${totalAmountLabel}
-                                </td>
-                                <td style="padding: 12px; border: 1px solid #dee2e6;">
-                                    <strong style="color: #059669;">${(order.total_amount || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK</strong>
-                                </td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
-            `;
-
-            infoTableContainer.innerHTML = infoTableHTML;
-            messageBubbleForTable.appendChild(infoTableContainer);
-            
-            // Add items table if items exist (THIRD TABLE)
-            if (order.items && order.items.length > 0) {
-                const itemsTableContainer = document.createElement('div');
-                itemsTableContainer.className = 'order-items-table mt-3 mb-3';
-                itemsTableContainer.style.cssText = 'width: 100%; overflow-x: auto;';
-
-                let itemsTableHTML = `
-                    <div style="overflow-x: auto; width: 100%; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
-                        <table class="table table-bordered table-hover mb-0" style="font-size: 0.875rem; margin-bottom: 0; width: 100%; min-width: 500px;">
-                            <thead style="background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%); color: white;">
-                                <tr>
-                                    <th style="padding: 12px; border: 1px solid #1e40af; font-weight: 600; text-align: left;">${productNameLabel}</th>
-                                    <th style="padding: 12px; border: 1px solid #1e40af; font-weight: 600; text-align: center;">${quantityLabel}</th>
-                                    <th style="padding: 12px; border: 1px solid #1e40af; font-weight: 600; text-align: center;">${focLabel}</th>
-                                    <th style="padding: 12px; border: 1px solid #1e40af; font-weight: 600; text-align: right;">${unitPriceLabel}</th>
-                                    <th style="padding: 12px; border: 1px solid #1e40af; font-weight: 600; text-align: right;">${totalPriceLabel}</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                `;
-
-                order.items.forEach((item, index) => {
-                    const rowColor = index % 2 === 0 ? '#f8f9fa' : '#ffffff';
-                    const focDisplay = (item.free_quantity || 0) > 0 
-                        ? `<span style="color: #10b981; font-weight: 600;">+${item.free_quantity}</span>` 
-                        : '<span style="color: #6b7280;">-</span>';
+                if (messageBubble) {
+                    const t_func = (typeof t !== 'undefined') ? t : (key) => key;
+                    const confirmOrderText = t_func('buttons.confirmOrder');
+                    const rejectOrderText = t_func('buttons.rejectOrder');
                     
-                    itemsTableHTML += `
-                        <tr style="background-color: ${rowColor};">
-                            <td style="padding: 12px; border: 1px solid #dee2e6;">
-                                <strong>${item.product_name || 'Unknown Product'}</strong>
-                            </td>
-                            <td style="padding: 12px; border: 1px solid #dee2e6; text-align: center;">
-                                ${item.quantity || 0} ${unitsLabel}
-                            </td>
-                            <td style="padding: 12px; border: 1px solid #dee2e6; text-align: center;">
-                                ${focDisplay}
-                            </td>
-                            <td style="padding: 12px; border: 1px solid #dee2e6; text-align: right;">
-                                ${(item.unit_price || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK
-                            </td>
-                            <td style="padding: 12px; border: 1px solid #dee2e6; text-align: right; font-weight: 600;">
-                                ${(item.total_price || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK
-                            </td>
-                        </tr>
-                    `;
-                });
-                
-                // Add total rows (Tax and Grand Total)
-                const subtotal = order.subtotal || 0;
-                const taxAmount = order.tax_amount || 0;
-                const grandTotal = order.total_amount || 0;
-                const taxRate = order.tax_rate || 0.05;
-                const taxPercent = (taxRate * 100).toFixed(0);
-                const taxLabel = `${t_func('labels.tax') || 'Tax'} (${taxPercent}%)`;
-                
-                itemsTableHTML += `
-                            </tbody>
-                            <tfoot style="background-color: #f1f5f9; border-top: 2px solid #2563eb;">`;
-                
-                // Add Tax row if tax amount exists
-                if (taxAmount > 0 && subtotal > 0) {
-                    itemsTableHTML += `
-                                <tr>
-                                    <td colspan="4" style="padding: 10px; border: 1px solid #dee2e6; text-align: right; font-weight: 600; font-size: 0.95rem;">
-                                        <strong>${taxLabel}:</strong>
-                                    </td>
-                                    <td style="padding: 10px; border: 1px solid #dee2e6; text-align: right; font-weight: 600; font-size: 0.95rem;">
-                                        ${taxAmount.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK
-                                    </td>
-                                </tr>`;
-                }
-                
-                // Add Grand Total row
-                itemsTableHTML += `
-                                <tr>
-                                    <td colspan="4" style="padding: 12px; border: 1px solid #dee2e6; text-align: right; font-weight: 700; font-size: 1rem;">
-                                        <strong>${t_func('labels.grandTotal')}:</strong>
-                                    </td>
-                                    <td style="padding: 12px; border: 1px solid #dee2e6; text-align: right; font-weight: 700; font-size: 1rem; color: #2563eb;">
-                                        <strong>${grandTotal.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK</strong>
-                                    </td>
-                                </tr>
-                            </tfoot>
-                        </table>
-                    </div>
-                `;
+                    // -- Simplified Edit Form for Distributor --
+                    const editFormContainer = document.createElement('div');
+                    editFormContainer.className = 'order-edit-form mt-3 mb-3';
+                    editFormContainer.style.cssText = 'width: 100%; animation: slideInFromBottom 0.3s ease-out;';
+                    
+                    let formHTML = `
+                        <div class="card border-0 shadow-sm" style="background: rgba(255, 255, 255, 0.98); border-radius: 12px; padding: 20px;">
+                            <h6 class="mb-3" style="color: #2563eb; font-weight: 600;">
+                                <i class="fas fa-edit me-2"></i>Action Required
+                            </h6>
+                            
+                            <div class="mb-4 p-3" style="background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%); border-radius: 12px; border: 2px solid #fbbf24;">
+                                <label class="form-label mb-2" style="font-weight: 600; color: #92400e;">
+                                    <i class="fas fa-truck me-2" style="color: #f59e0b;"></i>Select Delivery Partner <span style="color: red;">*</span>
+                                </label>
+                                <div class="d-flex gap-2 flex-column flex-sm-row">
+                                    <select class="form-select" id="delivery_partner_${order.order_id}" name="delivery_partner_id" required
+                                            style="border-radius: 8px; border: 2px solid #fbbf24; padding: 10px; flex: 1; min-height: 44px;">
+                                        <option value="">-- Select Delivery Partner --</option>
+                                    </select>
+                                    <button type="button" class="btn btn-warning" onclick="showAddDeliveryPartnerModal()"
+                                            style="border-radius: 8px; padding: 10px 16px; font-weight: 600; white-space: nowrap; min-height: 44px;">
+                                        <i class="fas fa-plus me-2"></i>Add New
+                                    </button>
+                                </div>
+                            </div>
 
-                itemsTableContainer.innerHTML = itemsTableHTML;
-                messageBubbleForTable.appendChild(itemsTableContainer);
+                            <div class="d-flex gap-2 mt-3 flex-column flex-sm-row">
+                                <button type="button" class="btn btn-success w-100" 
+                                    onclick="confirmOrderWithEdits('${order.order_id}')"
+                                    style="border-radius: 8px; padding: 10px; font-weight: 600;">
+                                    <i class="fas fa-check-circle me-2"></i>${confirmOrderText}
+                                </button>
+                                <button type="button" class="btn btn-outline-danger w-100" 
+                                    onclick="rejectOrderAction('${order.order_id}')"
+                                    style="border-radius: 8px; padding: 10px; font-weight: 600;">
+                                    <i class="fas fa-times-circle me-2"></i>${rejectOrderText}
+                                </button>
+                            </div>
+                            
+                            <form id="orderEditForm_${order.order_id}">
+                                ${order.items.map(item => `
+                                    <input type="hidden" name="item_id_${item.id || item.item_id}" value="${item.id || item.item_id}">
+                                    <input type="hidden" id="qty_${item.id || item.item_id}" value="${item.quantity || 0}">
+                                `).join('')}
+                            </form>
+                        </div>
+                    `;
+                    
+                    editFormContainer.innerHTML = formHTML;
+                    messageBubble.appendChild(editFormContainer);
+                    
+                    // Load delivery partners
+                    loadDeliveryPartnersForOrder(order.order_id);
+                    
+                    // Update Action Buttons to hide standard ones and show relevant ones
+                    const actionButtons = [
+                        { text: t_func('buttons.viewAllOrders'), action: 'track_order' }
+                    ];
+                    showActionButtons(actionButtons);
+                    
+                    messagesDiv.scrollTo({ top: messagesDiv.scrollHeight, behavior: 'smooth' });
+                }
             }
-        }
-        
-        // Now add the editable form if order can be confirmed
-        if (messageBubbleForTable && order.can_confirm) {
-            // Create editable form for order items
-            const editFormContainer = document.createElement('div');
-            editFormContainer.className = 'order-edit-form mt-3 mb-3';
-            editFormContainer.style.cssText = 'width: 100%; animation: slideInFromBottom 0.3s ease-out;';
-            
-            // Get translations for form
-            const t_func = (typeof t !== 'undefined') ? t : (key) => key;
-            const editOrderItemsLabel = t_func('labels.editOrderItems');
-            const quantityLabel = t_func('labels.quantity');
-            const lotNumberLabel = t_func('labels.lotNumber');
-            const expiryDateLabel = t_func('labels.expiryDate');
-            const reasonLabel = t_func('labels.reason');
-            const confirmOrderText = t_func('buttons.confirmOrder');
-            const rejectOrderText = t_func('buttons.rejectOrder');
-            
-            let formHTML = `
-                <div class="card border-0 shadow-sm" style="background: rgba(255, 255, 255, 0.98); border-radius: 12px; padding: 20px;">
-                    <h6 class="mb-3" style="color: #2563eb; font-weight: 600;">
-                        <i class="fas fa-edit me-2"></i>${editOrderItemsLabel}
-                    </h6>
-                    <p class="text-muted mb-3" style="font-size: 0.875rem;">
-                        <i class="fas fa-info-circle me-1"></i>
-                        ${t_func('labels.adjustQuantitiesInfo')}
-                    </p>
-                    <form id="orderEditForm_${order.order_id}">
-            `;
-            
-            // Add delivery partner selection
-            formHTML += `
-                        <div class="mb-3" style="background: #eff6ff; padding: 15px; border-radius: 8px; border-left: 4px solid #3b82f6;">
-                            <label for="delivery_partner_${order.order_id}" class="form-label" style="font-weight: 600; color: #1e40af;">
-                                <i class="fas fa-truck me-2"></i>Assign Delivery Partner <span style="color: #dc2626;">*</span>
-                            </label>
-                            <select class="form-select" id="delivery_partner_${order.order_id}" name="delivery_partner_id" required
-                                    style="border-radius: 8px; border: 2px solid #bfdbfe; padding: 10px;">
-                                <option value="">-- Select Delivery Partner --</option>
-                            </select>
-                            <small class="text-muted" style="font-size: 0.75rem;">
-                                <i class="fas fa-info-circle me-1"></i>Select a delivery partner to assign this order for delivery
-                            </small>
-                        </div>
-            `;
-            
-            // Add editable fields for each item
-            order.items.forEach((item, index) => {
-                const itemId = item.id || item.item_id || index; // Use item.id if available, fallback to index
-                const originalQty = item.quantity || 0;  // Paid quantity
-                const focQty = item.free_quantity || 0;  // FOC quantity
-                
-                // Get lot number from database if available
-                const lotNumber = item.lot_number || '';
-                
-                // Get expiry date from database if available, otherwise use today
-                const expiryDate = item.expiry_date || new Date().toISOString().split('T')[0];
-                
-                // Format quantity label correctly: show paid + FOC separately
-                let quantityLabelText = `${quantityLabel}`;
-                if (focQty > 0) {
-                    quantityLabelText += ` (Ordered: ${originalQty} + ${focQty} FOC)`;
-                } else {
-                    quantityLabelText += ` (Ordered: ${originalQty})`;
-                }
-                
-                formHTML += `
-                    <div class="order-item-edit mb-4 p-3" style="background: #f8f9fa; border-radius: 8px; border-left: 4px solid #2563eb;">
-                        <h6 style="color: #1e40af; margin-bottom: 15px; font-weight: 600;">
-                            <i class="fas fa-pills me-2"></i>${item.product_name}
-                        </h6>
-                        <div class="d-flex flex-column gap-3">
-                            <div>
-                                <label class="form-label" style="font-weight: 500; font-size: 0.875rem;">
-                                    <i class="fas fa-box me-1"></i>${quantityLabelText}
-                                </label>
-                                <input type="number" 
-                                    class="form-control form-control-sm" 
-                                    id="qty_${itemId}" 
-                                    name="quantity_${itemId}"
-                                    value="${originalQty}"
-                                    min="0"
-                                    style="border-radius: 6px; border: 1.5px solid #e5e7eb;"
-                                    placeholder="${t_func('labels.enterQuantity')}">
-                                <small class="text-muted" style="font-size: 0.75rem;">
-                                    ${t_func('labels.adjustQuantityInfo')}
-                                </small>
-                            </div>
-                            <div>
-                                <label class="form-label" style="font-weight: 500; font-size: 0.875rem;">
-                                    <i class="fas fa-barcode me-1"></i>${lotNumberLabel} (Optional)
-                                </label>
-                                <input type="text" 
-                                    class="form-control form-control-sm" 
-                                    id="lot_${itemId}" 
-                                    name="lot_number_${itemId}"
-                                    value="${lotNumber}"
-                                    style="border-radius: 6px; border: 1.5px solid #e5e7eb;"
-                                    placeholder="${t_func('labels.enterLotNumber')}">
-                                <small class="text-muted" style="font-size: 0.75rem;">
-                                    ${t_func('labels.lotNumberInfo')}${lotNumber ? ' ' + t_func('labels.fromDatabase') : ''}
-                                </small>
-                            </div>
-                            <div>
-                                <label class="form-label" style="font-weight: 500; font-size: 0.875rem;">
-                                    <i class="fas fa-calendar-alt me-1"></i>${expiryDateLabel}
-                                </label>
-                                <input type="date" 
-                                    class="form-control form-control-sm" 
-                                    id="expiry_${itemId}" 
-                                    name="expiry_date_${itemId}"
-                                    value="${expiryDate}"
-                                    style="border-radius: 6px; border: 1.5px solid #e5e7eb;"
-                                    min="${new Date().toISOString().split('T')[0]}">
-                                <small class="text-muted" style="font-size: 0.75rem;">
-                                    ${t_func('labels.expiryDateInfo')}${item.expiry_date ? ' ' + t_func('labels.fromDatabase') : ''}
-                                </small>
-                            </div>
-                            <div>
-                                <label class="form-label" style="font-weight: 500; font-size: 0.875rem;">
-                                    <i class="fas fa-comment-alt me-1"></i>${reasonLabel} (Optional)
-                                </label>
-                                <input type="text" 
-                                    class="form-control form-control-sm" 
-                                    id="reason_${itemId}" 
-                                    name="reason_${itemId}"
-                                    style="border-radius: 6px; border: 1.5px solid #e5e7eb;"
-                                    placeholder="${t_func('labels.reasonForAdjustment')}">
-                                <small class="text-muted" style="font-size: 0.75rem;">
-                                    ${t_func('labels.reasonInfo')}
-                                </small>
-                            </div>
-                        </div>
-                        <input type="hidden" name="item_id_${itemId}" value="${itemId}">
-                    </div>
-                `;
-            });
-            
-            formHTML += `
-                    </form>
-                    <div class="d-flex gap-2 mt-3">
-                        <button type="button" 
-                            class="btn btn-success flex-grow-1" 
-                            onclick="confirmOrderWithEdits('${order.order_id}')"
-                            style="border-radius: 8px; padding: 10px; font-weight: 600;">
-                            <i class="fas fa-check-circle me-2"></i>${confirmOrderText}
-                        </button>
-                        <button type="button" 
-                            class="btn btn-outline-danger" 
-                            onclick="rejectOrderAction('${order.order_id}')"
-                            style="border-radius: 8px; padding: 10px; font-weight: 600;">
-                            <i class="fas fa-times-circle me-2"></i>${rejectOrderText}
-                        </button>
-                    </div>
-                </div>
-            `;
-            
-            editFormContainer.innerHTML = formHTML;
-            messageBubbleForTable.appendChild(editFormContainer);
-            
-            // Load delivery partners for this area after form is added to DOM
-            // Use setTimeout to ensure DOM element exists
-            setTimeout(() => {
-                loadDeliveryPartners(order.order_id);
-            }, 100);
-        }
-        
-        // Add action buttons
-        if (order.can_confirm) {
-            // Buttons are in the form, but add backup buttons
-            const actionButtons = [
-                {
-                    text: t_func('buttons.viewAllOrders'),
-                    action: 'track_order'
-                }
-            ];
-            showActionButtons(actionButtons);
-        } else {
-            const actionButtons = [
-                {
-                    text: t_func('buttons.viewAllOrders'),
-                    action: 'track_order'
-                },
-                {
-                    text: t_func('buttons.backToHome'),
-                    action: 'home'
-                }
-            ];
-            showActionButtons(actionButtons);
-        }
-        
-        // Scroll to bottom
-        messagesDiv.scrollTo({
-            top: messagesDiv.scrollHeight,
-            behavior: 'smooth'
-        });
+        }, 100);
+
     } catch (error) {
         console.error('displayDistributorOrderDetails error:', error);
-        addMessage('Error displaying order details. Please try again.', 'bot', 'error');
     }
 }
 
@@ -6045,8 +5112,16 @@ async function handleCustomerSelection(event) {
                     showProductTable(data.products);
                 }
                 
-                // Show interactive product selection form
-                addProductSelectionForm(data.products);
+                // Show appropriate product selection form based on user role
+                console.log('handleCustomerSelection: is_dealer_order =', data.is_dealer_order);
+                if (data.is_dealer_order) {
+                    console.log('Showing dealer product form with delivery partner dropdown');
+                    addDealerProductSelectionForm(data.products);
+                } else {
+                    console.log('Showing regular MR product form');
+                    const showChangeCustomer = data.action_buttons && data.action_buttons.some(btn => btn.action === 'change_customer');
+                    addProductSelectionForm(data.products, showChangeCustomer);
+                }
             }
         } else {
             addMessage(`Error: ${data.error}`, 'bot', 'error');
@@ -7616,7 +6691,7 @@ function printOrder(orderId) {
                     </div>
                     ${orderTable}
                     <div class="print-footer">
-                        <p>Generated by HV (Powered by Quantum Blue AI)</p>
+                        <p>Generated by R&B (Powered by Quantum Blue AI)</p>
                         <p>Printed on: ${new Date().toLocaleString()}</p>
                     </div>
                 </body>
@@ -8251,10 +7326,21 @@ async function saveCartAsTemplate() {
     }
 }
 
-// Load delivery partners for dealer to select
-async function loadDeliveryPartners(orderId) {
+// Load delivery partners for distributor confirming MR order
+async function loadDeliveryPartnersForOrder(orderId) {
     try {
         console.log(`🔍 Loading delivery partners for order ${orderId}...`);
+        
+        const select = document.getElementById(`delivery_partner_${orderId}`);
+        if (!select) {
+            console.error(`❌ Delivery partner select element not found: delivery_partner_${orderId}`);
+            return;
+        }
+        
+        // Show loading state
+        select.innerHTML = '<option value="">Loading delivery partners...</option>';
+        select.disabled = true;
+        
         const response = await fetch('/enhanced-chat/api/delivery-partners', {
             method: 'GET',
             headers: {
@@ -8266,59 +7352,68 @@ async function loadDeliveryPartners(orderId) {
             console.error(`❌ API error: ${response.status} ${response.statusText}`);
             const errorText = await response.text();
             console.error('Error response:', errorText);
+            
+            // Re-enable select and show error
+            select.disabled = false;
+            select.innerHTML = '<option value="">❌ Error: Could not load delivery partners</option>';
             throw new Error(`API error: ${response.status}`);
         }
         
         const data = await response.json();
         console.log('📦 Delivery partners API response:', data);
         
+        // Re-enable select
+        select.disabled = false;
+        
         if (data.success && data.delivery_partners) {
-            const select = document.getElementById(`delivery_partner_${orderId}`);
-            if (select) {
-                // Clear existing options except the first one
-                select.innerHTML = '<option value="">-- Select Delivery Partner --</option>';
-                
-                if (data.delivery_partners.length > 0) {
-                    // Add delivery partners
-                    data.delivery_partners.forEach(partner => {
-                        const option = document.createElement('option');
-                        option.value = partner.id;
-                        option.textContent = `${partner.name} (${partner.unique_id})`;
-                        select.appendChild(option);
-                    });
-                    console.log(`✅ Loaded ${data.delivery_partners.length} delivery partner(s) for area: ${data.area || 'unknown'}`);
-                } else {
-                    // No delivery partners found
-                    const noPartnersOption = document.createElement('option');
-                    noPartnersOption.value = '';
-                    noPartnersOption.textContent = '⚠️ No delivery partners available for this area';
-                    noPartnersOption.disabled = true;
-                    select.appendChild(noPartnersOption);
-                    console.warn(`⚠️ No delivery partners found for area: ${data.area || 'unknown'}`);
-                }
+            // Clear existing options
+            select.innerHTML = '<option value="">-- Select Delivery Partner --</option>';
+            
+            if (data.delivery_partners.length > 0) {
+                // Add delivery partners
+                data.delivery_partners.forEach(partner => {
+                    const option = document.createElement('option');
+                    option.value = partner.id;
+                    option.textContent = `${partner.name}${partner.phone ? ' - ' + partner.phone : ''}${partner.unique_id ? ' (' + partner.unique_id + ')' : ''}`;
+                    select.appendChild(option);
+                });
+                console.log(`✅ Loaded ${data.delivery_partners.length} delivery partner(s) for area: ${data.area || 'unknown'}`);
             } else {
-                console.error(`❌ Delivery partner select element not found: delivery_partner_${orderId}`);
+                // No delivery partners found
+                select.innerHTML = '<option value="">⚠️ No delivery partners available in your area</option>';
+                console.warn(`⚠️ No delivery partners found for area: ${data.area || 'unknown'}`);
+                
+                // Show helpful message to user
+                const warningDiv = document.createElement('div');
+                warningDiv.className = 'alert alert-warning mt-2';
+                warningDiv.style.cssText = 'font-size: 0.875rem; padding: 8px 12px; border-radius: 6px;';
+                warningDiv.innerHTML = `<i class="fas fa-info-circle me-2"></i>No delivery partners found in your area (${data.area || 'unknown'}). Please add a delivery partner first by clicking the "Add New" button.`;
+                select.parentElement.appendChild(warningDiv);
             }
         } else {
             console.error('❌ Failed to load delivery partners:', data.error);
-            const select = document.getElementById(`delivery_partner_${orderId}`);
-            if (select) {
-                const errorOption = document.createElement('option');
-                errorOption.value = '';
-                errorOption.textContent = `⚠️ ${data.error || 'No delivery partners found'}`;
-                errorOption.disabled = true;
-                select.appendChild(errorOption);
-            }
+            select.innerHTML = `<option value="">⚠️ ${data.error || 'No delivery partners found'}</option>`;
+            
+            // Show error message to user
+            const errorDiv = document.createElement('div');
+            errorDiv.className = 'alert alert-danger mt-2';
+            errorDiv.style.cssText = 'font-size: 0.875rem; padding: 8px 12px; border-radius: 6px;';
+            errorDiv.innerHTML = `<i class="fas fa-exclamation-triangle me-2"></i>${data.error || 'Failed to load delivery partners'}`;
+            select.parentElement.appendChild(errorDiv);
         }
     } catch (error) {
-        console.error('Error loading delivery partners:', error);
+        console.error('❌ Error loading delivery partners:', error);
         const select = document.getElementById(`delivery_partner_${orderId}`);
         if (select) {
-            const errorOption = document.createElement('option');
-            errorOption.value = '';
-            errorOption.textContent = '⚠️ Error loading delivery partners';
-            errorOption.disabled = true;
-            select.appendChild(errorOption);
+            select.disabled = false;
+            select.innerHTML = '<option value="">⚠️ Error loading delivery partners</option>';
+            
+            // Show error message to user
+            const errorDiv = document.createElement('div');
+            errorDiv.className = 'alert alert-danger mt-2';
+            errorDiv.style.cssText = 'font-size: 0.875rem; padding: 8px 12px; border-radius: 6px;';
+            errorDiv.innerHTML = `<i class="fas fa-exclamation-triangle me-2"></i>Failed to load delivery partners. Please refresh the page or contact support.`;
+            select.parentElement.appendChild(errorDiv);
         }
     }
 }
@@ -8827,3 +7922,863 @@ function performAdvancedSearch(query, filters = {}) {
 
 window.performAdvancedSearch = performAdvancedSearch;
 window.sendMessage = sendMessage;
+
+// ============= DEALER ORDER FLOW - CUSTOMER & DELIVERY PARTNER MANAGEMENT =============
+
+// Add dealer product selection form with delivery partner dropdown
+function addDealerProductSelectionForm(products) {
+    const messagesDiv = document.getElementById('chatMessages');
+    if (!messagesDiv) return;
+
+    // 1. Try to find the last bot message
+    const botMessages = messagesDiv.querySelectorAll('.message.bot');
+    let messageBubble = null;
+
+    if (botMessages.length > 0) {
+        const lastMsg = botMessages[botMessages.length - 1];
+        messageBubble = lastMsg.querySelector('.message-bubble .bg-light') || lastMsg.querySelector('.message-bubble');
+    }
+
+    // 2. SAFETY FALLBACK: Create NEW message if none found
+    if (!messageBubble) {
+        const newMsgRow = document.createElement('div');
+        newMsgRow.className = 'message bot mb-3';
+        newMsgRow.innerHTML = `
+            <div class="message-bubble bot">
+                <div class="bg-light border rounded-3 px-3 py-2" style="max-width: 100%; width: 100%;"></div>
+            </div>`;
+        messagesDiv.appendChild(newMsgRow);
+        messageBubble = newMsgRow.querySelector('.bg-light');
+    }
+
+    const formDiv = document.createElement('div');
+    formDiv.className = 'dealer-product-selection-container mt-3';
+    formDiv.id = 'dealerProductSelectionForm';
+    formDiv.style.cssText = 'animation: slideInFromBottom 0.3s ease-out; width: 100%; max-width: 100%;';
+
+    const yellowArrowSvg = "data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%23f59e0b' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='m2 5 6 6 6-6'/%3e%3c/svg%3e";
+
+    let formHTML = `
+        <div class="card border-0 shadow-lg" style="background: rgba(255, 255, 255, 0.95); border-radius: 16px; padding: 20px; width: 100%; box-sizing: border-box;">
+            <h5 class="mb-3 text-wrap" style="color: #1e40af; font-weight: 400; font-size: 1.1rem; white-space: normal; word-break: break-word;">
+                <i class="fas fa-shopping-cart me-2" style="color: #3b82f6;"></i>Product Selection
+            </h5>
+            
+            <form id="dealerProductSelectionFormElement" onsubmit="handleDealerBulkProductSelection(event)">
+                <div class="mb-4 p-3" style="background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%); border-radius: 12px; border: 2px solid #fbbf24;">
+                    <label class="form-label mb-2" style="font-weight: 600; color: #92400e;">
+                        <i class="fas fa-truck me-2" style="color: #f59e0b;"></i>Select Delivery Partner <span style="color: red;">*</span>
+                    </label>
+                    <div class="d-flex gap-2 flex-column">
+                        <select class="form-select" id="deliveryPartnerSelect" required onchange="updateDeliveryPartnerSelection()"
+                                style="border-radius: 8px; border: 2px solid #fbbf24; padding: 10px; min-height: 44px; background-image: url('${yellowArrowSvg}');">
+                            <option value="">Loading delivery partners...</option>
+                        </select>
+                        <button type="button" class="btn btn-primary w-100" onclick="showAddDeliveryPartnerModal()"
+                                style="border-radius: 8px; padding: 8px; font-weight: 600; font-size: 0.9rem;">
+                            <i class="fas fa-plus me-2"></i>Add New
+                        </button>
+                    </div>
+                    <input type="hidden" id="selectedDeliveryPartnerId" name="delivery_partner_id">
+                    <div id="deliveryPartnerError" class="text-danger mt-2 small text-wrap" style="display: none; word-break: break-word;"></div>
+                </div>
+                
+                <div class="mb-3">
+                     <div class="d-flex align-items-center justify-content-between mb-2">
+                        <label class="form-label mb-0" style="font-weight: 500;">Search:</label>
+                        <div class="d-flex flex-column align-items-end" style="cursor: pointer;" onclick="const cb = document.getElementById('dealerProductFavoriteFilterCheckbox'); cb.checked = !cb.checked; filterDealerProductTable();">
+                            <div class="d-flex align-items-center gap-2">
+                                <input class="form-check-input m-0" type="checkbox" id="dealerProductFavoriteFilterCheckbox" 
+                                       onchange="filterDealerProductTable()" onclick="event.stopPropagation()" style="cursor: pointer;">
+                                <i class="fas fa-star" style="color: #fbbf24;"></i>
+                            </div>
+                            <span style="font-size: 0.7rem; color: #6b7280; margin-top: 2px;">Favorites Only</span>
+                        </div>
+                    </div>
+                    <input type="text" class="form-control" id="dealerProductSearchInput" placeholder="Search products..." 
+                           onkeyup="filterDealerProductTable()" style="background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; padding: 10px;">
+                </div>
+                
+                <div class="mb-3" style="max-height: 300px; overflow-y: auto; border: 1px solid #e5e7eb; border-radius: 12px;">
+                    <table class="table table-sm table-hover mb-0" style="font-size: 0.85rem;">
+                        <thead class="table-light" style="position: sticky; top: 0; z-index: 10;">
+                            <tr>
+                                <th style="padding: 10px; width: 45%;">Product</th>
+                                <th style="padding: 10px;">Price</th>
+                                <th style="padding: 10px;">Avail</th>
+                                <th style="padding: 10px;">Qty</th>
+                            </tr>
+                        </thead>
+                        <tbody id="dealerProductTableBody">
+    `;
+    products.forEach(p => {
+        formHTML += `<tr class="dealer-product-row" data-product-code="${p.product_code}" data-product-name="${p.product_name.replace(/"/g, '&quot;')}" data-search-text="${(p.product_name+p.product_code).toLowerCase()}" data-price="${p.sales_price}">
+            <td style="padding: 10px;"><div class="text-wrap fw-bold" style="word-break: break-word;">${p.product_name}</div></td>
+            <td style="padding: 10px; color: #059669;">${p.sales_price.toLocaleString()}</td>
+            <td style="padding: 10px;"><span class="badge bg-light text-dark border">${p.available_for_sale}</span></td>
+            <td style="padding: 10px;"><input type="number" class="form-control form-control-sm dealer-product-quantity-input" style="min-width: 60px; text-align: center;" id="dealer_qty_${p.product_code}" min="0" max="${p.available_for_sale}" value="0" oninput="updateDealerSelectedProductsCount()"></td>
+        </tr>`;
+    });
+    formHTML += `</tbody></table></div>
+                
+                <div id="dealerSelectedProductsCount" class="mb-3 text-center p-2 bg-light border rounded small text-wrap" style="word-break: break-word;">Select quantities above</div>
+                
+                <div class="d-flex flex-column gap-2 mb-3">
+                    <button type="submit" class="btn btn-primary w-100" style="padding: 8px; font-size: 0.9rem;"><i class="fas fa-cart-plus me-2"></i>Add to Cart</button>
+                    <button type="button" class="btn btn-secondary w-100" onclick="clearDealerBulkProductForm()" style="padding: 8px; font-size: 0.9rem;"><i class="fas fa-eraser me-2"></i>Clear All</button>
+                    <button type="button" class="btn btn-primary w-100" onclick="viewCart()" style="padding: 8px; font-size: 0.9rem;"><i class="fas fa-shopping-cart me-2"></i>View Cart</button>
+                    <button type="button" class="btn btn-success w-100" onclick="confirmDealerCart()" style="padding: 8px; font-size: 0.9rem;"><i class="fas fa-check-circle me-2"></i>Confirm Cart</button>
+                    <button type="button" class="btn btn-primary w-100" onclick="showOrderTemplates()" style="padding: 8px; font-size: 0.9rem;"><i class="fas fa-file-alt me-2"></i>Templates</button>
+                </div>
+                
+                <div class="d-flex justify-content-center">
+                    <button type="button" class="btn btn-outline-danger w-100" onclick="this.closest('.dealer-product-selection-container').remove()" style="padding: 8px; font-size: 0.9rem;"><i class="fas fa-times me-2"></i>Cancel</button>
+                </div>
+            </form>
+        </div>`;
+
+    formDiv.innerHTML = formHTML;
+    messageBubble.appendChild(formDiv);
+    updateDealerSelectedProductsCount();
+    loadDealerDeliveryPartners();
+    messagesDiv.scrollTo({ top: messagesDiv.scrollHeight, behavior: 'smooth' });
+}
+
+// Load delivery partners for dealer placing own order
+async function loadDealerDeliveryPartners() {
+    console.log('🔷 loadDealerDeliveryPartners called');
+    
+    try {
+        const response = await fetch('/enhanced-chat/api/dealer/delivery-partners', {
+            method: 'GET',
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        });
+        
+        console.log('📡 Delivery partners API response status:', response.status);
+        
+        if (!response.ok) {
+            throw new Error('Failed to fetch delivery partners');
+        }
+        
+        const data = await response.json();
+        console.log('📦 Delivery partners data:', data);
+        
+        if (data.success && data.delivery_partners) {
+            deliveryPartners = data.delivery_partners;
+            console.log(`✅ Loaded ${data.delivery_partners.length} delivery partners`);
+            
+            const select = document.getElementById('deliveryPartnerSelect');
+            if (select) {
+                console.log('✅ Delivery partner select element found, populating options...');
+                select.innerHTML = '<option value="">-- Select a delivery partner --</option>';
+                data.delivery_partners.forEach(partner => {
+                    const option = document.createElement('option');
+                    option.value = partner.id;
+                    option.textContent = `${partner.name}${partner.phone ? ' - ' + partner.phone : ''}`;
+                    select.appendChild(option);
+                });
+                console.log('✅ Delivery partner options populated');
+                
+                // Auto-select if previously selected
+                if (selectedDeliveryPartnerId) {
+                    select.value = selectedDeliveryPartnerId;
+                    updateDeliveryPartnerSelection();
+                }
+            } else {
+                console.error('❌ deliveryPartnerSelect element NOT FOUND in DOM!');
+            }
+        } else {
+            throw new Error(data.error || 'Failed to load delivery partners');
+        }
+    } catch (error) {
+        console.error('Error loading delivery partners:', error);
+        const select = document.getElementById('deliveryPartnerSelect');
+        if (select) {
+            select.innerHTML = '<option value="">Error loading partners</option>';
+        }
+        const errorDiv = document.getElementById('deliveryPartnerError');
+        if (errorDiv) {
+            errorDiv.textContent = 'Failed to load delivery partners. Please refresh.';
+            errorDiv.style.display = 'block';
+        }
+    }
+}
+
+// Update delivery partner selection
+function updateDeliveryPartnerSelection() {
+    const select = document.getElementById('deliveryPartnerSelect');
+    const hiddenField = document.getElementById('selectedDeliveryPartnerId');
+    const errorDiv = document.getElementById('deliveryPartnerError');
+    
+    if (select && hiddenField) {
+        selectedDeliveryPartnerId = select.value ? parseInt(select.value) : null;
+        hiddenField.value = selectedDeliveryPartnerId || '';
+        
+        if (errorDiv) {
+            errorDiv.style.display = 'none';
+        }
+    }
+}
+
+// Show add delivery partner modal
+function showAddDeliveryPartnerModal() {
+    const modal = document.createElement('div');
+    modal.className = 'modal fade';
+    modal.id = 'addDeliveryPartnerModal';
+    modal.tabIndex = -1;
+    modal.innerHTML = `
+        <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
+            <div class="modal-content" style="border-radius: 16px; border: none;">
+                <div class="modal-header" style="background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); color: white; border-radius: 16px 16px 0 0;">
+                    <h5 class="modal-title"><i class="fas fa-truck me-2"></i>Add New Delivery Partner</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body" style="padding: 24px;">
+                    <form id="addDeliveryPartnerForm" onsubmit="handleAddDeliveryPartner(event)">
+                        <div class="mb-3">
+                            <label for="deliveryPartnerName" class="form-label" style="font-weight: 600;">Name <span style="color: red;">*</span></label>
+                            <input type="text" class="form-control" id="deliveryPartnerName" required
+                                   placeholder="Enter partner name"
+                                   style="border-radius: 8px; padding: 10px; border: 2px solid #e5e7eb;">
+                        </div>
+                        <div class="mb-3">
+                            <label for="deliveryPartnerPhone" class="form-label" style="font-weight: 600;">Phone <span style="color: red;">*</span></label>
+                            <input type="tel" class="form-control" id="deliveryPartnerPhone" required
+                                   placeholder="+95 XXX XXX XXX"
+                                   style="border-radius: 8px; padding: 10px; border: 2px solid #e5e7eb;">
+                        </div>
+                        <div class="mb-3">
+                            <label for="deliveryPartnerEmail" class="form-label" style="font-weight: 600;">Email</label>
+                            <input type="email" class="form-control" id="deliveryPartnerEmail"
+                                   placeholder="partner@example.com"
+                                   style="border-radius: 8px; padding: 10px; border: 2px solid #e5e7eb;">
+                        </div>
+                        <div class="mb-3">
+                            <label for="deliveryPartnerArea" class="form-label" style="font-weight: 600;">Area</label>
+                            <input type="text" class="form-control" id="deliveryPartnerArea"
+                                   placeholder="e.g., Downtown, Yangon"
+                                   style="border-radius: 8px; padding: 10px; border: 2px solid #e5e7eb;">
+                        </div>
+                        <div id="addPartnerErrorMessage" class="alert alert-danger" style="display: none; border-radius: 8px;"></div>
+                        <div class="d-flex gap-2">
+                            <button type="submit" class="btn btn-warning flex-grow-1" 
+                                    style="border-radius: 8px; padding: 12px; font-weight: 600; color: white;">
+                                <i class="fas fa-save me-2"></i>Save Partner
+                            </button>
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal"
+                                    style="border-radius: 8px; padding: 12px;">
+                                <i class="fas fa-times"></i> Cancel
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    `;
+    
+    document.body.appendChild(modal);
+    const bsModal = new bootstrap.Modal(modal);
+    bsModal.show();
+    
+    modal.addEventListener('hidden.bs.modal', function() {
+        modal.remove();
+    });
+}
+
+// Handle add delivery partner form submission
+async function handleAddDeliveryPartner(event) {
+    event.preventDefault();
+    
+    const form = event.target;
+    const submitBtn = form.querySelector('button[type="submit"]');
+    const originalText = submitBtn.innerHTML;
+    const errorDiv = document.getElementById('addPartnerErrorMessage');
+    
+    errorDiv.style.display = 'none';
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Creating...';
+    
+    try {
+        const formData = {
+            name: document.getElementById('deliveryPartnerName').value.trim(),
+            phone: document.getElementById('deliveryPartnerPhone').value.trim(),
+            email: document.getElementById('deliveryPartnerEmail').value.trim(),
+            area: document.getElementById('deliveryPartnerArea').value.trim()
+        };
+        
+        const response = await fetch('/enhanced-chat/api/dealer/delivery-partners', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(formData)
+        });
+        
+        const data = await response.json();
+        
+        if (data.success && data.delivery_partner) {
+            // Close modal
+            const modal = bootstrap.Modal.getInstance(document.getElementById('addDeliveryPartnerModal'));
+            if (modal) modal.hide();
+            
+            // Add new partner to list
+            deliveryPartners.push(data.delivery_partner);
+            
+            // Update dealer order placement dropdown (if exists)
+            const dealerSelect = document.getElementById('deliveryPartnerSelect');
+            if (dealerSelect) {
+                const option = document.createElement('option');
+                option.value = data.delivery_partner.id;
+                option.textContent = `${data.delivery_partner.name}${data.delivery_partner.phone ? ' - ' + data.delivery_partner.phone : ''}`;
+                dealerSelect.appendChild(option);
+                
+                // Auto-select the new partner
+                dealerSelect.value = data.delivery_partner.id;
+                selectedDeliveryPartnerId = data.delivery_partner.id;
+                updateDeliveryPartnerSelection();
+            }
+            
+            // Update MR order confirmation dropdowns (if any exist - can be multiple)
+            const confirmSelects = document.querySelectorAll('select[id^="delivery_partner_QB"]');
+            confirmSelects.forEach(select => {
+                const option = document.createElement('option');
+                option.value = data.delivery_partner.id;
+                option.textContent = `${data.delivery_partner.name} (${data.delivery_partner.unique_id})`;
+                select.appendChild(option);
+                
+                // Auto-select in all dropdowns
+                select.value = data.delivery_partner.id;
+            });
+            
+            addMessage(`Delivery partner "${data.delivery_partner.name}" created successfully!`, 'bot', 'success');
+        } else {
+            throw new Error(data.error || 'Failed to create delivery partner');
+        }
+    } catch (error) {
+        console.error('Error creating delivery partner:', error);
+        errorDiv.textContent = error.message || 'Error creating delivery partner. Please try again.';
+        errorDiv.style.display = 'block';
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = originalText;
+    }
+}
+
+// Filter dealer product table (with favorites support - same as MR)
+function filterDealerProductTable() {
+    const searchInput = document.getElementById('dealerProductSearchInput');
+    const favoriteCheckbox = document.getElementById('dealerProductFavoriteFilterCheckbox');
+    const rows = document.querySelectorAll('#dealerProductTableBody tr.dealer-product-row');
+    
+    if (!searchInput) return;
+    
+    const searchTerm = searchInput.value.toLowerCase().trim();
+    const showFavoritesOnly = favoriteCheckbox && favoriteCheckbox.checked;
+    
+    // Create array of rows with match scores
+    const rowsWithScores = Array.from(rows).map(row => {
+        const productCode = row.getAttribute('data-product-code') || '';
+        
+        // Check favorite filter first
+        if (showFavoritesOnly && !isFavorite('products', productCode)) {
+            return { row, score: 0 };
+        }
+        
+        // If no search term and not filtering by favorites, show all
+        if (!searchTerm && !showFavoritesOnly) {
+            return { row, score: 1 };
+        }
+        
+        // If no search term but filtering by favorites, show if favorite
+        if (!searchTerm && showFavoritesOnly) {
+            return { row, score: isFavorite('products', productCode) ? 1 : 0 };
+        }
+        
+        // Apply search filter
+        const searchText = row.getAttribute('data-search-text') || '';
+        const productName = row.getAttribute('data-product-name') || '';
+        
+        let score = 0;
+        
+        // Exact code match (highest priority)
+        if (productCode.toLowerCase() === searchTerm) {
+            score = 1000;
+        }
+        // Code starts with search term
+        else if (productCode.toLowerCase().startsWith(searchTerm)) {
+            score = 500;
+        }
+        // Exact name match
+        else if (productName.toLowerCase() === searchTerm) {
+            score = 400;
+        }
+        // Name starts with search term
+        else if (productName.toLowerCase().startsWith(searchTerm)) {
+            score = 300;
+        }
+        // Contains search term in name
+        else if (productName.toLowerCase().includes(searchTerm)) {
+            score = 200;
+        }
+        // Contains search term anywhere
+        else if (searchText.includes(searchTerm)) {
+            score = 100;
+        }
+        
+        return { row, score };
+    });
+    
+    // Sort by score and update display
+    rowsWithScores.sort((a, b) => b.score - a.score);
+    
+    rowsWithScores.forEach(({ row, score }, index) => {
+        if (score > 0) {
+            row.style.display = '';
+            row.style.order = index;
+        } else {
+            row.style.display = 'none';
+        }
+    });
+}
+
+// Handle dealer bulk product selection (add to cart)
+async function handleDealerBulkProductSelection(event) {
+    event.preventDefault();
+    
+    const form = event.target;
+    const submitBtn = form.querySelector('button[type="submit"]');
+    const originalText = submitBtn.innerHTML;
+    
+    const rows = document.querySelectorAll('#dealerProductTableBody tr');
+    let productsToAdd = [];
+    
+    // Collect all products with quantity > 0
+    rows.forEach(row => {
+        const quantityInput = row.querySelector('.dealer-product-quantity-input');
+        const quantity = parseInt(quantityInput.value) || 0;
+        
+        if (quantity > 0) {
+            productsToAdd.push({
+                code: row.getAttribute('data-product-code'),
+                name: row.getAttribute('data-product-name'),
+                quantity: quantity,
+                price: parseFloat(row.getAttribute('data-price'))
+            });
+        }
+    });
+    
+    if (productsToAdd.length === 0) {
+        alert('Please enter quantities for at least one product.');
+        return;
+    }
+    
+    // Disable form and show loading
+    form.querySelectorAll('button, input').forEach(el => el.disabled = true);
+    submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Adding products...';
+    
+    // Add all products to cart in parallel (much faster than sequential)
+    const addProductPromises = productsToAdd.map(product => 
+        fetch('/enhanced-chat/cart/add', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                product_code: product.code,
+                quantity: product.quantity
+            })
+        })
+        .then(response => response.json().then(data => ({response, data, product})))
+        .catch(error => ({error, product}))
+    );
+    
+    const results = await Promise.allSettled(addProductPromises);
+    
+    let successCount = 0;
+    let failedProducts = [];
+    
+    results.forEach(result => {
+        if (result.status === 'fulfilled') {
+            const {response, data, product, error} = result.value;
+            if (error) {
+                console.error(`Error adding ${product.code}:`, error);
+                failedProducts.push({name: product.name, error: 'Network error'});
+            } else if (response && response.ok && data.success) {
+                successCount++;
+            } else {
+                failedProducts.push({name: product.name, error: data?.error || 'Unknown error'});
+            }
+        } else {
+            console.error('Promise rejected:', result.reason);
+        }
+    });
+    
+    // Re-enable all form controls
+    form.querySelectorAll('button, input').forEach(el => {
+        el.disabled = false;
+    });
+    submitBtn.innerHTML = originalText;
+    
+    // DON'T remove the product selection form - keep it visible!
+    // Just clear the quantities and show success message
+    
+    // Clear all quantity inputs
+    const quantityInputs = document.querySelectorAll('.dealer-product-quantity-input');
+    quantityInputs.forEach(input => {
+        input.value = 0;
+    });
+    
+    // Update the count display
+    updateDealerSelectedProductsCount();
+    
+    // Show success message as a notification within the form
+    const countDiv = document.getElementById('dealerSelectedProductsCount');
+    if (countDiv) {
+        let message = successCount > 0 
+            ? `Successfully added ${successCount} product(s) to cart!` 
+            : 'No products were added';
+        
+        if (failedProducts.length > 0) {
+            message += ` (${failedProducts.length} failed)`;
+        }
+        
+        // Show success message
+        countDiv.innerHTML = `
+            <div style="text-align: center;">
+                <i class="fas fa-check-circle me-2" style="color: #059669; font-size: 1.2rem;"></i>
+                <strong style="color: #059669; font-size: 1rem;">${message}</strong>
+            </div>
+        `;
+        countDiv.style.cssText = 'background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%); border-radius: 10px; border: 2px solid #10b981; padding: 15px; text-align: center; margin-bottom: 15px;';
+        
+        // Reset to default message after 3 seconds
+        setTimeout(() => {
+            countDiv.innerHTML = '<i class="fas fa-info-circle me-2" style="color: #2563eb;"></i><span style="color: #1e40af; font-weight: 600; font-size: 0.9rem;">Select quantities above to add products to your cart</span>';
+            countDiv.style.cssText = 'background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%); border-radius: 10px; border: 2px dashed #3b82f6; padding: 12px; text-align: center;';
+        }, 3000);
+    }
+    
+    // Also add a bot message for confirmation
+    addMessage(`✅ Successfully added ${successCount} product(s) to cart!`, 'bot');
+    
+    // Scroll to top of form to show success message
+    const messagesDiv = document.getElementById('chatMessages');
+    if (messagesDiv) {
+        messagesDiv.scrollTo({
+            top: messagesDiv.scrollHeight,
+            behavior: 'smooth'
+        });
+    }
+}
+
+// Proceed to dealer checkout (place order)
+async function proceedToDealerCheckout() {
+    // Validate delivery partner selection
+    if (!selectedDeliveryPartnerId) {
+        const errorDiv = document.getElementById('deliveryPartnerError');
+        if (errorDiv) {
+            errorDiv.textContent = 'Please select a delivery partner before placing the order.';
+            errorDiv.style.display = 'block';
+        }
+        alert('Please select a delivery partner before placing the order.');
+        return;
+    }
+    
+    try {
+        // First, store the delivery partner ID in the server session
+        const sessionResponse = await fetch('/enhanced-chat/api/dealer/set-delivery-partner', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                delivery_partner_id: selectedDeliveryPartnerId
+            })
+        });
+        
+        if (!sessionResponse.ok) {
+            // If session endpoint doesn't exist, proceed anyway (backend will handle it)
+            console.warn('Could not set delivery partner in session, will pass in place_order call');
+        }
+        
+        // Place order
+        const response = await fetch('/enhanced-chat/place_order', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            // Clear global variables
+            selectedDealerCustomerId = null;
+            selectedDealerCustomerUniqueId = null;
+            selectedDeliveryPartnerId = null;
+            
+            // Remove form
+            const formContainer = document.querySelector('.dealer-product-selection-container');
+            if (formContainer) {
+                formContainer.remove();
+            }
+            
+            addMessage(data.message, 'bot', 'success');
+            if (data.order_id) {
+                addMessage(`✅ Order placed successfully! Order ID: ${data.order_id}`, 'bot', 'success');
+            }
+        } else {
+            addMessage(data.message || 'Error placing order', 'bot', 'error');
+        }
+    } catch (error) {
+        console.error('Error placing dealer order:', error);
+        addMessage('Error placing order. Please try again.', 'bot', 'error');
+    }
+}
+
+// Dealer customer functions removed - using MR UI (addCustomerSelectionForm) for dealers too
+// Update dealer selected products count with FOC information (same as MR version)
+function updateDealerSelectedProductsCount() {
+    const countDiv = document.getElementById('dealerSelectedProductsCount');
+    if (!countDiv) return;
+    
+    const rows = document.querySelectorAll('#dealerProductTableBody tr');
+    let count = 0;
+    let focItems = [];
+    
+    rows.forEach(row => {
+        const quantityInput = row.querySelector('.dealer-product-quantity-input');
+        const quantity = parseInt(quantityInput.value) || 0;
+        
+        if (quantity > 0) {
+            count++;
+            
+            // Get FOC schemes from data attribute
+            const productName = quantityInput.getAttribute('data-product-name') || row.getAttribute('data-product-name') || '';
+            const focSchemesAttr = quantityInput.getAttribute('data-foc-schemes');
+            
+            if (focSchemesAttr) {
+                try {
+                    const focSchemes = JSON.parse(focSchemesAttr);
+                    
+                    if (focSchemes && focSchemes.length > 0) {
+                        // Find the best matching scheme for this quantity
+                        let bestScheme = null;
+                        let bestThreshold = 0;
+                        
+                        focSchemes.forEach(scheme => {
+                            const buyQty = scheme.buy;
+                            if (quantity >= buyQty && buyQty > bestThreshold) {
+                                bestScheme = scheme;
+                                bestThreshold = buyQty;
+                            }
+                        });
+                        
+                        if (bestScheme) {
+                            const buyQty = bestScheme.buy;
+                            const freeQty = bestScheme.free;
+                            
+                            // Calculate how many free items user will get
+                            const sets = Math.floor(quantity / buyQty);
+                            const totalFree = sets * freeQty;
+                            
+                            if (totalFree > 0) {
+                                focItems.push({
+                                    name: productName,
+                                    ordered: quantity,
+                                    free: totalFree,
+                                    total: quantity + totalFree,
+                                    scheme: `Buy ${buyQty} Get ${freeQty} Free`
+                                });
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.error('Error parsing FOC schemes:', e);
+                }
+            }
+        }
+    });
+    
+    if (count === 0) {
+        countDiv.innerHTML = '<i class="fas fa-info-circle me-2" style="color: #2563eb;"></i><span style="color: #1e40af; font-weight: 600; font-size: 0.9rem;">Select quantities above to add products to your cart</span>';
+        countDiv.style.cssText = 'background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%); border-radius: 10px; border: 2px dashed #3b82f6; padding: 12px; text-align: center;';
+    } else {
+        let html = `<div style="background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%); border-radius: 10px; border: 2px solid #10b981; padding: 12px;">
+            <div style="text-align: center; margin-bottom: ${focItems.length > 0 ? '10px' : '0'};">
+                <i class="fas fa-check-circle me-2" style="color: #065f46;"></i>
+                <strong style="color: #065f46; font-size: 0.95rem;">${count} product(s) selected - Ready to add to cart</strong>
+            </div>`;
+        
+        if (focItems.length > 0) {
+            html += `
+                <div style="background: rgba(255, 255, 255, 0.9); border-radius: 10px; padding: 15px; margin-top: 12px; border: 2px solid #34d399; box-shadow: 0 2px 8px rgba(16, 185, 129, 0.2);">
+                    <div style="color: #065f46; font-weight: 700; margin-bottom: 12px; font-size: 1rem; text-align: center;">
+                        <i class="fas fa-gift me-2" style="font-size: 1.1rem;"></i>🎁 FOC Items You'll Receive FREE!
+                    </div>
+                    <ul style="margin: 0; padding-left: 20px; color: #047857; font-size: 0.9rem; text-align: left; line-height: 1.8;">`;
+            
+            focItems.forEach(item => {
+                html += `<li style="margin-bottom: 6px;">
+                    <strong style="color: #065f46;">${item.name}:</strong> 
+                    Order ${item.ordered} units, Get <span style="color: #059669; font-weight: 700; font-size: 1.05rem; background: rgba(16, 185, 129, 0.15); padding: 2px 8px; border-radius: 4px;">${item.free} FREE</span> 
+                    → Total: <strong>${item.total} units</strong>
+                    <br><small style="color: #6b7280; font-size: 0.8rem; margin-left: 0px;"><i class="fas fa-tag me-1"></i>${item.scheme}</small>
+                </li>`;
+            });
+            
+            html += `</ul></div>`;
+        }
+        
+        html += '</div>';
+        countDiv.innerHTML = html;
+        countDiv.style.cssText = 'text-align: center; margin-bottom: 15px;';
+    }
+}
+
+// Check FOC notification for dealer product (same as MR version)
+function checkDealerFOCNotification(inputElement) {
+    const quantity = parseInt(inputElement.value) || 0;
+    const productCode = inputElement.getAttribute('data-product-code');
+    const notificationDiv = document.getElementById(`dealer-foc-notification-${productCode}`);
+    
+    if (!notificationDiv || quantity === 0) {
+        if (notificationDiv) notificationDiv.style.display = 'none';
+        return;
+    }
+    
+    // Get FOC schemes from data attribute
+    const focSchemesJson = inputElement.getAttribute('data-foc-schemes');
+    let focSchemes = [];
+    try {
+        focSchemes = JSON.parse(focSchemesJson || '[]');
+    } catch (e) {
+        console.warn('Error parsing FOC schemes:', e);
+    }
+    
+    // Find the best/highest scheme that quantity qualifies for
+    let bestActiveScheme = null;
+    let bestThreshold = 0;
+    
+    // Track closest upcoming scheme and next tier
+    let closestScheme = null;
+    let minDistance = Infinity;
+    let nextTierScheme = null;
+    
+    // Sort schemes by buy quantity (ascending)
+    const sortedSchemes = focSchemes
+        .map(scheme => {
+            if (scheme) {
+                const buyQty = parseInt(scheme.buy_quantity || scheme.buy || 0);
+                const freeQty = parseInt(scheme.free_quantity || scheme.free || 0);
+                return { buyQty, freeQty, scheme };
+            }
+            return null;
+        })
+        .filter(s => s && s.buyQty > 0)
+        .sort((a, b) => a.buyQty - b.buyQty);
+    
+    for (const { buyQty, freeQty } of sortedSchemes) {
+        // If quantity qualifies for this scheme
+        if (quantity >= buyQty && buyQty > bestThreshold) {
+            bestThreshold = buyQty;
+            bestActiveScheme = { buyQty, freeQty };
+        }
+        
+        // Check if this is the next tier
+        const distance = buyQty - quantity;
+        if (distance > 0) {
+            if (distance < minDistance) {
+                minDistance = distance;
+                closestScheme = { buyQty, freeQty, distance };
+            }
+            if (!nextTierScheme && distance > 0) {
+                nextTierScheme = { buyQty, freeQty, distance };
+            }
+        }
+    }
+    
+    // Show the best active scheme if quantity qualifies
+    if (bestActiveScheme) {
+        notificationDiv.innerHTML = `<i class="fas fa-gift me-1"></i>FOC Active: Buy ${bestActiveScheme.buyQty} Get ${bestActiveScheme.freeQty} Free!`;
+        notificationDiv.style.display = 'block';
+        notificationDiv.style.color = '#059669';
+    }
+    // Otherwise, show notification if close to a scheme or show next tier
+    else if (closestScheme) {
+        if (closestScheme.distance <= 5) {
+            notificationDiv.innerHTML = `<i class="fas fa-info-circle me-1"></i>Add ${closestScheme.distance} more to get FOC: Buy ${closestScheme.buyQty} Get ${closestScheme.freeQty} Free!`;
+            notificationDiv.style.display = 'block';
+            notificationDiv.style.color = '#f59e0b';
+        } else if (nextTierScheme && nextTierScheme.distance <= 20) {
+            notificationDiv.innerHTML = `<i class="fas fa-info-circle me-1"></i>Add ${nextTierScheme.distance} more for better FOC: Buy ${nextTierScheme.buyQty} Get ${nextTierScheme.freeQty} Free!`;
+            notificationDiv.style.display = 'block';
+            notificationDiv.style.color = '#3b82f6';
+        } else {
+            notificationDiv.style.display = 'none';
+        }
+    } else {
+        notificationDiv.style.display = 'none';
+    }
+}
+
+// Clear dealer bulk product form
+function clearDealerBulkProductForm() {
+    const quantityInputs = document.querySelectorAll('.dealer-product-quantity-input');
+    quantityInputs.forEach(input => {
+        input.value = 0;
+    });
+    const searchInput = document.getElementById('dealerProductSearchInput');
+    if (searchInput) {
+        searchInput.value = '';
+        filterDealerProductTable();
+    }
+    updateDealerSelectedProductsCount();
+}
+
+// Confirm dealer cart - removes product selection form and proceeds to place order
+async function confirmDealerCart() {
+    // Validate delivery partner selection first
+    if (!selectedDeliveryPartnerId) {
+        const errorDiv = document.getElementById('deliveryPartnerError');
+        if (errorDiv) {
+            errorDiv.textContent = 'Please select a delivery partner before confirming.';
+            errorDiv.style.display = 'block';
+        }
+        alert('Please select a delivery partner before confirming the cart.');
+        return;
+    }
+    
+    // Remove the product selection form with fade out animation
+    const formContainer = document.getElementById('dealerProductSelectionForm');
+    if (formContainer) {
+        formContainer.style.transition = 'opacity 0.3s ease-out, transform 0.3s ease-out';
+        formContainer.style.opacity = '0';
+        formContainer.style.transform = 'translateY(-10px)';
+        setTimeout(() => {
+            if (formContainer.parentNode) {
+                formContainer.remove();
+            }
+        }, 300);
+    }
+    
+    // Proceed to place the order
+    proceedToDealerCheckout();
+}
+
+window.addDealerProductSelectionForm = addDealerProductSelectionForm;
+window.loadDealerDeliveryPartners = loadDealerDeliveryPartners;
+window.updateDeliveryPartnerSelection = updateDeliveryPartnerSelection;
+window.showAddDeliveryPartnerModal = showAddDeliveryPartnerModal;
+window.handleAddDeliveryPartner = handleAddDeliveryPartner;
+window.filterDealerProductTable = filterDealerProductTable;
+window.handleDealerBulkProductSelection = handleDealerBulkProductSelection;
+window.proceedToDealerCheckout = proceedToDealerCheckout;
+window.updateDealerSelectedProductsCount = updateDealerSelectedProductsCount;
+window.checkDealerFOCNotification = checkDealerFOCNotification;
+window.clearDealerBulkProductForm = clearDealerBulkProductForm;
+window.confirmDealerCart = confirmDealerCart;
+
+// ============= ORDER TRACKING ENHANCEMENTS - PLACED BY INFO =============
+// "My Orders Only" checkbox removed - Filter dropdown now clearly shows "Dealer: Name" vs "MR: Name"

@@ -28,7 +28,7 @@ ORDER_STATUS_TRANSITIONS = {
 }
 
 class EnhancedOrderService:
-    """Enhanced order service for HV (Powered by Quantum Blue AI) workflow"""
+    """Enhanced order service for R&B (Powered by Quantum Blue AI) workflow"""
     
     def __init__(self):
         self.db_service = DatabaseService()
@@ -326,15 +326,29 @@ class EnhancedOrderService:
             # Determine who placed the order
             placed_by_user = User.query.get(placed_by_user_id) if placed_by_user_id else user
             
-            # Get customer details if MR and customer_id is provided
+            # Get customer details if customer_id is provided (for both MR and Dealer)
             customer = None
-            if user.role == 'mr' and customer_id:
+            if customer_id:
                 customer = Customer.query.get(customer_id)
-                if not customer or customer.mr_unique_id != user.unique_id:
+                if not customer:
                     return {
                         'success': False,
-                        'message': "Customer not found or not assigned to you"
+                        'message': "Customer not found"
                     }
+                
+                # Verify customer belongs to this user
+                if user.role == 'mr':
+                    if customer.mr_unique_id != user.unique_id:
+                        return {
+                            'success': False,
+                            'message': "Customer not found or not assigned to you"
+                        }
+                elif user.role == 'distributor':
+                    if customer.dealer_id != user.id:
+                        return {
+                            'success': False,
+                            'message': "Customer not found or not assigned to you"
+                        }
             
             # Check if user has area assigned
             if not user.area:
@@ -575,7 +589,11 @@ You'll receive an email when any of these products become available."""
                 mr_id=user_id,
                 mr_unique_id=user.unique_id,
                 status='pending',
-                order_stage='placed'
+                order_stage='placed',
+                # Track who created this order
+                created_by_role=user.role,
+                created_by_id=user.id,
+                created_by_unique_id=user.unique_id
             )
             
             # Add customer details if MR order
@@ -712,8 +730,8 @@ You'll receive an email when any of these products become available."""
             
             # NOTE: Stock is now BLOCKED (not sold yet)
             # For MR orders: It will move from blocked to out_for_delivery when dealer confirms and assigns delivery partner
+            # For distributor orders: It will move from blocked to out_for_delivery when order is placed (auto-confirmed)
             # Stock will then move from out_for_delivery to sold when delivery partner marks as delivered
-            # For distributor orders: Move stock immediately since order is self-confirmed (blocked to sold directly)
             # IMPORTANT: Wait until order items are created to get FOC quantities
             # Stock movement will happen after order items are added (see below)
             
@@ -781,8 +799,9 @@ You'll receive an email when any of these products become available."""
             # Clear cart
             self.db_service.clear_cart(user_id)
             
-            # For distributor orders: Move stock from blocked to sold after order items are created
+            # For distributor orders: Move stock from blocked to out_for_delivery after order items are created
             # IMPORTANT: Include FOC quantities in stock movement
+            # Stock will move from out_for_delivery to sold when delivery partner marks as delivered
             if user.role == 'distributor':
                 cart_items_for_movement = []
                 # Get order items to include FOC quantities
@@ -796,9 +815,9 @@ You'll receive an email when any of these products become available."""
                     })())
                 
                 if cart_items_for_movement:
-                    # Move stock from blocked to sold for distributor's own stock
-                    self._move_blocked_to_sold_for_distributor_order(user, cart_items_for_movement)
-                    self.logger.info(f"Moved stock from blocked to sold for distributor order {order.order_id} (including FOC quantities)")
+                    # Move stock from blocked to out_for_delivery for distributor's own stock
+                    self._move_blocked_to_out_for_delivery_for_distributor_order(user, cart_items_for_movement)
+                    self.logger.info(f"Moved stock from blocked to out_for_delivery for distributor order {order.order_id} (including FOC quantities)")
             
             # Commit all changes
             db.session.commit()
@@ -830,7 +849,11 @@ You'll receive an email when any of these products become available."""
             if user.role == 'mr':
                 status_message = f"Your order has been placed successfully and is currently **Pending** confirmation from the distributor. The distributor will review and confirm your order shortly."
             else:
-                status_message = f"Your order is currently in the **{stage_display}** stage with status **{status_display}**. The distributor has been notified and will process your order shortly."
+                # For dealer orders, mention delivery partner notification instead of distributor
+                if user.role == 'distributor':
+                    status_message = f"Your order is currently in the **{stage_display}** stage with status **{status_display}**. The delivery partner has been notified and will deliver your order shortly."
+                else:
+                    status_message = f"Your order is currently in the **{stage_display}** stage with status **{status_display}**. The distributor has been notified and will process your order shortly."
             
             confirmation_message = f"""🎉 **Order Placed Successfully!**
 
@@ -2577,92 +2600,242 @@ These products will be automatically ordered when new stock arrives. Track with 
             self.logger.error(f"Error sending invoice emails: {str(e)}")
     
     def _send_delivery_assignment_email(self, order, delivery_partner):
-        """Send email notification to delivery partner when order is assigned"""
+        """Send enhanced professional email notification to delivery partner when order is assigned"""
         try:
             from app.email_utils import create_email_template, send_email
+            from datetime import datetime
             
             # Get customer details
             customer = None
+            customer_name = "Customer Name Not Available"
+            customer_phone = "Phone Not Provided"
+            customer_email = "Email Not Provided"
+            customer_address = "Address Not Provided"
+            
             if order.customer_id:
                 from app.models import Customer
                 customer = Customer.query.get(order.customer_id)
+                if customer:
+                    customer_name = customer.name
+                    customer_phone = customer.phone or "Phone Not Provided"
+                    customer_email = customer.email or "Email Not Provided"
+                    customer_address = customer.address or "Address Not Provided"
+            
+            # Get dealer/MR who placed or confirmed the order
+            placed_by_name = "N/A"
+            placed_by_role = "N/A"
+            placed_by_phone = "N/A"
+            
+            if order.created_by_id:
+                created_by = User.query.get(order.created_by_id)
+                if created_by:
+                    placed_by_name = created_by.name
+                    placed_by_role = "Dealer" if created_by.role == 'distributor' else created_by.role.upper()
+                    placed_by_phone = created_by.phone or "N/A"
+            elif order.mr:
+                placed_by_name = order.mr.name
+                placed_by_role = "MR"
+                placed_by_phone = order.mr.phone or "N/A"
             
             # Get order items
             order_items = OrderItem.query.filter_by(order_id=order.id).all()
             
-            # Build order details
+            # Build detailed order items table
             items_html = ""
-            for item in order_items:
+            total_items_count = 0
+            for idx, item in enumerate(order_items, 1):
                 quantity = item.adjusted_quantity if item.adjusted_quantity else item.quantity
                 foc_qty = item.free_quantity or 0
                 total_qty = quantity + foc_qty
+                total_items_count += total_qty
+                unit_price = item.unit_price or 0
+                total_price = quantity * unit_price
+                
                 items_html += f"""
-                <tr style="border-bottom: 1px solid #e5e7eb;">
-                    <td style="padding: 10px;">{item.product_name} ({item.product_code})</td>
-                    <td style="padding: 10px; text-align: center;">{total_qty} units</td>
+                <tr style="border-bottom: 1px solid #e5e7eb; background-color: {'#f9fafb' if idx % 2 == 0 else 'white'};">
+                    <td style="padding: 12px; font-size: 14px;">{idx}</td>
+                    <td style="padding: 12px; font-weight: 600; color: #1f2937;">{item.product_name}</td>
+                    <td style="padding: 12px; font-size: 13px; color: #6b7280; text-align: center;">{item.product_code}</td>
+                    <td style="padding: 12px; text-align: center;">
+                        <span style="font-weight: 600; color: #059669;">{quantity}</span>
+                        {f'<span style="color: #f59e0b; font-size: 12px;"> +{foc_qty} FOC</span>' if foc_qty > 0 else ''}
+                    </td>
+                    <td style="padding: 12px; text-align: center; font-weight: 600; color: #2563eb;">{total_qty}</td>
+                    <td style="padding: 12px; text-align: right; color: #059669;">{unit_price:,.0f} MMK</td>
+                    <td style="padding: 12px; text-align: right; font-weight: 600; color: #059669;">{total_price:,.0f} MMK</td>
                 </tr>
                 """
             
-            customer_address = customer.address if customer and customer.address else "Address not provided"
-            customer_name = customer.name if customer else "Customer"
-            customer_phone = customer.phone if customer and customer.phone else "Phone not provided"
+            # Calculate order summary
+            subtotal = order.subtotal or 0
+            tax_amount = order.tax_amount or 0
+            grand_total = order.total_amount or 0
+            
+            # Get current date/time for professional formatting
+            current_datetime = datetime.now().strftime('%B %d, %Y at %I:%M %p')
+            order_datetime = order.created_at.strftime('%B %d, %Y at %I:%M %p') if order.created_at else 'N/A'
             
             content = f"""
-            <div class="info-box">
-                <h3 style="margin-top: 0; color: #1e40af;">📦 New Delivery Assignment</h3>
-                <p>You have been assigned a new order for delivery. Please review the details below and proceed with the delivery.</p>
+            <div style="background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); color: white; padding: 30px; border-radius: 12px 12px 0 0; text-align: center; margin: -20px -20px 20px -20px;">
+                <h2 style="margin: 0 0 10px 0; font-size: 28px;">🚚 New Delivery Assignment</h2>
+                <p style="margin: 0; font-size: 16px; opacity: 0.95;">Order #{order.order_id}</p>
             </div>
             
-            <div style="background-color: #f9fafb; padding: 20px; border-radius: 8px; margin: 20px 0;">
-                <h3 style="margin-top: 0; color: #1e40af;">Order Details</h3>
-                <p><strong>Order ID:</strong> {order.order_id}</p>
-                <p><strong>Order Date:</strong> {order.created_at.strftime('%Y-%m-%d %H:%M:%S') if order.created_at else 'N/A'}</p>
-                <p><strong>Total Amount:</strong> ₹{order.total_amount:.2f}</p>
+            <div style="background-color: #fef3c7; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 5px solid #f59e0b;">
+                <p style="margin: 0; font-size: 15px; color: #92400e;">
+                    <strong>🔔 Action Required:</strong> You have been assigned a new order for delivery. 
+                    Please review the details below and prepare for pickup from the dealer.
+                </p>
             </div>
             
-            <div style="background-color: #f9fafb; padding: 20px; border-radius: 8px; margin: 20px 0;">
-                <h3 style="margin-top: 0; color: #1e40af;">Items to Deliver</h3>
-                <table style="width: 100%; border-collapse: collapse; margin-top: 10px;">
+            <div style="background-color: #f0f9ff; padding: 25px; border-radius: 10px; margin: 20px 0; border: 2px solid #bae6fd;">
+                <h3 style="margin-top: 0; color: #0c4a6e; font-size: 20px; border-bottom: 2px solid #0ea5e9; padding-bottom: 10px;">
+                    <i style="color: #0ea5e9;">📋</i> Order Information
+                </h3>
+                <table style="width: 100%; font-size: 14px;">
+                    <tr>
+                        <td style="padding: 8px 0; color: #64748b; width: 40%;"><strong>Order ID:</strong></td>
+                        <td style="padding: 8px 0; color: #1e293b; font-weight: 600;">{order.order_id}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 8px 0; color: #64748b;"><strong>Order Date:</strong></td>
+                        <td style="padding: 8px 0; color: #1e293b;">{order_datetime}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 8px 0; color: #64748b;"><strong>Placed By:</strong></td>
+                        <td style="padding: 8px 0; color: #1e293b;">{placed_by_role} - {placed_by_name}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 8px 0; color: #64748b;"><strong>Contact:</strong></td>
+                        <td style="padding: 8px 0; color: #1e293b;">{placed_by_phone}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 8px 0; color: #64748b;"><strong>Total Items:</strong></td>
+                        <td style="padding: 8px 0; color: #1e293b; font-weight: 600;">{total_items_count} units</td>
+                    </tr>
+                    <tr style="background-color: #dbeafe;">
+                        <td style="padding: 12px 8px; color: #1e40af; font-size: 16px;"><strong>Grand Total:</strong></td>
+                        <td style="padding: 12px 8px; color: #1e40af; font-weight: 700; font-size: 18px;">{grand_total:,.2f} MMK</td>
+                    </tr>
+                </table>
+            </div>
+            
+            <div style="background-color: #ffffff; padding: 25px; border-radius: 10px; margin: 20px 0; border: 2px solid #e5e7eb; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+                <h3 style="margin-top: 0; color: #059669; font-size: 20px; border-bottom: 2px solid #10b981; padding-bottom: 10px;">
+                    <i style="color: #10b981;">📦</i> Items to Deliver
+                </h3>
+                <table style="width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 14px;">
                     <thead>
-                        <tr style="background-color: #3b82f6; color: white;">
-                            <th style="padding: 10px; text-align: left;">Product</th>
-                            <th style="padding: 10px; text-align: center;">Quantity</th>
+                        <tr style="background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); color: white;">
+                            <th style="padding: 12px; text-align: left; border-radius: 8px 0 0 0;">#</th>
+                            <th style="padding: 12px; text-align: left;">Product Name</th>
+                            <th style="padding: 12px; text-align: center;">Product Code</th>
+                            <th style="padding: 12px; text-align: center;">Paid Qty</th>
+                            <th style="padding: 12px; text-align: center;">Total Qty</th>
+                            <th style="padding: 12px; text-align: right;">Unit Price</th>
+                            <th style="padding: 12px; text-align: right; border-radius: 0 8px 0 0;">Total</th>
                         </tr>
                     </thead>
                     <tbody>
                         {items_html}
+                        <tr style="background-color: #f0fdf4; border-top: 3px solid #10b981;">
+                            <td colspan="6" style="padding: 15px; text-align: right; font-weight: 700; font-size: 15px; color: #065f46;">
+                                Total Items to Deliver:
+                            </td>
+                            <td style="padding: 15px; text-align: right; font-weight: 700; font-size: 16px; color: #059669;">
+                                {total_items_count} units
+                            </td>
+                        </tr>
                     </tbody>
                 </table>
             </div>
             
-            <div style="background-color: #eff6ff; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #3b82f6;">
-                <h3 style="margin-top: 0; color: #1e40af;">📍 Delivery Address</h3>
-                <p><strong>Customer Name:</strong> {customer_name}</p>
-                <p><strong>Phone:</strong> {customer_phone}</p>
-                <p><strong>Address:</strong> {customer_address}</p>
+            <div style="background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%); padding: 25px; border-radius: 10px; margin: 20px 0; border: 2px solid #93c5fd;">
+                <h3 style="margin-top: 0; color: #1e40af; font-size: 20px; border-bottom: 2px solid #3b82f6; padding-bottom: 10px;">
+                    <i style="color: #3b82f6;">📍</i> Customer Delivery Details
+                </h3>
+                <table style="width: 100%; font-size: 14px; margin-top: 15px;">
+                    <tr style="background-color: #f0f9ff;">
+                        <td style="padding: 12px; color: #1e40af; width: 35%;"><strong><i style="color: #3b82f6;">👤</i> Customer Name:</strong></td>
+                        <td style="padding: 12px; color: #1e293b; font-weight: 600; font-size: 15px;">{customer_name}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 12px; color: #1e40af;"><strong><i style="color: #3b82f6;">📞</i> Contact Phone:</strong></td>
+                        <td style="padding: 12px; color: #1e293b; font-weight: 500;">{customer_phone}</td>
+                    </tr>
+                    <tr style="background-color: #f0f9ff;">
+                        <td style="padding: 12px; color: #1e40af;"><strong><i style="color: #3b82f6;">✉️</i> Email:</strong></td>
+                        <td style="padding: 12px; color: #1e293b; font-weight: 500;">{customer_email}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 12px; color: #1e40af; vertical-align: top;"><strong><i style="color: #3b82f6;">📮</i> Delivery Address:</strong></td>
+                        <td style="padding: 12px; color: #1e293b; font-weight: 500; line-height: 1.6;">{customer_address}</td>
+                    </tr>
+                </table>
             </div>
             
-            <div class="warning-box">
-                <p><strong>⚠️ Important:</strong> Please log in to your delivery partner dashboard to track this order and update the delivery status once completed.</p>
+            <div style="background-color: #fef2f2; padding: 20px; border-radius: 10px; margin: 20px 0; border-left: 5px solid #ef4444;">
+                <h4 style="margin-top: 0; color: #991b1b; font-size: 16px;">
+                    <i style="color: #dc2626;">⚠️</i> Important Instructions
+                </h4>
+                <ul style="margin: 10px 0; padding-left: 20px; color: #7f1d1d;">
+                    <li style="margin-bottom: 8px;">Please verify all items before pickup from the dealer</li>
+                    <li style="margin-bottom: 8px;">Contact customer to confirm delivery time: <strong>{customer_phone}</strong></li>
+                    <li style="margin-bottom: 8px;">Collect payment of <strong>{grand_total:,.2f} MMK</strong> upon delivery (if COD)</li>
+                    <li style="margin-bottom: 8px;">Update delivery status in your dashboard after completion</li>
+                    <li style="margin-bottom: 8px;">For any issues, contact the dealer: <strong>{placed_by_name}</strong> at {placed_by_phone}</li>
+                </ul>
+            </div>
+            
+            <div style="background-color: #ecfdf5; padding: 20px; border-radius: 10px; margin: 20px 0; border: 2px solid #10b981;">
+                <h4 style="margin-top: 0; color: #065f46; font-size: 16px;">
+                    <i style="color: #10b981;">💰</i> Payment Summary
+                </h4>
+                <table style="width: 100%; font-size: 14px;">
+                    <tr>
+                        <td style="padding: 8px 0; color: #064e3b;">Subtotal:</td>
+                        <td style="padding: 8px 0; text-align: right; color: #064e3b;">{subtotal:,.2f} MMK</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 8px 0; color: #064e3b;">Tax (5%):</td>
+                        <td style="padding: 8px 0; text-align: right; color: #064e3b;">{tax_amount:,.2f} MMK</td>
+                    </tr>
+                    <tr style="border-top: 2px solid #10b981; background-color: #d1fae5;">
+                        <td style="padding: 12px 0; font-weight: 700; font-size: 16px; color: #065f46;">Grand Total:</td>
+                        <td style="padding: 12px 0; text-align: right; font-weight: 700; font-size: 18px; color: #059669;">{grand_total:,.2f} MMK</td>
+                    </tr>
+                </table>
+            </div>
+            
+            <div style="background-color: #f0f9ff; padding: 20px; border-radius: 10px; margin: 20px 0; text-align: center; border: 2px dashed #3b82f6;">
+                <p style="margin: 0 0 15px 0; font-size: 15px; color: #1e40af;">
+                    <strong>📱 Need Help?</strong>
+                </p>
+                <p style="margin: 0; font-size: 13px; color: #475569;">
+                    Contact our support team or the dealer for any questions about this delivery.
+                </p>
+                <p style="margin: 10px 0 0 0; font-size: 12px; color: #64748b;">
+                    Email sent: {current_datetime}
+                </p>
             </div>
             """
             
             html_content = create_email_template(
-                title="New Delivery Assignment",
+                title=f"🚚 Delivery Assignment - Order {order.order_id}",
                 content=content,
-                footer_text="Please complete the delivery and update the status in your dashboard."
+                footer_text="R&B (Powered by Quantum Blue AI) - Professional Pharmaceutical Distribution System"
             )
             
             send_email(
                 delivery_partner.email,
-                f"New Delivery Assignment - Order {order.order_id}",
+                f"🚚 New Delivery Assignment - Order {order.order_id} | {total_items_count} Items | {grand_total:,.0f} MMK",
                 html_content,
                 'delivery_assignment',
                 order_id=order.order_id,
                 receiver_name=delivery_partner.name
             )
             
-            self.logger.info(f"Delivery assignment email sent to {delivery_partner.email} for order {order.order_id}")
+            self.logger.info(f"Enhanced delivery assignment email sent to {delivery_partner.email} for order {order.order_id}")
             
         except Exception as e:
             self.logger.error(f"Error sending delivery assignment email: {str(e)}")
@@ -2779,7 +2952,7 @@ These products will be automatically ordered when new stock arrives. Track with 
                 html_content = create_email_template(
                     title="Order Delivered",
                     content=content,
-                    footer_text="Thank you for using HV (Powered by Quantum Blue AI)."
+                    footer_text="Thank you for using R&B (Powered by Quantum Blue AI)."
                 )
                 
                 send_email(
@@ -2869,7 +3042,7 @@ These products will be automatically ordered when new stock arrives. Track with 
             <div class="container">
                 <div class="header">
                     <h1>🧾 Invoice Generated</h1>
-                    <p>HV (Powered by Quantum Blue AI)</p>
+                    <p>R&B (Powered by Quantum Blue AI)</p>
                 </div>
                 
                 <div class="content">
@@ -2907,7 +3080,7 @@ These products will be automatically ordered when new stock arrives. Track with 
                     </div>
                     
                     <div class="footer">
-                        <p>This invoice has been automatically generated by HV (Powered by Quantum Blue AI) system.</p>
+                        <p>This invoice has been automatically generated by R&B (Powered by Quantum Blue AI) system.</p>
                         <p>Thank you for your business!</p>
                     </div>
                 </div>
@@ -3075,10 +3248,11 @@ These products will be automatically ordered when new stock arrives. Track with 
             self.logger.error(f"Error blocking quantity for distributor order: {str(e)}")
             return False  # Return False on exception
     
-    def _move_blocked_to_sold_for_distributor_order(self, user, cart_items):
+    def _move_blocked_to_out_for_delivery_for_distributor_order(self, user, cart_items):
         """
-        Move blocked quantities to sold for distributor's own orders
+        Move blocked quantities to out_for_delivery for distributor's own orders
         Updates available_for_sale accordingly
+        Stock will move to sold when delivery partner marks order as delivered
         """
         try:
             from app.models import DealerWiseStockDetails
@@ -3090,7 +3264,7 @@ These products will be automatically ordered when new stock arrives. Track with 
             # Process each cart item
             for cart_item in cart_items:
                 product_code = cart_item.product_code
-                quantity_to_move = cart_item.quantity
+                total_quantity_to_move = cart_item.quantity
                 
                 # Get all stock details with blocked quantity for this product from this distributor
                 from sqlalchemy import case
@@ -3107,9 +3281,9 @@ These products will be automatically ordered when new stock arrives. Track with 
                     DealerWiseStockDetails.expiry_date.asc()
                 ).all()
                 
-                remaining_quantity = quantity_to_move
+                remaining_quantity = total_quantity_to_move
                 
-                # Move blocked to sold using FEFO (earliest expiry first)
+                # Move blocked to out_for_delivery using FEFO (earliest expiry first)
                 for stock_detail in stock_details:
                     if remaining_quantity <= 0:
                         break
@@ -3121,15 +3295,15 @@ These products will be automatically ordered when new stock arrives. Track with 
                     # Calculate how much to move from this stock detail
                     quantity_to_move_from_stock = min(remaining_quantity, blocked_in_this_stock)
                     
-                    # Move from blocked to sold
+                    # Move from blocked to out_for_delivery (not sold yet)
                     stock_detail.blocked_quantity -= quantity_to_move_from_stock
-                    stock_detail.sold_quantity += quantity_to_move_from_stock
+                    stock_detail.out_for_delivery_quantity += quantity_to_move_from_stock
                     stock_detail.update_available_quantity()
                     
                     self.logger.info(
-                        f"Moved {quantity_to_move_from_stock} units of {product_code} from blocked to sold "
+                        f"Moved {quantity_to_move_from_stock} units of {product_code} from blocked to out_for_delivery "
                         f"(Stock ID: {stock_detail.id}, Dealer: {stock_detail.dealer_name}, "
-                        f"Blocked now: {stock_detail.blocked_quantity}, Sold now: {stock_detail.sold_quantity}, "
+                        f"Blocked now: {stock_detail.blocked_quantity}, Out for delivery now: {stock_detail.out_for_delivery_quantity}, "
                         f"Available now: {stock_detail.available_for_sale})"
                     )
                     
@@ -3137,14 +3311,14 @@ These products will be automatically ordered when new stock arrives. Track with 
                 
                 if remaining_quantity > 0:
                     self.logger.warning(
-                        f"Could only move {quantity_to_move - remaining_quantity} out of {quantity_to_move} units "
-                        f"from blocked to sold for {product_code} (insufficient blocked quantity)"
+                        f"Could only move {total_quantity_to_move - remaining_quantity} out of {total_quantity_to_move} units "
+                        f"from blocked to out_for_delivery for {product_code} (insufficient blocked quantity)"
                     )
             
             db.session.flush()  # Flush changes
             
         except Exception as e:
-            self.logger.error(f"Error moving blocked to sold for distributor order: {str(e)}")
+            self.logger.error(f"Error moving blocked to out_for_delivery for distributor order: {str(e)}")
     
     def _move_blocked_to_out_for_delivery_for_mr_order(self, user, cart_items):
         """

@@ -1,0 +1,41 @@
+.python_packages/
+__pycache__/
+.venv/
+.vscode/
+
+# Local development settings (contains secrets)
+local.settings.json
+.env
+
+# Python
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+*.so
+*.egg
+*.egg-info
+dist/
+build/
+
+# Azure Functions
+bin/
+obj/
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/

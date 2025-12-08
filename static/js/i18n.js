@@ -46,7 +46,7 @@ function initializeI18n() {
                     viewCart: "View Cart"
                 },
                 messages: {
-                    welcome: "Welcome to HV (Powered by Quantum Blue AI)",
+                    welcome: "Welcome to R&B (Powered by Quantum Blue AI)",
                     loading: "Loading...",
                     error: "An error occurred",
                     searchProducts: "Search Products",
@@ -175,7 +175,7 @@ function initializeI18n() {
                     viewCart: "ခြင်းတောင်းကို ကြည့်ရန်"
                 },
                 messages: {
-                    welcome: "HV သို့ ကြိုဆိုပါသည် (Quantum Blue AI မှ ပံ့ပိုးသည်)",
+                    welcome: "R&B သို့ ကြိုဆိုပါသည် (Quantum Blue AI မှ ပံ့ပိုးသည်)",
                     loading: "ဖွင့်နေသည်...",
                     error: "အမှားအယွင်း ဖြစ်ပွားခဲ့သည်",
                     searchProducts: "ထုတ်ကုန်များ ရှာဖွေရန်",
@@ -276,7 +276,7 @@ function initializeI18n() {
                     viewCart: "कार्ट देखें"
                 },
                 messages: {
-                    welcome: "HV में आपका स्वागत है (क्वांटम ब्लू AI द्वारा संचालित)",
+                    welcome: "R&B में आपका स्वागत है (क्वांटम ब्लू AI द्वारा संचालित)",
                     loading: "लोड हो रहा है...",
                     error: "एक त्रुटि हुई",
                     searchProducts: "उत्पाद खोजें",
@@ -438,7 +438,7 @@ function initializeI18n() {
                     viewCart: "కార్ట్ చూడండి"
                 },
                 messages: {
-                    welcome: "HV కు స్వాగతం (క్వాంటమ్ బ్లూ AI ద్వారా నడుపబడుతుంది)",
+                    welcome: "R&B కు స్వాగతం (క్వాంటమ్ బ్లూ AI ద్వారా నడుపబడుతుంది)",
                     loading: "లోడ్ అవుతోంది...",
                     error: "దోషం సంభవించింది",
                     searchProducts: "ఉత్పత్తులను శోధించండి",

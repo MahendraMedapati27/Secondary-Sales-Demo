@@ -79,8 +79,27 @@ def create_app(config_class=Config):
     
     @app.route('/favicon.ico')
     def favicon():
-        """Handle favicon requests - return 204 No Content to avoid 404 errors"""
-        return '', 204
+        """Serve the R&B logo as favicon"""
+        from flask import send_from_directory
+        import os
+        return send_from_directory(
+            os.path.join(app.static_folder, 'Images'),
+            'R&B.jpg',
+            mimetype='image/jpeg'
+        )
+    
+    @app.route('/service-worker.js')
+    def service_worker():
+        """Serve the service worker for PWA support"""
+        from flask import send_from_directory
+        import os
+        response = send_from_directory(
+            os.path.join(app.root_path, 'static'),
+            'service-worker.js',
+            mimetype='application/javascript'
+        )
+        response.headers['Cache-Control'] = 'no-cache'
+        return response
     
     @app.before_request
     def before_request():
@@ -447,73 +466,10 @@ END
         logging.warning(f"Failed to start stock checker background thread: {str(e)}")
         logging.warning("Pending orders will not be auto-fulfilled.")
     
-    # Start stock extracter background thread
-    # PAUSED: Stock extracter is currently disabled
-    # To re-enable, change the condition below to: if app.config.get('EXTRACTER_ENABLED', True):
-    if False:  # Stock extracter paused
-        try:
-            from app.stock_extracter.graph_service import MicrosoftGraphService
-            from app.stock_extracter.excel_extractor import ExcelExtractor
-            from app.stock_extracter.stock_importer import StockImporter
-            from app.stock_extracter.scheduler import StockExtractionScheduler
-            
-            def stock_extracter_worker():
-                """Background worker thread for extracting stock from OneDrive"""
-                logger = logging.getLogger(__name__)
-                
-                # Initialize services
-                try:
-                    graph_service = MicrosoftGraphService(
-                        tenant_id=app.config.get('MS_GRAPH_TENANT_ID'),
-                        client_id=app.config.get('MS_GRAPH_CLIENT_ID'),
-                        client_secret=app.config.get('MS_GRAPH_CLIENT_SECRET')
-                    )
-                    
-                    excel_extractor = ExcelExtractor()
-                    
-                    stock_importer = StockImporter(db=db)
-                    
-                    scheduler = StockExtractionScheduler(
-                        graph_service=graph_service,
-                        excel_extractor=excel_extractor,
-                        stock_importer=stock_importer,
-                        site_url=app.config.get('SHAREPOINT_SITE_URL'),
-                        folder_path=app.config.get('SHAREPOINT_FOLDER_PATH'),
-                        check_interval_minutes=app.config.get('EXTRACTER_CHECK_INTERVAL_MINUTES', 60),
-                        app=app
-                    )
-                    
-                    # Run initial extraction
-                    with app.app_context():
-                        logger.info("Running initial stock extraction...")
-                        scheduler.run_once()
-                    
-                    # Start scheduler
-                    scheduler.start()
-                    logger.info(f"✅ Stock extracter started (checking every {app.config.get('EXTRACTER_CHECK_INTERVAL_MINUTES', 60)} minutes)")
-                    
-                    # Keep thread alive
-                    while True:
-                        import time
-                        time.sleep(60)  # Check every minute if still running
-                        
-                except Exception as e:
-                    logger.error(f"❌ Stock extracter initialization error: {str(e)}")
-                    import traceback
-                    logger.error(traceback.format_exc())
-            
-            # Start the background thread as daemon
-            stock_extracter_thread = threading.Thread(target=stock_extracter_worker, daemon=True, name="StockExtracter")
-            stock_extracter_thread.start()
-            logging.info("🚀 Stock extracter background thread started")
-            
-        except Exception as e:
-            logging.warning(f"Failed to start stock extracter background thread: {str(e)}")
-            logging.warning("Stock extraction from OneDrive will not be available.")
-            import traceback
-            logging.warning(traceback.format_exc())
-    else:
-        logging.info("⏸️ Stock extracter is paused (disabled)")
+    # Stock extracter has been replaced by Azure Function
+    # The Azure Function (dealer_stock_csv_processor) now handles CSV extraction from Azure Blob Storage
+    # Legacy code removed - using Event Grid triggered Azure Function instead
+    logging.info("✅ Stock extraction handled by Azure Function (dealer_stock_csv_processor)")
     
     return app
 

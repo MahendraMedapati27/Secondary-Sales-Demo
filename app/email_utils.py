@@ -241,7 +241,7 @@ def create_email_template(title, content, footer_text="This is an automated emai
             <div class="footer">
                 <p>{footer_text}</p>
                 <p style="margin: 5px 0;">&copy; 2025 Quantum Blue. All rights reserved.</p>
-                <p style="margin: 5px 0; font-size: 12px;">HV (Powered by Quantum Blue AI)</p>
+                <p style="margin: 5px 0; font-size: 12px;">R&B (Powered by Quantum Blue AI)</p>
             </div>
         </div>
     </body>

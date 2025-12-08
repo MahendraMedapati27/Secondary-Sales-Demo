@@ -473,7 +473,7 @@ def ensure_action_buttons(response_data, user):
 
 @chatbot_bp.route('/message', methods=['POST'])
 def process_message():
-    """Process chat message with enhanced HV (Powered by Quantum Blue AI) logic"""
+    """Process chat message with enhanced R&B (Powered by Quantum Blue AI) logic"""
     try:
         from app.input_validation import (
             validate_and_sanitize_message, validate_unique_id,
@@ -520,7 +520,7 @@ def process_message():
         # Onboarding states
         if state == 'ask_unique_id':
             session['onboarding_state'] = 'get_unique_id'
-            response_text = 'Hello! Welcome to HV (Powered by Quantum Blue AI). Please enter your unique ID to continue.'
+            response_text = 'Hello! Welcome to R&B (Powered by Quantum Blue AI). Please enter your unique ID to continue.'
             # Translate welcome message
             if user_language != 'en':
                 translation_service = get_translation_service()
@@ -619,7 +619,7 @@ def process_message():
             
             llm_service = get_llm_service()
             if llm_service and llm_service.client:
-                intent_prompt = f"""You are an AI assistant for HV (Powered by Quantum Blue AI). A user just logged in and you asked them what they would like to do.
+                intent_prompt = f"""You are an AI assistant for R&B (Powered by Quantum Blue AI). A user just logged in and you asked them what they would like to do.
 
 User's message: "{user_message}"
 
@@ -665,43 +665,14 @@ Respond with ONLY a JSON object:
                     
                     # Generate appropriate response based on intent
                     if detected_intent == 'PLACE_ORDER':
-                        # For MRs, check if customer is already selected
-                        if user.role == 'mr':
-                            # Check if customer is already selected in session
-                            if 'selected_customer_id' not in session:
-                                # First, ask whether to select existing customer or add new customer
-                                response = "To place an order, I need to know which customer you're ordering for. Would you like to select an existing customer or add a new customer?"
-                                
-                                save_conversation(user.id, user_message, response)
-                                
-                                return jsonify({
-                                    'response': response,
-                                    'action_buttons': [
-                                        {'text': 'Select Customer', 'action': 'select_customer'},
-                                        {'text': 'Add New Customer', 'action': 'add_new_customer'}
-                                    ]
-                                }), 200
-                        
-                        # Get actual products from database for dynamic examples
-                        products = db_service.get_products_from_dealer_stock(user.area) if user.area else []
-                        
-                        if products:
-                            # Create dynamic example from first 3 products
-                            example_products = products[:3]
-                            example_text = 'For example: "Order '
-                            example_parts = []
-                            for i, p in enumerate(example_products):
-                                qty = 10 if i == 0 else (5 if i == 1 else 3)  # Vary quantities
-                                example_parts.append(f"{qty} {p.product_name}")
-                                if i < len(example_products) - 1:
-                                    example_parts.append(', ')
-                            example_text += ''.join(example_parts) + '"'
-                        else:
-                            example_text = 'For example: "Order 10 units of product 001, 5 units of 002"'
-                        
-                        return jsonify({
-                            'response': f'Great! I can help you place an order. Please tell me which products you would like to order and their quantities.\n\n{example_text}'
-                        }), 200
+                        # Route to handle_place_order which handles both MR and Dealer flows
+                        # Get conversation history if not already loaded
+                        conv_history = []
+                        try:
+                            conv_history = db_service.get_conversation_history(session_user_id, limit=10)
+                        except:
+                            pass
+                        return handle_place_order(user_message, user, context_data, conv_history)
                     elif detected_intent == 'TRACK_ORDER':
                         # Call handle_track_order directly to show orders table and selection box
                         return handle_track_order(user_message, user, context_data)
@@ -1440,7 +1411,7 @@ def handle_order_confirmation(user, user_id):
         return ensure_action_buttons(jsonify({'response': 'Sorry, I encountered an error placing your order. Please try again.'}), user), 500
 
 def handle_place_order(user_message, user, context_data, conversation_history):
-    """Handle order placement requests - Show customer selection for MRs, then product selection"""
+    """Handle order placement requests - Show customer selection for MRs and Dealers, then product selection"""
     try:
         db_service = get_db_service()
         
@@ -1473,7 +1444,29 @@ def handle_place_order(user_message, user, context_data, conversation_history):
                 session.pop('selected_customer_id', None)
                 return handle_place_order(user_message, user, context_data, conversation_history)
         
-        # For non-MRs, proceed directly to product selection
+        # For Dealers (distributors), check if customer is selected - use EXACT SAME flow as MR
+        elif user.role == 'distributor':
+            if 'selected_customer_id' not in session:
+                # First, ask whether to select existing customer or add new customer (SAME as MR)
+                response = "To place an order, I need to know which customer you're ordering for. Would you like to select an existing customer or add a new customer?"
+                
+                logger.info(f"Dealer without selected customer. Returning customer selection buttons.")
+                save_conversation(user.id, user_message, response)
+                
+                # Return EXACT SAME structure as MR flow
+                return jsonify({
+                    'response': response,
+                    'action_buttons': [
+                        {'text': 'Select Customer', 'action': 'select_customer'},
+                        {'text': 'Add New Customer', 'action': 'add_new_customer'}
+                    ]
+                }), 200
+            
+            # Customer is selected for dealer, proceed to product selection
+            # The dealer product selection form will include the delivery partner dropdown
+            pass  # Continue to product selection below
+        
+        # For non-MRs/non-Dealers, proceed directly to product selection
         
         # Get available products for the user
         if user.role == 'mr' and user.area:
@@ -1673,7 +1666,18 @@ def handle_track_order(user_message, user, context_data=None):
                         msg += f"**📋 Order Information:**\n"
                         msg += f"• **Order ID:** {order.order_id}\n"
                         msg += f"• **Status:** {order.status.replace('_', ' ').title()}\n"
-                        msg += f"• **MR:** {order.mr.name if order.mr else 'N/A'}\n"
+                        
+                        # Show "Placed By" with correct role
+                        if order.created_by_id:
+                            created_by = User.query.get(order.created_by_id)
+                            if created_by:
+                                role_display = 'Dealer' if created_by.role == 'distributor' else created_by.role.upper()
+                                msg += f"• **Placed By:** {role_display} - {created_by.name}\n"
+                        elif order.mr:
+                            msg += f"• **Placed By:** MR - {order.mr.name}\n"
+                        else:
+                            msg += f"• **Placed By:** N/A\n"
+                        
                         msg += f"• **Area:** {order.mr.area if order.mr else 'N/A'}\n"
                         msg += f"• **Date:** {order.created_at.strftime('%B %d, %Y at %I:%M %p') if order.created_at else 'N/A'}\n"
                         msg += f"• **Total Items:** {total_items} units\n\n"
@@ -1764,18 +1768,68 @@ def handle_track_order(user_message, user, context_data=None):
                 if not orders:
                     return ensure_action_buttons(jsonify({'response': 'No orders found in your area.'}), user), 200
                 
-                # Get unique MRs, statuses, and dates for filters
-                unique_mrs = sorted(list(set([o.mr.name for o in orders if o.mr])))
+                # Get unique order creators (MRs and Dealers), statuses, and dates for filters
+                unique_creators = []
+                seen_creators = set()
+                for o in orders:
+                    placed_by = None
+                    if o.created_by_id:
+                        created_by = User.query.get(o.created_by_id)
+                        if created_by:
+                            role_display = 'Dealer' if created_by.role == 'distributor' else created_by.role.upper()
+                            placed_by = f"{role_display}: {created_by.name}"
+                    elif o.mr:
+                        placed_by = f"MR: {o.mr.name}"
+                    
+                    if placed_by and placed_by not in seen_creators:
+                        unique_creators.append(placed_by)
+                        seen_creators.add(placed_by)
+                
+                unique_mrs = sorted(unique_creators)
                 unique_statuses = sorted(list(set([o.status for o in orders if o.status])))
                 unique_dates = sorted(list(set([o.created_at.strftime('%Y-%m-%d') for o in orders if o.created_at])), reverse=True)
                 
                 # Build orders list with details
                 orders_data = []
                 for o in orders[:50]:  # Show latest 50 orders
+                    # Get placed_by information
+                    placed_by_display = 'N/A'
+                    placed_by_role = None
+                    created_by_unique_id = None
+                    
+                    if o.created_by_id:
+                        created_by = User.query.get(o.created_by_id)
+                        if created_by:
+                            role_display = 'Dealer' if created_by.role == 'distributor' else created_by.role.upper()
+                            placed_by_display = f"{role_display}: {created_by.name}"
+                            placed_by_role = created_by.role
+                            created_by_unique_id = created_by.unique_id
+                    elif o.mr:
+                        placed_by_display = f"MR: {o.mr.name}"
+                        placed_by_role = 'mr'
+                        created_by_unique_id = o.mr.unique_id
+                    
+                    # Get customer name
+                    customer_name = 'N/A'
+                    if o.customer:
+                        customer_name = o.customer.name
+                    
+                    # Get delivery partner name
+                    delivery_partner_name = 'Not Assigned'
+                    if o.delivery_partner:
+                        delivery_partner_name = o.delivery_partner.name
+                    
                     orders_data.append({
                         'order_id': o.order_id,
                         'mr_name': o.mr.name if o.mr else 'N/A',
                         'mr_id': o.mr_unique_id if o.mr_unique_id else 'N/A',
+                        'mr_unique_id': o.mr_unique_id,
+                        'created_by_unique_id': created_by_unique_id,
+                        'placed_by_display': placed_by_display,
+                        'placed_by_role': placed_by_role,
+                        'customer_name': customer_name,
+                        'customer_id': o.customer_unique_id if o.customer_unique_id else 'N/A',
+                        'delivery_partner_name': delivery_partner_name,
                         'status': o.status,
                         'status_display': o.status.replace('_', ' ').title() if o.status else 'Unknown',
                         'total_amount': float(o.total_amount) if o.total_amount else 0.0,
@@ -2609,7 +2663,7 @@ def handle_general_conversation(user_message, user, context_data):
             }), 200
         
         # Generate contextual response
-        context_prompt = f"""You are Quantum Blue's AI assistant for HV (Powered by Quantum Blue AI). 
+        context_prompt = f"""You are Quantum Blue's AI assistant for R&B (Powered by Quantum Blue AI). 
         
 User: {user_message}
 
@@ -2691,7 +2745,7 @@ def generate_welcome_message(user):
     if user.role == 'company':
         return f"""Welcome {user.name}! 👋
 
-**HV Company Analytics System**
+**R&B Company Analytics System**
 
 I'm your database reporting assistant. I can help you:
 
@@ -2749,22 +2803,29 @@ def save_conversation(user_id, user_message, bot_response):
         logger.error(f"Error saving conversation: {str(e)}")
 
 def handle_select_customer(user, context_data):
-    """Handle select customer action - show customer selection form"""
+    """Handle select customer action - show customer selection form for MR or Dealer"""
     try:
-        if user.role != 'mr':
+        if user.role not in ['mr', 'distributor']:
             return jsonify({
-                'response': 'Only Medical Representatives can select customers.',
+                'response': 'Only Medical Representatives and Dealers can select customers.',
                 'action_buttons': []
             }), 200
         
-        # Get customers for this MR
-        customers = Customer.query.filter_by(
-            mr_unique_id=user.unique_id,
-            is_active=True
-        ).all()
+        # Get customers for this MR or Dealer
+        if user.role == 'mr':
+            customers = Customer.query.filter_by(
+                mr_unique_id=user.unique_id,
+                is_active=True
+            ).all()
+        else:  # distributor
+            customers = Customer.query.filter_by(
+                dealer_id=user.id,
+                is_active=True
+            ).all()
         
         if not customers:
-            response = "No customers are assigned to you. Please add a new customer or contact support to assign customers."
+            role_name = "Dealer" if user.role == 'distributor' else "Medical Representative"
+            response = f"No customers are assigned to you. Please add a new customer or contact support to assign customers."
             save_conversation(user.id, "select customer", response)
             return jsonify({
                 'response': response,
@@ -2774,13 +2835,16 @@ def handle_select_customer(user, context_data):
                 ]
             }), 200
         
-        # Build customer list (only name and ID)
+        # Build customer list
         customer_list = []
         for customer in customers:
             customer_list.append({
                 'id': customer.id,
                 'unique_id': customer.unique_id,
-                'name': customer.name
+                'name': customer.name,
+                'phone': customer.phone,
+                'email': customer.email,
+                'address': customer.address
             })
         
         response = "Please select the customer for whom you want to place an order:"
@@ -2791,8 +2855,8 @@ def handle_select_customer(user, context_data):
             'response': response,
             'customers': customer_list,
             'interactive_customer_selection': True,
-            'show_customer_table': True,  # Flag to show table outside selection box
-            'action_buttons': []  # No action buttons - removed Add New Customer and Cancel
+            'show_customer_table': True,
+            'action_buttons': []
         }), 200
         
     except Exception as e:
@@ -2803,11 +2867,11 @@ def handle_select_customer(user, context_data):
         }), 200
 
 def handle_add_new_customer(user, context_data):
-    """Handle add new customer action - show add customer form"""
+    """Handle add new customer action - show add customer form for MR or Dealer"""
     try:
-        if user.role != 'mr':
+        if user.role not in ['mr', 'distributor']:
             return jsonify({
-                'response': 'Only Medical Representatives can add customers.',
+                'response': 'Only Medical Representatives and Dealers can add customers.',
                 'action_buttons': []
             }), 200
         
@@ -2829,15 +2893,15 @@ def handle_add_new_customer(user, context_data):
 
 @chatbot_bp.route('/select_customer', methods=['POST'])
 def select_customer():
-    """Select customer for MR order"""
+    """Select customer for MR or Dealer order"""
     try:
         user_id = session.get('user_id')
         if not user_id:
             return jsonify({'error': 'User not logged in'}), 401
         
         user = User.query.get(user_id)
-        if not user or user.role != 'mr':
-            return jsonify({'error': 'Only MRs can select customers'}), 403
+        if not user or user.role not in ['mr', 'distributor']:
+            return jsonify({'error': 'Only MRs and Dealers can select customers'}), 403
         
         data = request.get_json()
         customer_id = data.get('customer_id')
@@ -2845,12 +2909,21 @@ def select_customer():
         if not customer_id:
             return jsonify({'error': 'Customer ID is required'}), 400
         
-        # Verify customer belongs to this MR
-        customer = Customer.query.filter_by(
-            id=customer_id,
-            mr_unique_id=user.unique_id,
-            is_active=True
-        ).first()
+        # Verify customer belongs to this MR or Dealer
+        if user.role == 'mr':
+            customer = Customer.query.filter_by(
+                id=customer_id,
+                mr_unique_id=user.unique_id,
+                is_active=True
+            ).first()
+        elif user.role == 'distributor':
+            customer = Customer.query.filter_by(
+                id=customer_id,
+                dealer_id=user.id,
+                is_active=True
+            ).first()
+        else:
+            return jsonify({'error': 'Invalid user role'}), 403
         
         if not customer:
             return jsonify({'error': 'Customer not found or not assigned to you'}), 404
@@ -2859,7 +2932,7 @@ def select_customer():
         session['selected_customer_id'] = customer.id
         session['selected_customer_unique_id'] = customer.unique_id
         
-        # Get available products for the MR
+        # Get available products for the MR or Dealer
         db_service = get_db_service()
         if user.area:
             products = db_service.get_products_from_dealer_stock(user.area)
@@ -2872,10 +2945,17 @@ def select_customer():
         product_list = build_product_list_with_foc(products, pricing_service)
         
         # Create response message with customer info
+        role_display = "Dealer" if user.role == 'distributor' else "MR"
         response = f"• Great! I can help you place an order.\n• **Ordering for:** {customer.name} ({customer.unique_id})\n• Please use the product selection form below to select products and quantities."
         
         # Save conversation
         save_conversation(user.id, f"Selected customer: {customer.name}", response)
+        
+        # For dealers, don't show change customer button (they can cancel and restart)
+        action_buttons = []
+        is_dealer = user.role == 'distributor'
+        if user.role == 'mr':
+            action_buttons = [{'text': 'Change Customer', 'action': 'change_customer'}]
         
         return jsonify({
             'success': True,
@@ -2891,7 +2971,8 @@ def select_customer():
             'products': product_list,
             'interactive_product_selection': True,  # Flag for frontend to render interactive UI
             'show_product_table': True,  # Flag to show table outside selection box
-            'action_buttons': [{'text': 'Change Customer', 'action': 'change_customer'}]
+            'is_dealer_order': is_dealer,  # Flag to show delivery partner dropdown
+            'action_buttons': action_buttons
         }), 200
         
     except Exception as e:
@@ -3118,6 +3199,27 @@ def select_order():
                 delivery_partner_phone = delivery_partner.phone
                 delivery_partner_unique_id = delivery_partner.unique_id
         
+        # Get "placed_by" information
+        placed_by_role = order.created_by_role
+        placed_by_name = None
+        placed_by_unique_id = None
+        placed_by_display = 'N/A'
+        
+        if order.created_by_id:
+            created_by_user = User.query.get(order.created_by_id)
+            if created_by_user:
+                placed_by_name = created_by_user.name
+                placed_by_unique_id = created_by_user.unique_id
+                role_display = 'Dealer' if created_by_user.role == 'distributor' else created_by_user.role.upper()
+                placed_by_display = f"{role_display}: {placed_by_name}"
+        elif order.mr_id:
+            # Fallback for old orders without created_by fields
+            if order.mr:
+                placed_by_role = 'mr'
+                placed_by_name = order.mr.name
+                placed_by_unique_id = order.mr.unique_id
+                placed_by_display = f"MR: {placed_by_name}"
+        
         # Recalculate order totals based on adjusted quantities if any items were adjusted
         # Sum up all item total prices (which are already recalculated based on adjusted quantities)
         recalculated_subtotal = sum(item.get('total_price', 0) for item in items_list)
@@ -3169,6 +3271,11 @@ def select_order():
             # Pending orders created FROM this order (when partially dispatched)
             'has_pending_orders': True if pending_orders_created else False,
             'pending_orders_created': pending_orders_created,
+            # Placed By information (new)
+            'placed_by_role': placed_by_role,
+            'placed_by_name': placed_by_name,
+            'placed_by_unique_id': placed_by_unique_id,
+            'placed_by_display': placed_by_display,
             # Delivery partner info
             'delivery_partner_name': delivery_partner_name,
             'delivery_partner_email': delivery_partner_email,
@@ -3731,15 +3838,15 @@ def reject_order_action():
 
 @chatbot_bp.route('/add_customer', methods=['POST'])
 def add_customer():
-    """Add new customer for MR"""
+    """Add new customer for MR or Dealer"""
     try:
         user_id = session.get('user_id')
         if not user_id:
             return jsonify({'error': 'User not logged in'}), 401
         
         user = User.query.get(user_id)
-        if not user or user.role != 'mr':
-            return jsonify({'error': 'Only MRs can add customers'}), 403
+        if not user or user.role not in ['mr', 'distributor']:
+            return jsonify({'error': 'Only MRs and Dealers can add customers'}), 403
         
         data = request.get_json()
         if not data:
@@ -3772,16 +3879,27 @@ def add_customer():
         address_raw = data.get('address', '').strip()
         address = sanitize_string(address_raw, max_length=500) if address_raw else None
         
-        # Create new customer
-        customer = Customer(
-            name=name,
-            email=email if email else None,
-            phone=phone if phone else None,
-            address=address if address else None,
-            mr_unique_id=user.unique_id,
-            mr_id=user.id,
-            is_active=True
-        )
+        # Create new customer linked to MR or Dealer
+        if user.role == 'mr':
+            customer = Customer(
+                name=name,
+                email=email if email else None,
+                phone=phone if phone else None,
+                address=address if address else None,
+                mr_unique_id=user.unique_id,
+                mr_id=user.id,
+                is_active=True
+            )
+        else:  # distributor
+            customer = Customer(
+                name=name,
+                email=email if email else None,
+                phone=phone if phone else None,
+                address=address if address else None,
+                dealer_unique_id=user.unique_id,
+                dealer_id=user.id,
+                is_active=True
+            )
         
         # Generate unique ID
         customer.generate_unique_id()
@@ -3850,9 +3968,11 @@ def place_order():
         
         enhanced_order_service = get_enhanced_order_service()
         
-        # Get customer details if MR
+        # Get user and customer details
         user = User.query.get(user_id)
         customer_id = None
+        delivery_partner_id = None
+        
         if user and user.role == 'mr':
             # For MRs, customer selection is mandatory
             if 'selected_customer_id' not in session:
@@ -3862,14 +3982,56 @@ def place_order():
                     'requires_customer_selection': True
                 }), 400
             customer_id = session.get('selected_customer_id')
+        elif user and user.role == 'distributor':
+            # For dealers, both customer and delivery partner are mandatory
+            if 'selected_customer_id' not in session:
+                return jsonify({
+                    'success': False,
+                    'message': 'Please select a customer before placing an order.',
+                    'requires_customer_selection': True
+                }), 400
+            if 'selected_delivery_partner_id' not in session:
+                return jsonify({
+                    'success': False,
+                    'message': 'Please select a delivery partner before placing an order.',
+                    'requires_delivery_partner_selection': True
+                }), 400
+            customer_id = session.get('selected_customer_id')
+            delivery_partner_id = session.get('selected_delivery_partner_id')
         
         result = enhanced_order_service.place_order(user_id, customer_id=customer_id)
         
         if result['success']:
-            # Clear selected customer after order is placed (MR can place order for one customer at a time)
+            # If dealer order, assign delivery partner immediately and auto-confirm
+            if user and user.role == 'distributor' and delivery_partner_id:
+                order = Order.query.filter_by(order_id=result['order_id']).first()
+                if order:
+                    delivery_partner = User.query.get(delivery_partner_id)
+                    if delivery_partner:
+                        order.delivery_partner_id = delivery_partner.id
+                        order.delivery_partner_unique_id = delivery_partner.unique_id
+                        order.status = 'confirmed'
+                        order.order_stage = 'confirmed'
+                        order.distributor_confirmed_by = user.id
+                        order.distributor_confirmed_at = datetime.utcnow()
+                        db.session.commit()
+                        
+                        # Send notification to delivery partner
+                        try:
+                            from app.enhanced_order_service import EnhancedOrderService
+                            service = EnhancedOrderService()
+                            service._send_delivery_assignment_email(order, delivery_partner)
+                        except Exception as email_e:
+                            logger.error(f"Error sending delivery assignment email: {str(email_e)}")
+            
+            # Clear selected customer and delivery partner after order is placed
             if user and user.role == 'mr' and 'selected_customer_id' in session:
                 session.pop('selected_customer_id', None)
                 session.pop('selected_customer_unique_id', None)
+            elif user and user.role == 'distributor':
+                session.pop('selected_customer_id', None)
+                session.pop('selected_customer_unique_id', None)
+                session.pop('selected_delivery_partner_id', None)
             
             return jsonify({
                 'success': True,
@@ -4656,7 +4818,7 @@ Welcome {user.name}! I can help you export data from any table in our database.
         elif any(greeting in message_lower for greeting in ['hi', 'hello', 'hey', 'good morning', 'good afternoon']):
             response = f"""Hello {user.name}! 👋
 
-Welcome to HV Company Analytics.
+Welcome to R&B Company Analytics.
 
 I'm here to help you generate database reports and export data. You can request reports from any table in our system.
 
@@ -5257,3 +5419,398 @@ def mark_order_delivered():
     except Exception as e:
         logger.error(f"Error marking order as delivered: {str(e)}")
         return jsonify({'error': 'Error marking order as delivered'}), 500
+
+# ============= DEALER-SPECIFIC CUSTOMER & DELIVERY PARTNER MANAGEMENT =============
+
+@chatbot_bp.route('/api/dealer/set-delivery-partner', methods=['POST'])
+def set_delivery_partner_in_session():
+    """Store delivery partner selection in session for dealer order"""
+    try:
+        user_id = session.get('user_id')
+        if not user_id:
+            return jsonify({'error': 'User not logged in'}), 401
+        
+        user = User.query.get(user_id)
+        if not user or user.role != 'distributor':
+            return jsonify({'error': 'Access denied. Dealer access required.'}), 403
+        
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'Invalid JSON'}), 400
+        
+        delivery_partner_id = data.get('delivery_partner_id')
+        if not delivery_partner_id:
+            return jsonify({'error': 'Delivery partner ID is required'}), 400
+        
+        # Store in session
+        session['selected_delivery_partner_id'] = delivery_partner_id
+        
+        return jsonify({
+            'success': True,
+            'message': 'Delivery partner stored in session'
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error setting delivery partner in session: {str(e)}")
+        return jsonify({'error': 'Error storing delivery partner'}), 500
+
+@chatbot_bp.route('/api/dealer/customers', methods=['GET'])
+def get_dealer_customers():
+    """Get all customers for the logged-in dealer"""
+    try:
+        user_id = session.get('user_id')
+        if not user_id:
+            return jsonify({'error': 'User not logged in'}), 401
+        
+        user = User.query.get(user_id)
+        if not user or user.role != 'distributor':
+            return jsonify({'error': 'Access denied. Dealer access required.'}), 403
+        
+        # Get customers linked to this dealer
+        customers = Customer.query.filter_by(
+            dealer_id=user.id,
+            is_active=True
+        ).order_by(Customer.name).all()
+        
+        customer_list = [{
+            'id': c.id,
+            'unique_id': c.unique_id,
+            'name': c.name,
+            'email': c.email,
+            'phone': c.phone,
+            'address': c.address,
+            'created_at': c.created_at.isoformat() if c.created_at else None
+        } for c in customers]
+        
+        return jsonify({
+            'success': True,
+            'customers': customer_list,
+            'count': len(customer_list)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting dealer customers: {str(e)}")
+        return jsonify({'error': 'Error getting customers'}), 500
+
+@chatbot_bp.route('/api/dealer/customers', methods=['POST'])
+def add_dealer_customer():
+    """Add new customer for dealer"""
+    try:
+        user_id = session.get('user_id')
+        if not user_id:
+            return jsonify({'error': 'User not logged in'}), 401
+        
+        user = User.query.get(user_id)
+        if not user or user.role != 'distributor':
+            return jsonify({'error': 'Access denied. Dealer access required.'}), 403
+        
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'Invalid JSON or missing Content-Type header'}), 400
+        
+        from app.input_validation import (
+            sanitize_string, validate_email, validate_phone, MAX_LENGTHS
+        )
+        
+        # Validate and sanitize inputs
+        name_raw = data.get('name', '').strip()
+        name = sanitize_string(name_raw, max_length=MAX_LENGTHS['customer_name'])
+        if not name:
+            return jsonify({'error': 'Customer name is required and must be valid'}), 400
+        
+        email_raw = data.get('email', '').strip()
+        email = None
+        if email_raw:
+            email = sanitize_string(email_raw, max_length=MAX_LENGTHS['email'])
+            if email and not validate_email(email):
+                return jsonify({'error': 'Invalid email format'}), 400
+        
+        phone_raw = data.get('phone', '').strip()
+        phone = None
+        if phone_raw:
+            phone = sanitize_string(phone_raw, max_length=MAX_LENGTHS['phone'])
+            if phone and not validate_phone(phone):
+                return jsonify({'error': 'Invalid phone number format'}), 400
+        
+        address_raw = data.get('address', '').strip()
+        address = sanitize_string(address_raw, max_length=500) if address_raw else None
+        
+        # Create new customer linked to dealer
+        customer = Customer(
+            name=name,
+            email=email if email else None,
+            phone=phone if phone else None,
+            address=address if address else None,
+            dealer_unique_id=user.unique_id,
+            dealer_id=user.id,
+            is_active=True
+        )
+        
+        # Generate unique ID
+        customer.generate_unique_id()
+        
+        # Save to database
+        try:
+            db.session.add(customer)
+            db.session.commit()
+        except Exception as e:
+            logger.error(f"Error saving customer to database: {str(e)}")
+            db.session.rollback()
+            return jsonify({'error': 'Error saving customer'}), 500
+        
+        return jsonify({
+            'success': True,
+            'message': f'Customer {customer.name} added successfully',
+            'customer': {
+                'id': customer.id,
+                'unique_id': customer.unique_id,
+                'name': customer.name,
+                'email': customer.email,
+                'phone': customer.phone,
+                'address': customer.address
+            }
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error adding dealer customer: {str(e)}")
+        return jsonify({'error': f'Error adding customer: {str(e)}'}), 500
+
+@chatbot_bp.route('/api/dealer/delivery-partners', methods=['GET'])
+def get_dealer_delivery_partners():
+    """Get all delivery partners in the dealer's area"""
+    try:
+        user_id = session.get('user_id')
+        if not user_id:
+            return jsonify({'error': 'User not logged in'}), 401
+        
+        user = User.query.get(user_id)
+        if not user or user.role != 'distributor':
+            return jsonify({'error': 'Access denied. Dealer access required.'}), 403
+        
+        # Get delivery partners in the same area
+        query = User.query.filter_by(
+            role='delivery_partner',
+            is_active=True
+        )
+        
+        # Filter by area if dealer has area assigned
+        if user.area:
+            query = query.filter_by(area=user.area)
+        
+        delivery_partners = query.order_by(User.name).all()
+        
+        partner_list = [{
+            'id': dp.id,
+            'unique_id': dp.unique_id,
+            'name': dp.name,
+            'email': dp.email,
+            'phone': dp.phone,
+            'area': dp.area
+        } for dp in delivery_partners]
+        
+        return jsonify({
+            'success': True,
+            'delivery_partners': partner_list,
+            'count': len(partner_list)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting delivery partners: {str(e)}")
+        return jsonify({'error': 'Error getting delivery partners'}), 500
+
+@chatbot_bp.route('/api/dealer/delivery-partners', methods=['POST'])
+def add_delivery_partner():
+    """Add new delivery partner"""
+    try:
+        user_id = session.get('user_id')
+        if not user_id:
+            return jsonify({'error': 'User not logged in'}), 401
+        
+        user = User.query.get(user_id)
+        if not user or user.role != 'distributor':
+            return jsonify({'error': 'Access denied. Dealer access required.'}), 403
+        
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'Invalid JSON or missing Content-Type header'}), 400
+        
+        from app.input_validation import (
+            sanitize_string, validate_email, validate_phone, MAX_LENGTHS
+        )
+        
+        # Validate and sanitize inputs
+        name_raw = data.get('name', '').strip()
+        name = sanitize_string(name_raw, max_length=MAX_LENGTHS['name'])
+        if not name:
+            return jsonify({'error': 'Name is required and must be valid'}), 400
+        
+        phone_raw = data.get('phone', '').strip()
+        if not phone_raw:
+            return jsonify({'error': 'Phone number is required'}), 400
+        
+        phone = sanitize_string(phone_raw, max_length=MAX_LENGTHS['phone'])
+        if not validate_phone(phone):
+            return jsonify({'error': 'Invalid phone number format'}), 400
+        
+        email_raw = data.get('email', '').strip()
+        email = None
+        if email_raw:
+            email = sanitize_string(email_raw, max_length=MAX_LENGTHS['email'])
+            if email and not validate_email(email):
+                return jsonify({'error': 'Invalid email format'}), 400
+        
+        area_raw = data.get('area', '').strip()
+        area = sanitize_string(area_raw, max_length=MAX_LENGTHS['area']) if area_raw else user.area
+        
+        # Create new delivery partner
+        delivery_partner = User(
+            name=name,
+            phone=phone,
+            email=email if email else None,
+            area=area,
+            role='delivery_partner',
+            is_active=True
+        )
+        
+        # Generate unique ID
+        delivery_partner.generate_unique_id()
+        
+        # Save to database
+        try:
+            db.session.add(delivery_partner)
+            db.session.commit()
+        except Exception as e:
+            logger.error(f"Error saving delivery partner to database: {str(e)}")
+            db.session.rollback()
+            return jsonify({'error': 'Error saving delivery partner'}), 500
+        
+        return jsonify({
+            'success': True,
+            'message': f'Delivery partner {delivery_partner.name} added successfully',
+            'delivery_partner': {
+                'id': delivery_partner.id,
+                'unique_id': delivery_partner.unique_id,
+                'name': delivery_partner.name,
+                'email': delivery_partner.email,
+                'phone': delivery_partner.phone,
+                'area': delivery_partner.area
+            }
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error adding delivery partner: {str(e)}")
+        return jsonify({'error': f'Error adding delivery partner: {str(e)}'}), 500
+
+@chatbot_bp.route('/api/orders', methods=['GET'])
+def get_orders_with_filters():
+    """Get orders with filters for dealer or MR"""
+    try:
+        user_id = session.get('user_id')
+        if not user_id:
+            return jsonify({'error': 'User not logged in'}), 401
+        
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+        
+        # Get filter parameters
+        my_orders_only = request.args.get('my_orders', 'false').lower() == 'true'
+        status_filter = request.args.get('status')
+        limit = int(request.args.get('limit', 50))
+        offset = int(request.args.get('offset', 0))
+        
+        # Build query based on user role
+        query = Order.query
+        
+        if user.role == 'mr':
+            # MRs see orders they created
+            if my_orders_only:
+                # Only orders created by this MR
+                query = query.filter(Order.created_by_id == user.id)
+            else:
+                # All orders for this MR (backward compatibility)
+                query = query.filter(Order.mr_id == user.id)
+        elif user.role == 'distributor':
+            # Dealers see orders in their area
+            if my_orders_only:
+                # Only orders created by this dealer
+                query = query.filter(Order.created_by_id == user.id)
+            else:
+                # All orders in their area (both MR and dealer-placed)
+                # Get all MRs and customers in dealer's area
+                if user.area:
+                    # Orders from MRs in this area
+                    mr_ids = [mr.id for mr in User.query.filter_by(role='mr', area=user.area).all()]
+                    # Orders where dealer is the creator
+                    dealer_created = Order.created_by_id == user.id
+                    # Orders from MRs in the same area
+                    mr_created = Order.mr_id.in_(mr_ids) if mr_ids else False
+                    
+                    from sqlalchemy import or_
+                    query = query.filter(or_(dealer_created, mr_created))
+                else:
+                    # No area, only show dealer's own orders
+                    query = query.filter(Order.created_by_id == user.id)
+        else:
+            return jsonify({'error': 'Access denied'}), 403
+        
+        # Apply status filter
+        if status_filter:
+            query = query.filter(Order.status == status_filter)
+        
+        # Get total count
+        total_count = query.count()
+        
+        # Apply pagination and ordering
+        orders = query.order_by(Order.created_at.desc()).limit(limit).offset(offset).all()
+        
+        # Build response
+        orders_list = []
+        for order in orders:
+            # Get placed_by info
+            placed_by_display = 'N/A'
+            if order.created_by_id:
+                created_by = User.query.get(order.created_by_id)
+                if created_by:
+                    role_display = 'Dealer' if created_by.role == 'distributor' else created_by.role.upper()
+                    placed_by_display = f"{role_display}: {created_by.name}"
+            elif order.mr:
+                placed_by_display = f"MR: {order.mr.name}"
+            
+            # Get customer info
+            customer_name = 'N/A'
+            if order.customer:
+                customer_name = order.customer.name
+            
+            # Get delivery partner info
+            delivery_partner_name = 'N/A'
+            if order.delivery_partner:
+                delivery_partner_name = order.delivery_partner.name
+            
+            orders_list.append({
+                'order_id': order.order_id,
+                'status': order.status,
+                'status_display': (order.status or 'Unknown').replace('_', ' ').title(),
+                'total_amount': float(order.total_amount) if order.total_amount else 0.0,
+                'created_at': order.created_at.isoformat() if order.created_at else None,
+                'order_date': order.created_at.strftime('%Y-%m-%d') if order.created_at else 'N/A',
+                'placed_by_display': placed_by_display,
+                'customer_name': customer_name,
+                'delivery_partner_name': delivery_partner_name,
+                'order_stage': order.order_stage
+            })
+        
+        return jsonify({
+            'success': True,
+            'orders': orders_list,
+            'total_count': total_count,
+            'limit': limit,
+            'offset': offset,
+            'has_more': (offset + limit) < total_count
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting orders: {str(e)}")
+        return jsonify({'error': 'Error getting orders'}), 500

@@ -1,20 +1,19 @@
 """
-Excel File Extractor
-Extracts dealer-wise stock details from Excel files
+Excel/CSV File Extractor for Azure Function
+Extracts dealer-wise stock details from CSV files uploaded to Azure Blob Storage
 """
 
 import logging
 import pandas as pd
 import io
-from typing import List, Dict, Optional
+from typing import List, Dict
 from datetime import datetime
 
-# Single logger initialization - logging.basicConfig should only be called once in __init__.py
 logger = logging.getLogger(__name__)
 
 
 class ExcelExtractor:
-    """Service for extracting stock details from Excel files"""
+    """Service for extracting stock details from CSV files"""
     
     def __init__(self):
         """Initialize Excel Extractor"""
@@ -22,11 +21,11 @@ class ExcelExtractor:
     
     def extract_stock_details(self, file_content: bytes, filename: str) -> List[Dict]:
         """
-        Extract dealer-wise stock details from Excel or CSV file
+        Extract dealer-wise stock details from CSV file
         
         Args:
             file_content: File content as bytes
-            filename: Name of the file (Excel or CSV)
+            filename: Name of the file (CSV)
             
         Returns:
             List of stock detail dictionaries
@@ -38,7 +37,7 @@ class ExcelExtractor:
             if file_lower.endswith('.csv'):
                 return self._extract_from_csv(file_content, filename)
             
-            # Otherwise, treat as Excel file
+            # Otherwise, treat as Excel file (though we expect CSV)
             return self._extract_from_excel(file_content, filename)
             
         except Exception as e:
@@ -88,13 +87,8 @@ class ExcelExtractor:
                 # Read all sheets
                 excel_data = pd.read_excel(excel_file, sheet_name=None, engine='openpyxl')
             except Exception as e:
-                self.logger.warning(f"Error reading Excel with openpyxl: {str(e)}, trying xlrd")
-                excel_file.seek(0)
-                try:
-                    excel_data = pd.read_excel(excel_file, sheet_name=None, engine='xlrd')
-                except Exception as e2:
-                    self.logger.error(f"Error reading Excel file: {str(e2)}")
-                    return []
+                self.logger.warning(f"Error reading Excel with openpyxl: {str(e)}")
+                return []
             
             stock_details = []
             
@@ -143,19 +137,6 @@ class ExcelExtractor:
             
             self.logger.info(f"Detected columns: {actual_columns}")
             
-            # If no dealer column found, try to infer from data
-            if not actual_columns:
-                self.logger.warning("No standard columns found, trying to infer structure")
-                # Try to use first few rows as headers or use positional columns
-                if len(df.columns) >= 3:
-                    # Assume: Dealer, Product, Quantity, etc.
-                    actual_columns = {
-                        'dealer': df.columns[0] if 'dealer' in str(df.columns[0]).lower() else None,
-                        'product_code': df.columns[1] if 'product' in str(df.columns[1]).lower() or 'code' in str(df.columns[1]).lower() else None,
-                        'product_name': df.columns[2] if 'product' in str(df.columns[2]).lower() or 'name' in str(df.columns[2]).lower() else None,
-                        'quantity': df.columns[3] if len(df.columns) > 3 and ('qty' in str(df.columns[3]).lower() or 'quantity' in str(df.columns[3]).lower()) else None
-                    }
-            
             # Process each row
             for idx, row in df.iterrows():
                 try:
@@ -175,13 +156,9 @@ class ExcelExtractor:
                         dealer_value = row.get(dealer_col)
                         if pd.notna(dealer_value):
                             dealer_name = str(dealer_value).strip()
-                            # Clean dealer name:
-                            # 1. Remove everything in brackets like (DLR)(Pyay) or (TGYI)
-                            # 2. If name contains " - ", take only the part before " - "
+                            # Clean dealer name
                             import re
-                            # Remove brackets and their content
                             dealer_name = re.sub(r'\s*\([^)]*\)', '', dealer_name).strip()
-                            # If contains " - ", take only the part before it
                             if ' - ' in dealer_name:
                                 dealer_name = dealer_name.split(' - ')[0].strip()
                             stock_detail['dealer_name'] = dealer_name
@@ -226,7 +203,6 @@ class ExcelExtractor:
                                 elif isinstance(dispatch_date_value, pd.Timestamp):
                                     stock_detail['dispatch_date'] = dispatch_date_value.date()
                                 else:
-                                    # Try to parse string date
                                     stock_detail['dispatch_date'] = pd.to_datetime(dispatch_date_value).date()
                             except Exception as e:
                                 self.logger.warning(f"Error parsing dispatch date: {str(e)}")
@@ -296,4 +272,3 @@ class ExcelExtractor:
             import traceback
             self.logger.error(traceback.format_exc())
             return []
-

@@ -121,7 +121,7 @@ class AzureSpeechService:
                 'Ocp-Apim-Subscription-Key': self.speech_key,
                 'Content-Type': 'application/ssml+xml',
                 'X-Microsoft-OutputFormat': 'audio-16khz-128kbitrate-mono-mp3',  # MP3 format for better compatibility
-                'User-Agent': 'HighVolt-Chatbot'
+                'User-Agent': 'RB-Chatbot'
             }
             
             # Encode SSML as UTF-8

@@ -4,7 +4,7 @@ from app import db
 import uuid
 
 class User(UserMixin, db.Model):
-    """User model for HV - Dealers and MRs"""
+    """User model for R&B - Dealers and MRs"""
     __tablename__ = 'users'
     
     id = db.Column(db.Integer, primary_key=True)
@@ -52,7 +52,7 @@ class User(UserMixin, db.Model):
         return f'<User {self.unique_id} - {self.name}>'
 
 class Customer(db.Model):
-    """Customer model - customers assigned to MRs"""
+    """Customer model - customers assigned to MRs or Dealers"""
     __tablename__ = 'customers'
     
     id = db.Column(db.Integer, primary_key=True)
@@ -61,14 +61,19 @@ class Customer(db.Model):
     email = db.Column(db.String(120), nullable=True)
     phone = db.Column(db.String(50), nullable=True)
     address = db.Column(db.Text, nullable=True)
-    mr_unique_id = db.Column(db.String(50), nullable=False, index=True)
+    # MR linkage (existing)
+    mr_unique_id = db.Column(db.String(50), nullable=True, index=True)
     mr_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    # Dealer linkage (new)
+    dealer_unique_id = db.Column(db.String(50), nullable=True, index=True)
+    dealer_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     # Relationships
     orders = db.relationship('Order', backref='customer', lazy='dynamic', cascade='all, delete-orphan')
+    dealer = db.relationship('User', foreign_keys=[dealer_id], backref='dealer_customers', lazy='joined')
     
     def generate_unique_id(self):
         """Generate unique ID for customer"""
@@ -267,6 +272,10 @@ class Order(db.Model):
     mr_unique_id = db.Column(db.String(50), nullable=True, index=True)
     customer_id = db.Column(db.Integer, db.ForeignKey('customers.id'), nullable=True)
     customer_unique_id = db.Column(db.String(50), nullable=True, index=True)
+    # New fields to track who created the order
+    created_by_role = db.Column(db.String(50), nullable=True, index=True)  # 'mr', 'distributor', etc.
+    created_by_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True, index=True)
+    created_by_unique_id = db.Column(db.String(50), nullable=True, index=True)
     subtotal = db.Column(db.Float, default=0.0)  # Subtotal before tax
     tax_rate = db.Column(db.Float, default=0.05)  # Tax rate (default 5%)
     tax_amount = db.Column(db.Float, default=0.0)  # Tax amount
@@ -287,6 +296,7 @@ class Order(db.Model):
     distributor_user = db.relationship('User', foreign_keys=[distributor_confirmed_by], backref='confirmed_orders')
     delivery_partner = db.relationship('User', foreign_keys=[delivery_partner_id], backref='assigned_orders')
     delivered_by_user = db.relationship('User', foreign_keys=[delivered_by], backref='delivered_orders')
+    created_by_user = db.relationship('User', foreign_keys=[created_by_id], backref='created_orders')
     
     def generate_order_id(self):
         """Generate unique order ID"""
@@ -304,6 +314,9 @@ class Order(db.Model):
             'order_id': self.order_id,
             'mr_unique_id': self.mr_unique_id,
             'customer_unique_id': self.customer_unique_id,
+            'created_by_role': self.created_by_role,
+            'created_by_id': self.created_by_id,
+            'created_by_unique_id': self.created_by_unique_id,
             'total_amount': self.total_amount,
             'status': self.status,
             'order_stage': self.order_stage,
