@@ -28,7 +28,7 @@ ORDER_STATUS_TRANSITIONS = {
 }
 
 class EnhancedOrderService:
-    """Enhanced order service for R&B (Powered by Quantum Blue AI) workflow"""
+    """Enhanced order service for HV (Powered by Quantum Blue AI) workflow"""
     
     def __init__(self):
         self.db_service = DatabaseService()
@@ -2823,7 +2823,7 @@ These products will be automatically ordered when new stock arrives. Track with 
             html_content = create_email_template(
                 title=f"🚚 Delivery Assignment - Order {order.order_id}",
                 content=content,
-                footer_text="R&B (Powered by Quantum Blue AI) - Professional Pharmaceutical Distribution System"
+                footer_text="HV (Powered by Quantum Blue AI) - Professional Pharmaceutical Distribution System"
             )
             
             send_email(
@@ -2952,7 +2952,7 @@ These products will be automatically ordered when new stock arrives. Track with 
                 html_content = create_email_template(
                     title="Order Delivered",
                     content=content,
-                    footer_text="Thank you for using R&B (Powered by Quantum Blue AI)."
+                    footer_text="Thank you for using HV (Powered by Quantum Blue AI)."
                 )
                 
                 send_email(
@@ -3004,6 +3004,26 @@ These products will be automatically ordered when new stock arrives. Track with 
         """Generate HTML invoice content"""
         recipient = "Distributor" if is_distributor else ("Admin" if is_admin else "Customer")
         
+        # Generate invoice number
+        invoice_number = self._generate_invoice(order)
+        
+        # Get status and stage with proper formatting
+        status_display = (order.status or 'Pending').replace('_', ' ').title()
+        stage_display = (order.order_stage or '').replace('_', ' ').title() if order.order_stage else ''
+        
+        # Determine status color
+        status_lower = (order.status or '').lower()
+        if 'confirm' in status_lower:
+            status_color = '#10b981'  # Green
+        elif 'deliver' in status_lower:
+            status_color = '#059669'  # Dark green
+        elif 'cancel' in status_lower:
+            status_color = '#ef4444'  # Red
+        elif 'complete' in status_lower:
+            status_color = '#3b82f6'  # Blue
+        else:
+            status_color = '#f59e0b'  # Orange for pending
+        
         items_html = ""
         for item in order_items:
             foc_qty = item.get('free_quantity', 0) or 0
@@ -3031,6 +3051,24 @@ These products will be automatically ordered when new stock arrives. Track with 
                 .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 8px; text-align: center; }}
                 .content {{ background: white; padding: 20px; border-radius: 8px; margin-top: 20px; }}
                 .invoice-details {{ background: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0; }}
+                .status-section {{
+                    background: #ffffff;
+                    padding: 15px;
+                    border-radius: 8px;
+                    margin: 15px 0;
+                    border-left: 4px solid {status_color};
+                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                }}
+                .status-badge {{
+                    display: inline-block;
+                    padding: 8px 16px;
+                    border-radius: 6px;
+                    font-weight: 600;
+                    font-size: 14px;
+                    color: white;
+                    background-color: {status_color};
+                    margin-left: 10px;
+                }}
                 table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
                 th, td {{ border: 1px solid #ddd; padding: 12px; text-align: left; }}
                 th {{ background-color: #f2f2f2; }}
@@ -3042,7 +3080,7 @@ These products will be automatically ordered when new stock arrives. Track with 
             <div class="container">
                 <div class="header">
                     <h1>🧾 Invoice Generated</h1>
-                    <p>R&B (Powered by Quantum Blue AI)</p>
+                    <p>HV (Powered by Quantum Blue AI)</p>
                 </div>
                 
                 <div class="content">
@@ -3051,10 +3089,14 @@ These products will be automatically ordered when new stock arrives. Track with 
                         <p><strong>Invoice Number:</strong> {invoice_number}</p>
                         <p><strong>Order ID:</strong> {order.order_id}</p>
                         <p><strong>Date:</strong> {order.created_at.strftime('%Y-%m-%d %H:%M:%S')}</p>
-                        <p><strong>Status:</strong> {order.status.title()}</p>
                         <p><strong>Area:</strong> {order.mr.area if order.mr else 'N/A'}</p>
                         <p><strong>Customer:</strong> {customer.name if customer else 'N/A'}</p>
                         <p><strong>Distributor:</strong> {distributor.name if distributor else 'N/A'}</p>
+                    </div>
+                    
+                    <div class="status-section">
+                        <p style="margin: 0 0 10px 0;"><strong>Order Status:</strong> <span class="status-badge">{status_display}</span></p>
+                        {f'<p style="margin: 0;"><strong>Order Stage:</strong> {stage_display}</p>' if stage_display else ''}
                     </div>
                     
                     <h3>Order Items</h3>
@@ -3080,7 +3122,7 @@ These products will be automatically ordered when new stock arrives. Track with 
                     </div>
                     
                     <div class="footer">
-                        <p>This invoice has been automatically generated by R&B (Powered by Quantum Blue AI) system.</p>
+                        <p>This invoice has been automatically generated by HV (Powered by Quantum Blue AI) system.</p>
                         <p>Thank you for your business!</p>
                     </div>
                 </div>

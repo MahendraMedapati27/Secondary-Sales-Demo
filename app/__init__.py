@@ -79,12 +79,12 @@ def create_app(config_class=Config):
     
     @app.route('/favicon.ico')
     def favicon():
-        """Serve the R&B logo as favicon"""
+        """Serve the HV logo as favicon"""
         from flask import send_from_directory
         import os
         return send_from_directory(
             os.path.join(app.static_folder, 'Images'),
-            'R&B.jpg',
+            'HV.jpg',
             mimetype='image/jpeg'
         )
     

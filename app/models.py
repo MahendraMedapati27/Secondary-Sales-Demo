@@ -4,7 +4,7 @@ from app import db
 import uuid
 
 class User(UserMixin, db.Model):
-    """User model for R&B - Dealers and MRs"""
+    """User model for HV - Dealers and MRs"""
     __tablename__ = 'users'
     
     id = db.Column(db.Integer, primary_key=True)

@@ -140,7 +140,7 @@ class WebSearchService:
                 else:
                     # For other queries, provide domain restriction message
                     return {
-                        'synthesized_response': f"🔒 **Search Restriction:** I can only extract information from these approved websites:\n\n• **investopedia.com** - Financial education and information\n• **financialservices.gov.in** - Government financial services\n• **highvolt.tech** - R&B business services and solutions\n\nPlease ask about information from one of these websites, or specify which website you'd like me to search.",
+                        'synthesized_response': f"🔒 **Search Restriction:** I can only extract information from these approved websites:\n\n• **investopedia.com** - Financial education and information\n• **financialservices.gov.in** - Government financial services\n• **highvolt.tech** - HV business services and solutions\n\nPlease ask about information from one of these websites, or specify which website you'd like me to search.",
                         'search_results': [],
                         'sources_used': []
                     }
@@ -152,10 +152,10 @@ class WebSearchService:
     
     def _handle_highvolt_client_query(self, user_message, search_results):
         """
-        Special handling for R&B client queries with enhanced extraction
+        Special handling for HV client queries with enhanced extraction
         """
         try:
-            # Look for R&B homepage content specifically
+            # Look for HV homepage content specifically
             highvolt_content = ""
             client_names_found = []
             
@@ -163,15 +163,15 @@ class WebSearchService:
                 if 'highvolt.tech' in result.get('url', '') or 'highvolt' in result.get('title', '').lower():
                     highvolt_content += result.get('content', '')
                     if hasattr(self, 'logger') and self.logger:
-                        self.logger.info(f"Found R&B content: {result.get('content', '')[:200]}...")
+                        self.logger.info(f"Found HV content: {result.get('content', '')[:200]}...")
             
             # Check if we have sufficient content to extract client information
             if len(highvolt_content) < 500:  # If we don't have enough content
                 if hasattr(self, 'logger') and self.logger:
-                    self.logger.info(f"Insufficient R&B content from search ({len(highvolt_content)} chars), using enhanced fallback")
+                    self.logger.info(f"Insufficient HV content from search ({len(highvolt_content)} chars), using enhanced fallback")
                 return self._get_enhanced_highvolt_fallback(user_message)
             
-            # Use enhanced synthesis for R&B content
+            # Use enhanced synthesis for HV content
             if highvolt_content:
                 synthesized_response = self._synthesize_highvolt_clients(user_message, highvolt_content, search_results)
             else:
@@ -186,12 +186,12 @@ class WebSearchService:
             
         except Exception as e:
             if hasattr(self, 'logger') and self.logger:
-                self.logger.error(f"R&B client query handling error: {str(e)}")
+                self.logger.error(f"HV client query handling error: {str(e)}")
             return self._get_enhanced_highvolt_fallback(user_message)
     
     def _synthesize_highvolt_clients(self, user_message, highvolt_content, search_results):
         """
-        Enhanced synthesis specifically for R&B client information
+        Enhanced synthesis specifically for HV client information
         """
         try:
             from app.groq_service import GroqService
@@ -206,11 +206,11 @@ class WebSearchService:
                 if 'highvolt.tech' in result.get('url', '') or 'highvolt' in result.get('title', '').lower():
                     all_content += "\n\n" + result.get('content', '')
             
-            synthesis_prompt = f"""You are analyzing R&B's website content to find their clients and customers. Based on the following comprehensive content from their website, extract and list ALL client names, company names, or business partners mentioned.
+            synthesis_prompt = f"""You are analyzing HV's website content to find their clients and customers. Based on the following comprehensive content from their website, extract and list ALL client names, company names, or business partners mentioned.
 
 User Query: "{user_message}"
 
-R&B Website Content (Complete):
+HV Website Content (Complete):
 {all_content[:4000]}
 
 Instructions:
@@ -252,15 +252,15 @@ Respond in a helpful, professional manner with a comprehensive list of all clien
             
         except Exception as e:
             if hasattr(self, 'logger') and self.logger:
-                self.logger.error(f"R&B synthesis error: {str(e)}")
+                self.logger.error(f"HV synthesis error: {str(e)}")
             return self._get_fallback_synthesis(search_results)
     
     def _get_enhanced_highvolt_fallback(self, user_message):
         """
-        Enhanced fallback specifically for R&B client information using dynamic extraction
+        Enhanced fallback specifically for HV client information using dynamic extraction
         """
         try:
-            # Use MCP-based dynamic extraction from R&B website
+            # Use MCP-based dynamic extraction from HV website
             extracted_data = self._extract_highvolt_clients_dynamically()
             return {
                 'synthesized_response': extracted_data,
@@ -271,7 +271,7 @@ Respond in a helpful, professional manner with a comprehensive list of all clien
             if hasattr(self, 'logger') and self.logger:
                 self.logger.error(f"Dynamic extraction failed: {str(e)}")
             return {
-                'synthesized_response': "I apologize, but I'm unable to access the complete client information from the R&B website at this time. The web search results don't contain sufficient details about their specific clients and business partners. For the most current and complete client list, I recommend visiting the R&B website directly at highvolt.tech or contacting them directly.",
+                'synthesized_response': "I apologize, but I'm unable to access the complete client information from the HV website at this time. The web search results don't contain sufficient details about their specific clients and business partners. For the most current and complete client list, I recommend visiting the HV website directly at highvolt.tech or contacting them directly.",
                 'search_results': [],
                 'sources_used': []
             }
@@ -283,7 +283,7 @@ Respond in a helpful, professional manner with a comprehensive list of all clien
         query_lower = query.lower()
         user_message_lower = user_message.lower()
         
-        # R&B client information fallback
+        # HV client information fallback
         if any(keyword in user_message_lower for keyword in ['highvolt', 'high volt', 'r&b', 'rb']):
             return self._get_enhanced_highvolt_fallback(user_message)
         
@@ -362,7 +362,7 @@ For client/customer queries specifically:
 - Look for logos, company names, client testimonials, case studies
 - Check for "Our Clients", "Customers", "Partners" sections
 - Look for any company names mentioned in the content
-- Pay special attention to the R&B homepage content which may contain client logos or names
+- Pay special attention to the HV homepage content which may contain client logos or names
 - Look for phrases like "trusted business partners", "clients", "customers"
 - Check for any company names that appear in the content
 - Look for visual elements, logos, or brand names
@@ -413,7 +413,7 @@ Respond in a helpful, professional manner with a comprehensive list of all clien
     
     def _extract_highvolt_clients_dynamically(self):
         """
-        Dynamically extract client information from R&B website using MCP extraction service
+        Dynamically extract client information from HV website using MCP extraction service
         """
         try:
             from app.mcp_extraction_service import MCPExtractionService
@@ -432,7 +432,7 @@ Respond in a helpful, professional manner with a comprehensive list of all clien
         except Exception as e:
             if hasattr(self, 'logger') and self.logger:
                 self.logger.error(f"MCP extraction error: {str(e)}")
-            return "I was unable to dynamically extract client information from the R&B website. Please visit highvolt.tech directly for the most current client information."
+            return "I was unable to dynamically extract client information from the HV website. Please visit highvolt.tech directly for the most current client information."
     
     def _extract_website_url(self, user_message_lower):
         """Extract website URL from user message"""
@@ -462,7 +462,7 @@ Respond in a helpful, professional manner with a comprehensive list of all clien
             mcp_service = MCPExtractionService()
             if not mcp_service._is_allowed_domain(website_url):
                 return {
-                    'synthesized_response': f"❌ **Domain Restriction:** I can only extract information from these allowed websites:\n\n• investopedia.com\n• financialservices.gov.in\n• highvolt.tech (R&B)\n\nPlease ask about information from one of these websites.",
+                    'synthesized_response': f"❌ **Domain Restriction:** I can only extract information from these allowed websites:\n\n• investopedia.com\n• financialservices.gov.in\n• highvolt.tech (HV)\n\nPlease ask about information from one of these websites.",
                     'search_results': [],
                     'sources_used': []
                 }

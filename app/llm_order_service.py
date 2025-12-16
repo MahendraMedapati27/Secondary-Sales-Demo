@@ -62,7 +62,7 @@ class LLMOrderService:
             # Generate dynamic examples from actual products
             dynamic_examples = self._generate_dynamic_examples(products[:3]) if len(products) >= 3 else ""
             
-            extraction_prompt = f"""You are an AI assistant for R&B (Powered by Quantum Blue AI) that extracts product orders from user messages.
+            extraction_prompt = f"""You are an AI assistant for HV (Powered by Quantum Blue AI) that extracts product orders from user messages.
 
 CRITICAL EXTRACTION RULES:
 1. Extract quantities EXACTLY as written in the user's message - do NOT multiply, add, or modify numbers
@@ -619,7 +619,7 @@ User Information:
             tax_amount = total_amount * tax_rate
             grand_total = total_amount + tax_amount
 
-            summary_prompt = f"""You are Quantum Blue's AI assistant generating a concise order summary for R&B (Powered by Quantum Blue AI).
+            summary_prompt = f"""You are Quantum Blue's AI assistant generating a concise order summary for HV (Powered by Quantum Blue AI).
 
 Order Details Table (THIS TABLE HAS EXACTLY {row_count} ROWS - YOU MUST INCLUDE ALL {row_count} ROWS):
 {pricing_info}
@@ -792,7 +792,7 @@ Order Stage: {order.order_stage}
 Please review this order and confirm if the products and quantities are correct.
 You can accept or modify the order as needed."""
 
-            notification_prompt = f"""You are Quantum Blue's AI assistant generating a distributor notification for R&B (Powered by Quantum Blue AI).
+            notification_prompt = f"""You are Quantum Blue's AI assistant generating a distributor notification for HV (Powered by Quantum Blue AI).
 
 Order Details:
 {order_details}

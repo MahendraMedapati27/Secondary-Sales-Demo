@@ -31,7 +31,7 @@ class MCPExtractionService:
         try:
             # Check if the URL is from an allowed domain
             if not self._is_allowed_domain(url):
-                return {'error': f'Domain not allowed. Only these domains are permitted: investopedia.com, financialservices.gov.in, highvolt.tech (R&B)', 'url': url}
+                return {'error': f'Domain not allowed. Only these domains are permitted: investopedia.com, financialservices.gov.in, highvolt.tech (HV)', 'url': url}
             
             # Fetch the webpage
             page_data = self._fetch_page(url)
@@ -91,7 +91,7 @@ class MCPExtractionService:
     
     def extract_highvolt_clients(self) -> Dict[str, Any]:
         """
-        Extract client information from R&B website using MCP approach
+        Extract client information from HV website using MCP approach
         """
         try:
             # Fetch the main page
@@ -122,7 +122,7 @@ class MCPExtractionService:
             return clients_data
             
         except Exception as e:
-            self.logger.error(f"Error extracting R&B clients: {str(e)}")
+            self.logger.error(f"Error extracting HV clients: {str(e)}")
             return {'error': str(e)}
     
     def _fetch_page(self, url: str) -> BeautifulSoup:
@@ -544,7 +544,7 @@ class MCPExtractionService:
         if 'error' in clients_data:
             return f"I encountered an error while extracting client information: {clients_data['error']}"
         
-        response = "Based on my dynamic analysis of R&B's website, here is the client information I found:\n\n"
+        response = "Based on my dynamic analysis of HV's website, here is the client information I found:\n\n"
         
         # Companies - clean up and remove duplicates
         companies = clients_data.get('companies', [])

@@ -2669,15 +2669,25 @@ function addProductSelectionForm(products, showChangeCustomer = false) {
                 <div class="mb-3" style="max-height: 300px; overflow-y: auto; border: 1px solid #e5e7eb; border-radius: 12px;">
                     <table class="table table-sm table-hover mb-0" style="font-size: 0.85rem;">
                         <thead class="table-light" style="position: sticky; top: 0; z-index: 10;">
-                            <tr><th style="padding: 10px;">Product</th><th style="padding: 10px;">Price</th><th style="padding: 10px;">Qty</th></tr>
+                            <tr><th style="padding: 10px;">Product</th><th style="padding: 10px;">Price</th><th style="padding: 10px;">Avail</th><th style="padding: 10px;">Qty</th></tr>
                         </thead>
                         <tbody id="productTableBody">
     `;
     products.forEach(p => {
-        formHTML += `<tr class="product-row" data-product-code="${p.product_code}" data-product-name="${p.product_name.replace(/"/g, '&quot;')}" data-search-text="${(p.product_name+p.product_code).toLowerCase()}" data-price="${p.sales_price}">
+        const focSchemesJson = JSON.stringify(p.foc_schemes || []);
+        const escapedProductName = p.product_name.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        formHTML += `<tr class="product-row" data-product-code="${p.product_code}" data-product-name="${escapedProductName}" data-search-text="${(p.product_name+p.product_code).toLowerCase()}" data-price="${p.sales_price}">
             <td style="padding: 10px;"><div class="text-wrap fw-bold" style="word-break: break-word;">${p.product_name}</div></td>
             <td style="padding: 10px; color: #059669;">${p.sales_price.toLocaleString()}</td>
-            <td style="padding: 10px;"><input type="number" class="form-control form-control-sm product-quantity-input" style="min-width: 60px; text-align: center;" id="qty_${p.product_code}" min="0" max="${p.available_for_sale}" value="0" oninput="updateSelectedProductsCount()"></td>
+            <td style="padding: 10px;"><span class="badge bg-light text-dark border">${p.available_for_sale}</span></td>
+            <td style="padding: 10px;">
+                <input type="number" class="form-control form-control-sm product-quantity-input" style="min-width: 60px; text-align: center;" id="qty_${p.product_code}" min="0" max="${p.available_for_sale}" value="0" 
+                       data-product-code="${p.product_code}" 
+                       data-product-name="${escapedProductName}" 
+                       data-foc-schemes='${focSchemesJson}'
+                       oninput="updateSelectedProductsCount(); checkFOCNotification(this);">
+                <div id="foc-notification-${p.product_code}" style="display: none; font-size: 0.75rem; margin-top: 4px; padding: 4px 6px; border-radius: 4px; background: rgba(16, 185, 129, 0.1); color: #059669; font-weight: 500;"></div>
+            </td>
         </tr>`;
     });
     formHTML += `</tbody></table></div>
@@ -4599,16 +4609,103 @@ function displayDistributorOrderDetails(order) {
                     const confirmOrderText = t_func('buttons.confirmOrder');
                     const rejectOrderText = t_func('buttons.rejectOrder');
                     
-                    // -- Simplified Edit Form for Distributor --
+                    // -- Complete Edit Form for Distributor --
                     const editFormContainer = document.createElement('div');
                     editFormContainer.className = 'order-edit-form mt-3 mb-3';
                     editFormContainer.style.cssText = 'width: 100%; animation: slideInFromBottom 0.3s ease-out;';
                     
+                    const editOrderItemsLabel = t_func('labels.editOrderItems') || 'Edit Order Items (Optional)';
+                    const adjustQuantitiesInfo = t_func('labels.adjustQuantitiesInfo') || 'You can adjust quantities, lot numbers, and expiry dates before confirming. Reduced quantities will be moved to pending orders.';
+                    
                     let formHTML = `
                         <div class="card border-0 shadow-sm" style="background: rgba(255, 255, 255, 0.98); border-radius: 12px; padding: 20px;">
                             <h6 class="mb-3" style="color: #2563eb; font-weight: 600;">
-                                <i class="fas fa-edit me-2"></i>Action Required
+                                <i class="fas fa-edit me-2"></i>${editOrderItemsLabel}
                             </h6>
+                            <p class="text-muted mb-3" style="font-size: 0.875rem;">
+                                <i class="fas fa-info-circle me-1"></i>${adjustQuantitiesInfo}
+                            </p>
+                            
+                            <form id="orderEditForm_${order.order_id}">
+                                ${order.items.map(item => {
+                                    const itemId = item.id || item.item_id;
+                                    const originalQty = item.quantity || 0;
+                                    const focQty = item.free_quantity || 0;
+                                    const totalQty = originalQty + focQty;
+                                    const lotNumber = item.lot_number || '';
+                                    const expiryDate = item.expiry_date || '';
+                                    const adjustedQty = item.adjusted_quantity !== undefined ? item.adjusted_quantity : originalQty;
+                                    
+                                    return `
+                                        <div class="mb-3 p-3" style="background: #f8f9fa; border-radius: 8px; border-left: 4px solid #2563eb;">
+                                            <input type="hidden" name="item_id_${itemId}" value="${itemId}">
+                                            <h6 class="mb-2" style="color: #1e40af; font-weight: 600;">
+                                                <i class="fas fa-box me-2"></i>${item.product_name || 'Product'} (${item.product_code || 'N/A'})
+                                            </h6>
+                                            
+                                            <div class="mb-2">
+                                                <label class="form-label mb-1" style="font-weight: 500; font-size: 0.875rem;">
+                                                    ${t_func('labels.quantity') || 'Quantity'} (Ordered: ${originalQty}${focQty > 0 ? ' + ' + focQty + ' FOC' : ''} = ${totalQty})
+                                                </label>
+                                                <input type="number" class="form-control form-control-sm" 
+                                                       id="qty_${itemId}" 
+                                                       name="quantity_${itemId}"
+                                                       min="0" 
+                                                       max="${originalQty}"
+                                                       value="${adjustedQty}"
+                                                       style="border-radius: 6px; border: 1px solid #d1d5db;">
+                                                <small class="text-muted" style="font-size: 0.75rem;">
+                                                    ${t_func('labels.adjustQuantityInfo') || 'Adjust if different from ordered quantity. Cannot increase above ordered amount.'}
+                                                </small>
+                                            </div>
+                                            
+                                            <div class="mb-2">
+                                                <label class="form-label mb-1" style="font-weight: 500; font-size: 0.875rem;">
+                                                    <i class="fas fa-barcode me-1"></i>${t_func('labels.lotNumber') || 'Lot Number'}
+                                                </label>
+                                                <input type="text" class="form-control form-control-sm" 
+                                                       id="lot_${itemId}" 
+                                                       name="lot_${itemId}"
+                                                       value="${lotNumber}"
+                                                       placeholder="${t_func('labels.enterLotNumber') || 'Enter lot/batch number'}"
+                                                       style="border-radius: 6px; border: 1px solid #d1d5db;">
+                                                <small class="text-muted" style="font-size: 0.75rem;">
+                                                    ${t_func('labels.lotNumberInfo') || 'Optional: Lot/Batch number for this item'}
+                                                </small>
+                                            </div>
+                                            
+                                            <div class="mb-2">
+                                                <label class="form-label mb-1" style="font-weight: 500; font-size: 0.875rem;">
+                                                    <i class="fas fa-calendar-alt me-1"></i>${t_func('labels.expiryDate') || 'Expiry Date'}
+                                                </label>
+                                                <input type="date" class="form-control form-control-sm" 
+                                                       id="expiry_${itemId}" 
+                                                       name="expiry_${itemId}"
+                                                       value="${expiryDate}"
+                                                       min="${new Date().toISOString().split('T')[0]}"
+                                                       style="border-radius: 6px; border: 1px solid #d1d5db;">
+                                                <small class="text-muted" style="font-size: 0.75rem;">
+                                                    ${t_func('labels.expiryDateInfo') || 'Select expiry date for this item'}
+                                                </small>
+                                            </div>
+                                            
+                                            <div class="mb-0">
+                                                <label class="form-label mb-1" style="font-weight: 500; font-size: 0.875rem;">
+                                                    <i class="fas fa-comment-alt me-1"></i>${t_func('labels.reason') || 'Reason'}
+                                                </label>
+                                                <input type="text" class="form-control form-control-sm" 
+                                                       id="reason_${itemId}" 
+                                                       name="reason_${itemId}"
+                                                       value="${item.adjustment_reason || ''}"
+                                                       placeholder="${t_func('labels.reasonForAdjustment') || 'Reason for adjustment (optional)'}"
+                                                       style="border-radius: 6px; border: 1px solid #d1d5db;">
+                                                <small class="text-muted" style="font-size: 0.75rem;">
+                                                    ${t_func('labels.reasonInfo') || 'Optional: Reason for quantity/date/lot change'}
+                                                </small>
+                                            </div>
+                                        </div>
+                                    `;
+                                }).join('')}
                             
                             <div class="mb-4 p-3" style="background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%); border-radius: 12px; border: 2px solid #fbbf24;">
                                 <label class="form-label mb-2" style="font-weight: 600; color: #92400e;">
@@ -4624,26 +4721,23 @@ function displayDistributorOrderDetails(order) {
                                         <i class="fas fa-plus me-2"></i>Add New
                                     </button>
                                 </div>
+                                    <small class="text-muted" style="font-size: 0.75rem; display: block; margin-top: 6px;">
+                                        <i class="fas fa-info-circle me-1"></i>Delivery partner is required to confirm the order
+                                    </small>
                             </div>
 
                             <div class="d-flex gap-2 mt-3 flex-column flex-sm-row">
-                                <button type="button" class="btn btn-success w-100" 
+                                    <button type="button" class="btn btn-success flex-grow-1" 
                                     onclick="confirmOrderWithEdits('${order.order_id}')"
                                     style="border-radius: 8px; padding: 10px; font-weight: 600;">
                                     <i class="fas fa-check-circle me-2"></i>${confirmOrderText}
                                 </button>
-                                <button type="button" class="btn btn-outline-danger w-100" 
+                                    <button type="button" class="btn btn-outline-danger" 
                                     onclick="rejectOrderAction('${order.order_id}')"
                                     style="border-radius: 8px; padding: 10px; font-weight: 600;">
                                     <i class="fas fa-times-circle me-2"></i>${rejectOrderText}
                                 </button>
                             </div>
-                            
-                            <form id="orderEditForm_${order.order_id}">
-                                ${order.items.map(item => `
-                                    <input type="hidden" name="item_id_${item.id || item.item_id}" value="${item.id || item.item_id}">
-                                    <input type="hidden" id="qty_${item.id || item.item_id}" value="${item.quantity || 0}">
-                                `).join('')}
                             </form>
                         </div>
                     `;
@@ -5672,14 +5766,9 @@ function checkFOCNotification(inputElement) {
         console.warn('Error parsing FOC schemes:', e);
     }
     
-    // First, find the best/highest scheme that quantity qualifies for
-    let bestActiveScheme = null;
-    let bestThreshold = 0;
-    
-    // Also track closest upcoming scheme (next tier above current quantity)
-    let closestScheme = null;
-    let minDistance = Infinity;
-    let nextTierScheme = null; // The next higher tier scheme
+    // Find ALL schemes that quantity qualifies for (not just the best one)
+    const activeSchemes = [];
+    const upcomingSchemes = [];
     
     // Sort schemes by buy quantity (ascending) to check from lowest to highest
     const sortedSchemes = focSchemes
@@ -5687,60 +5776,62 @@ function checkFOCNotification(inputElement) {
             if (scheme) {
                 const buyQty = parseInt(scheme.buy_quantity || scheme.buy || 0);
                 const freeQty = parseInt(scheme.free_quantity || scheme.free || 0);
-                return { buyQty, freeQty, scheme };
+                const schemeNumber = parseInt(scheme.scheme_number || 0);
+                return { buyQty, freeQty, schemeNumber, scheme };
             }
             return null;
         })
         .filter(s => s && s.buyQty > 0)
         .sort((a, b) => a.buyQty - b.buyQty); // Sort ascending
     
-    for (const { buyQty, freeQty } of sortedSchemes) {
-        // If quantity qualifies for this scheme, check if it's better than current best
-        if (quantity >= buyQty && buyQty > bestThreshold) {
-            bestThreshold = buyQty;
-            bestActiveScheme = { buyQty, freeQty };
-        }
-        
-        // Check if this is the next tier above current quantity
-        const distance = buyQty - quantity;
-        if (distance > 0) {
-            // If this is closer than previous closest, or if we haven't found next tier yet
-            if (distance < minDistance) {
-                minDistance = distance;
-                closestScheme = { buyQty, freeQty, distance };
-            }
-            // Track the next tier (first scheme above current quantity)
-            if (!nextTierScheme && distance > 0) {
-                nextTierScheme = { buyQty, freeQty, distance };
-            }
+    for (const { buyQty, freeQty, schemeNumber } of sortedSchemes) {
+        // If quantity qualifies for this scheme, add it to active schemes
+        if (quantity >= buyQty) {
+            const sets = Math.floor(quantity / buyQty);
+            const totalFree = sets * freeQty;
+            const totalQty = quantity + totalFree;
+            activeSchemes.push({ buyQty, freeQty, schemeNumber, sets, totalFree, totalQty });
+        } else {
+            // This scheme is not yet reached - add to upcoming schemes
+            const distance = buyQty - quantity;
+            upcomingSchemes.push({ buyQty, freeQty, schemeNumber, distance });
         }
     }
     
-    // Show the best active scheme if quantity qualifies for any
-    if (bestActiveScheme) {
-        notificationDiv.innerHTML = `<i class="fas fa-gift me-1"></i>FOC Active: Buy ${bestActiveScheme.buyQty} Get ${bestActiveScheme.freeQty} Free!`;
+    // Build HTML to show active schemes and upcoming schemes
+    if (activeSchemes.length > 0 || (upcomingSchemes.length > 0 && upcomingSchemes[0].distance <= 20)) {
+        let html = '';
+        
+        // Show all active schemes
+        activeSchemes.forEach((scheme, index) => {
+            const schemeLabel = scheme.schemeNumber ? `Scheme ${scheme.schemeNumber}` : 'FOC';
+            if (index > 0) {
+                html += '<div style="margin-top: 6px; padding-top: 6px; border-top: 1px solid rgba(16, 185, 129, 0.3);"></div>';
+            }
+            html += `<div style="margin-bottom: ${(index < activeSchemes.length - 1 || upcomingSchemes.length > 0) ? '6px' : '0'};">
+                <i class="fas fa-gift me-1"></i><strong>${schemeLabel} Active:</strong> Buy ${scheme.buyQty} Get ${scheme.freeQty} Free! You'll get <strong>${scheme.totalFree} FREE</strong> → Total: <strong>${scheme.totalQty} units</strong>
+            </div>`;
+        });
+        
+        // Show next upcoming scheme (if within reasonable distance)
+        if (upcomingSchemes.length > 0) {
+            const nextScheme = upcomingSchemes[0]; // First one is the next tier
+            if (nextScheme.distance <= 20) {
+                if (activeSchemes.length > 0) {
+                    html += '<div style="margin-top: 6px; padding-top: 6px; border-top: 1px solid rgba(245, 158, 11, 0.3);"></div>';
+                }
+                const schemeLabel = nextScheme.schemeNumber ? `Scheme ${nextScheme.schemeNumber}` : 'FOC';
+                const color = nextScheme.distance <= 5 ? '#f59e0b' : '#3b82f6';
+                html += `<div style="color: ${color};">
+                    <i class="fas fa-info-circle me-1"></i>Add <strong>${nextScheme.distance}</strong> more to get <strong>${schemeLabel}:</strong> Buy ${nextScheme.buyQty} Get ${nextScheme.freeQty} Free!
+                </div>`;
+            }
+        }
+        
+        notificationDiv.innerHTML = html;
         notificationDiv.style.display = 'block';
         notificationDiv.style.color = '#059669';
-    }
-    // Otherwise, show notification if close to an upcoming scheme (within 5 units) or show next tier
-    else if (closestScheme) {
-        if (closestScheme.distance <= 5) {
-            // Close to a scheme (within 5 units)
-            notificationDiv.innerHTML = `<i class="fas fa-info-circle me-1"></i>Add ${closestScheme.distance} more to get FOC: Buy ${closestScheme.buyQty} Get ${closestScheme.freeQty} Free!`;
-            notificationDiv.style.display = 'block';
-            notificationDiv.style.color = '#f59e0b';
-        } else if (nextTierScheme) {
-            // Show next tier even if further away (but limit to reasonable distance)
-            if (nextTierScheme.distance <= 20) {
-                notificationDiv.innerHTML = `<i class="fas fa-info-circle me-1"></i>Add ${nextTierScheme.distance} more for better FOC: Buy ${nextTierScheme.buyQty} Get ${nextTierScheme.freeQty} Free!`;
-                notificationDiv.style.display = 'block';
-                notificationDiv.style.color = '#3b82f6';
-            } else {
-                notificationDiv.style.display = 'none';
-            }
-        } else {
-            notificationDiv.style.display = 'none';
-        }
+        notificationDiv.style.background = 'rgba(16, 185, 129, 0.15)';
     } else {
         notificationDiv.style.display = 'none';
     }
@@ -6588,26 +6679,152 @@ function setupKeyboardNavigation() {
 }
 
 // Print Functionality
-function printOrder(orderId) {
+async function printOrder(orderId) {
     try {
-        // Find the order element
-        const orderElement = document.querySelector(`[data-order-id="${orderId}"]`);
+        // Fetch order data from API for accurate information
+        const response = await fetch('/enhanced-chat/select_order', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ order_id: orderId })
+        });
         
-        if (!orderElement) {
-            showToast('Order details not found', 'error');
-            return;
+        let orderData = null;
+        let orderStatus = 'Pending';
+        let orderStage = '';
+        let orderItems = [];
+        let orderInfo = {};
+        
+        if (response.ok) {
+            const data = await response.json();
+            if (data.success && data.order) {
+                orderData = data.order;
+                orderStatus = (orderData.status_display || orderData.status || 'Pending').replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase());
+                orderStage = (orderData.order_stage || '').replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase());
+                orderItems = orderData.items || [];
+                orderInfo = {
+                    order_id: orderData.order_id,
+                    order_date: orderData.order_date || orderData.order_datetime || 'N/A',
+                    placed_by: orderData.placed_by_display || 'N/A',
+                    email: orderData.mr_email || 'N/A',
+                    phone: orderData.mr_phone || 'N/A',
+                    area: orderData.area || 'N/A',
+                    customer: orderData.customer_name || 'N/A',
+                    delivery: orderData.delivery_partner_name || 'N/A',
+                    subtotal: orderData.subtotal || 0,
+                    tax_amount: orderData.tax_amount || 0,
+                    total_amount: orderData.total_amount || 0
+                };
+            }
         }
         
-        // Clone the element to avoid modifying the original
-        const clone = orderElement.cloneNode(true);
+        // Fallback: Try to extract from DOM if API fails
+        if (!orderData) {
+            const orderElement = document.querySelector(`[data-order-id="${orderId}"]`);
+            if (orderElement) {
+                const clone = orderElement.cloneNode(true);
+                clone.querySelectorAll('.action-buttons-container, .copy-btn, .no-print').forEach(el => el.remove());
+                
+                // Extract status from info table
+                const infoTables = clone.querySelectorAll('table');
+                infoTables.forEach(table => {
+                    const rows = table.querySelectorAll('tr');
+                    rows.forEach(row => {
+                        const cells = row.querySelectorAll('td');
+                        if (cells.length >= 2) {
+                            const label = cells[0].textContent.trim().toLowerCase();
+                            const value = cells[1].textContent.trim();
+                            if (label.includes('status') && !value.includes('<')) {
+                                orderStatus = value.replace(/<[^>]*>/g, '').trim() || 'Pending';
+                            } else if (label.includes('stage')) {
+                                orderStage = value.replace(/<[^>]*>/g, '').trim();
+                            }
+                        }
+                    });
+                });
+            }
+        }
         
-        // Remove action buttons and other non-printable elements
-        clone.querySelectorAll('.action-buttons-container, .copy-btn, .no-print').forEach(el => el.remove());
+        // Get status badge class for styling
+        const statusLower = orderStatus.toLowerCase();
+        let statusColor = '#f59e0b'; // Default orange for pending
+        if (statusLower.includes('confirm')) statusColor = '#10b981'; // Green
+        else if (statusLower.includes('deliver')) statusColor = '#059669'; // Dark green
+        else if (statusLower.includes('cancel')) statusColor = '#ef4444'; // Red
+        else if (statusLower.includes('complete')) statusColor = '#3b82f6'; // Blue
         
-        // Get order details from the DOM
-        const orderTitle = clone.querySelector('strong')?.textContent || `Order ${orderId}`;
-        const orderInfo = Array.from(clone.querySelectorAll('li, p')).map(el => el.textContent).join('\n');
-        const orderTable = clone.querySelector('.order-items-table')?.outerHTML || '';
+        // Build order items table HTML
+        let itemsTableHTML = '';
+        if (orderItems.length > 0) {
+            itemsTableHTML = `
+                <table style="width: 100%; border-collapse: collapse; margin: 20px 0; font-size: 12px;">
+                    <thead>
+                        <tr style="background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%); color: white;">
+                            <th style="border: 1px solid #ddd; padding: 10px; text-align: left; font-weight: 600;">Product Name</th>
+                            <th style="border: 1px solid #ddd; padding: 10px; text-align: center; font-weight: 600;">Qty</th>
+                            <th style="border: 1px solid #ddd; padding: 10px; text-align: center; font-weight: 600;">FOC</th>
+                            <th style="border: 1px solid #ddd; padding: 10px; text-align: right; font-weight: 600;">Unit Price</th>
+                            <th style="border: 1px solid #ddd; padding: 10px; text-align: right; font-weight: 600;">Total Price</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${orderItems.map((item, index) => {
+                            // Use quantity field (which is already adjusted_quantity if available from API)
+                            const qty = item.quantity || item.adjusted_quantity || item.original_quantity || 0;
+                            const focQty = item.free_quantity || 0;
+                            const unitPrice = item.unit_price || 0;
+                            const totalPrice = item.total_price || 0;
+                            return `
+                                <tr style="background-color: ${index % 2 === 0 ? '#f8f9fa' : '#ffffff'};">
+                                    <td style="border: 1px solid #ddd; padding: 10px;">${item.product_name || 'N/A'} (${item.product_code || 'N/A'})</td>
+                                    <td style="border: 1px solid #ddd; padding: 10px; text-align: center;">${qty}</td>
+                                    <td style="border: 1px solid #ddd; padding: 10px; text-align: center; color: #10b981;">${focQty > 0 ? `+${focQty}` : '-'}</td>
+                                    <td style="border: 1px solid #ddd; padding: 10px; text-align: right;">${unitPrice.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK</td>
+                                    <td style="border: 1px solid #ddd; padding: 10px; text-align: right; font-weight: 600;">${totalPrice.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK</td>
+                                </tr>
+                            `;
+                        }).join('')}
+                        ${orderInfo.tax_amount > 0 ? `
+                            <tr style="background-color: #f8f9fa;">
+                                <td colspan="4" style="border: 1px solid #ddd; padding: 10px; text-align: right; font-weight: 600;">Tax (5%):</td>
+                                <td style="border: 1px solid #ddd; padding: 10px; text-align: right; font-weight: 600;">${orderInfo.tax_amount.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK</td>
+                            </tr>
+                        ` : ''}
+                        <tr style="background-color: #e0e7ff;">
+                            <td colspan="4" style="border: 1px solid #ddd; padding: 10px; text-align: right; font-weight: 700; font-size: 14px;">Grand Total:</td>
+                            <td style="border: 1px solid #ddd; padding: 10px; text-align: right; font-weight: 700; font-size: 14px; color: #2563eb;">${orderInfo.total_amount.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} MMK</td>
+                        </tr>
+                    </tbody>
+                </table>
+            `;
+        } else {
+            // Fallback: Try to get table from DOM
+            const orderElement = document.querySelector(`[data-order-id="${orderId}"]`);
+            if (orderElement) {
+                const clone = orderElement.cloneNode(true);
+                const orderTable = clone.querySelector('.order-items-table');
+                if (orderTable) {
+                    itemsTableHTML = orderTable.outerHTML;
+                }
+            }
+        }
+        
+        // Build order info HTML
+        let orderInfoHTML = '';
+        if (orderInfo.order_id) {
+            orderInfoHTML = `
+                <div style="margin: 15px 0; line-height: 1.8;">
+                    <p><strong>Date:</strong> ${orderInfo.order_date}</p>
+                    <p><strong>Placed By:</strong> ${orderInfo.placed_by}</p>
+                    ${orderInfo.email !== 'N/A' ? `<p><strong>Email:</strong> ${orderInfo.email}</p>` : ''}
+                    ${orderInfo.phone !== 'N/A' ? `<p><strong>Phone:</strong> ${orderInfo.phone}</p>` : ''}
+                    <p><strong>Area:</strong> ${orderInfo.area}</p>
+                    <p><strong>Customer:</strong> ${orderInfo.customer}</p>
+                    ${orderInfo.delivery !== 'N/A' ? `<p><strong>Delivery:</strong> ${orderInfo.delivery}</p>` : ''}
+                </div>
+            `;
+        }
         
         // Create print window
         const printWindow = window.open('', '_blank');
@@ -6636,6 +6853,22 @@ function printOrder(orderId) {
                             color: #2563eb;
                             margin: 0 0 10px 0;
                             font-size: 24px;
+                        }
+                        .status-section {
+                            margin: 15px 0;
+                            padding: 12px;
+                            background: #f8f9fa;
+                            border-radius: 8px;
+                            border-left: 4px solid ${statusColor};
+                        }
+                        .status-badge {
+                            display: inline-block;
+                            padding: 6px 12px;
+                            border-radius: 6px;
+                            font-weight: 600;
+                            font-size: 14px;
+                            color: white;
+                            background-color: ${statusColor};
                         }
                         .order-info {
                             margin: 15px 0;
@@ -6683,15 +6916,18 @@ function printOrder(orderId) {
                 </head>
                 <body>
                     <div class="order-header">
-                        <h1>${orderTitle}</h1>
-                        <p style="color: #666; margin: 0;">Order ID: ${orderId}</p>
+                        <h1>Order ${orderId}</h1>
+                        <p style="color: #666; margin: 5px 0;">Order ID: ${orderId}</p>
+                        <div class="status-section">
+                            <strong style="color: #333; margin-right: 10px;">Status:</strong>
+                            <span class="status-badge">${orderStatus}</span>
+                            ${orderStage ? `<div style="margin-top: 8px;"><strong style="color: #333; margin-right: 10px;">Order Stage:</strong><span style="color: #666;">${orderStage}</span></div>` : ''}
+                        </div>
                     </div>
-                    <div class="order-info">
-                        ${orderInfo.replace(/\*\*/g, '').replace(/\n/g, '<br>')}
-                    </div>
-                    ${orderTable}
+                    ${orderInfoHTML}
+                    ${itemsTableHTML}
                     <div class="print-footer">
-                        <p>Generated by R&B (Powered by Quantum Blue AI)</p>
+                        <p>Generated by HV (Powered by Quantum Blue AI)</p>
                         <p>Printed on: ${new Date().toLocaleString()}</p>
                     </div>
                 </body>
@@ -8012,11 +8248,20 @@ function addDealerProductSelectionForm(products) {
                         <tbody id="dealerProductTableBody">
     `;
     products.forEach(p => {
-        formHTML += `<tr class="dealer-product-row" data-product-code="${p.product_code}" data-product-name="${p.product_name.replace(/"/g, '&quot;')}" data-search-text="${(p.product_name+p.product_code).toLowerCase()}" data-price="${p.sales_price}">
+        const focSchemesJson = JSON.stringify(p.foc_schemes || []);
+        const escapedProductName = p.product_name.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        formHTML += `<tr class="dealer-product-row" data-product-code="${p.product_code}" data-product-name="${escapedProductName}" data-search-text="${(p.product_name+p.product_code).toLowerCase()}" data-price="${p.sales_price}">
             <td style="padding: 10px;"><div class="text-wrap fw-bold" style="word-break: break-word;">${p.product_name}</div></td>
             <td style="padding: 10px; color: #059669;">${p.sales_price.toLocaleString()}</td>
             <td style="padding: 10px;"><span class="badge bg-light text-dark border">${p.available_for_sale}</span></td>
-            <td style="padding: 10px;"><input type="number" class="form-control form-control-sm dealer-product-quantity-input" style="min-width: 60px; text-align: center;" id="dealer_qty_${p.product_code}" min="0" max="${p.available_for_sale}" value="0" oninput="updateDealerSelectedProductsCount()"></td>
+            <td style="padding: 10px;">
+                <input type="number" class="form-control form-control-sm dealer-product-quantity-input" style="min-width: 60px; text-align: center;" id="dealer_qty_${p.product_code}" min="0" max="${p.available_for_sale}" value="0" 
+                       data-product-code="${p.product_code}" 
+                       data-product-name="${escapedProductName}" 
+                       data-foc-schemes='${focSchemesJson}'
+                       oninput="updateDealerSelectedProductsCount(); checkDealerFOCNotification(this);">
+                <div id="dealer-foc-notification-${p.product_code}" style="display: none; font-size: 0.75rem; margin-top: 4px; padding: 4px 6px; border-radius: 4px; background: rgba(16, 185, 129, 0.1); color: #059669; font-weight: 500;"></div>
+            </td>
         </tr>`;
     });
     formHTML += `</tbody></table></div>
@@ -8657,14 +8902,9 @@ function checkDealerFOCNotification(inputElement) {
         console.warn('Error parsing FOC schemes:', e);
     }
     
-    // Find the best/highest scheme that quantity qualifies for
-    let bestActiveScheme = null;
-    let bestThreshold = 0;
-    
-    // Track closest upcoming scheme and next tier
-    let closestScheme = null;
-    let minDistance = Infinity;
-    let nextTierScheme = null;
+    // Find ALL schemes that quantity qualifies for (not just the best one)
+    const activeSchemes = [];
+    const upcomingSchemes = [];
     
     // Sort schemes by buy quantity (ascending)
     const sortedSchemes = focSchemes
@@ -8672,52 +8912,63 @@ function checkDealerFOCNotification(inputElement) {
             if (scheme) {
                 const buyQty = parseInt(scheme.buy_quantity || scheme.buy || 0);
                 const freeQty = parseInt(scheme.free_quantity || scheme.free || 0);
-                return { buyQty, freeQty, scheme };
+                const schemeNumber = parseInt(scheme.scheme_number || 0);
+                return { buyQty, freeQty, schemeNumber, scheme };
             }
             return null;
         })
         .filter(s => s && s.buyQty > 0)
         .sort((a, b) => a.buyQty - b.buyQty);
     
-    for (const { buyQty, freeQty } of sortedSchemes) {
-        // If quantity qualifies for this scheme
-        if (quantity >= buyQty && buyQty > bestThreshold) {
-            bestThreshold = buyQty;
-            bestActiveScheme = { buyQty, freeQty };
-        }
-        
-        // Check if this is the next tier
-        const distance = buyQty - quantity;
-        if (distance > 0) {
-            if (distance < minDistance) {
-                minDistance = distance;
-                closestScheme = { buyQty, freeQty, distance };
-            }
-            if (!nextTierScheme && distance > 0) {
-                nextTierScheme = { buyQty, freeQty, distance };
-            }
+    for (const { buyQty, freeQty, schemeNumber } of sortedSchemes) {
+        // If quantity qualifies for this scheme, add it to active schemes
+        if (quantity >= buyQty) {
+            const sets = Math.floor(quantity / buyQty);
+            const totalFree = sets * freeQty;
+            const totalQty = quantity + totalFree;
+            activeSchemes.push({ buyQty, freeQty, schemeNumber, sets, totalFree, totalQty });
+        } else {
+            // This scheme is not yet reached - add to upcoming schemes
+            const distance = buyQty - quantity;
+            upcomingSchemes.push({ buyQty, freeQty, schemeNumber, distance });
         }
     }
     
-    // Show the best active scheme if quantity qualifies
-    if (bestActiveScheme) {
-        notificationDiv.innerHTML = `<i class="fas fa-gift me-1"></i>FOC Active: Buy ${bestActiveScheme.buyQty} Get ${bestActiveScheme.freeQty} Free!`;
+    // Build HTML to show active schemes and upcoming schemes
+    if (activeSchemes.length > 0 || (upcomingSchemes.length > 0 && upcomingSchemes[0].distance <= 20)) {
+        let html = '';
+        
+        // Show all active schemes
+        activeSchemes.forEach((scheme, index) => {
+            const schemeLabel = scheme.schemeNumber ? `Scheme ${scheme.schemeNumber}` : 'FOC';
+            if (index > 0) {
+                html += '<div style="margin-top: 6px; padding-top: 6px; border-top: 1px solid rgba(16, 185, 129, 0.3);"></div>';
+            }
+            html += `<div style="margin-bottom: ${(index < activeSchemes.length - 1 || upcomingSchemes.length > 0) ? '6px' : '0'};">
+                <i class="fas fa-gift me-1"></i><strong>${schemeLabel} Active:</strong> Buy ${scheme.buyQty} Get ${scheme.freeQty} Free! You'll get <strong>${scheme.totalFree} FREE</strong> → Total: <strong>${scheme.totalQty} units</strong>
+            </div>`;
+        });
+        
+        // Show next upcoming scheme (if within reasonable distance)
+        if (upcomingSchemes.length > 0) {
+            const nextScheme = upcomingSchemes[0]; // First one is the next tier
+            if (nextScheme.distance <= 20) {
+                if (activeSchemes.length > 0) {
+                    html += '<div style="margin-top: 6px; padding-top: 6px; border-top: 1px solid rgba(245, 158, 11, 0.3);"></div>';
+                }
+                const schemeLabel = nextScheme.schemeNumber ? `Scheme ${nextScheme.schemeNumber}` : 'FOC';
+                const color = nextScheme.distance <= 5 ? '#f59e0b' : '#3b82f6';
+                const bgColor = nextScheme.distance <= 5 ? 'rgba(245, 158, 11, 0.1)' : 'rgba(59, 130, 246, 0.1)';
+                html += `<div style="color: ${color};">
+                    <i class="fas fa-info-circle me-1"></i>Add <strong>${nextScheme.distance}</strong> more to get <strong>${schemeLabel}:</strong> Buy ${nextScheme.buyQty} Get ${nextScheme.freeQty} Free!
+                </div>`;
+            }
+        }
+        
+        notificationDiv.innerHTML = html;
         notificationDiv.style.display = 'block';
         notificationDiv.style.color = '#059669';
-    }
-    // Otherwise, show notification if close to a scheme or show next tier
-    else if (closestScheme) {
-        if (closestScheme.distance <= 5) {
-            notificationDiv.innerHTML = `<i class="fas fa-info-circle me-1"></i>Add ${closestScheme.distance} more to get FOC: Buy ${closestScheme.buyQty} Get ${closestScheme.freeQty} Free!`;
-            notificationDiv.style.display = 'block';
-            notificationDiv.style.color = '#f59e0b';
-        } else if (nextTierScheme && nextTierScheme.distance <= 20) {
-            notificationDiv.innerHTML = `<i class="fas fa-info-circle me-1"></i>Add ${nextTierScheme.distance} more for better FOC: Buy ${nextTierScheme.buyQty} Get ${nextTierScheme.freeQty} Free!`;
-            notificationDiv.style.display = 'block';
-            notificationDiv.style.color = '#3b82f6';
-        } else {
-            notificationDiv.style.display = 'none';
-        }
+        notificationDiv.style.background = 'rgba(16, 185, 129, 0.15)';
     } else {
         notificationDiv.style.display = 'none';
     }
